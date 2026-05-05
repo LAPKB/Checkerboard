@@ -1,0 +1,22 @@
+Package: Checkerboard
+Title: Checkerboard Interactions
+Version: 0.1
+Authors@R: 
+    person("Michael", "Neely", , "mneely@usc.edu", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0002-1675-8276"))
+Description: Calculates interactions for checkerboard data.
+License: GPL (>= 2)
+URL: http://lapk.org
+Encoding: UTF-8
+Language: es
+Imports:
+    tidyverse,
+    openxlsx,
+    plotly,
+    flextable,
+    R6,
+    grid,
+    gridExtra
+LazyData: TRUE
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
