@@ -1,0 +1,265 @@
+# Bliss Interaction Calculation Guide
+
+This document explains exactly how each term is calculated in the Bliss workflow.
+
+## Goal
+
+For a given drug combination, compute:
+
+$$
+\Delta_{\text{Bliss}} = E_{\text{obs}} - E_{\text{Bliss}}
+$$
+
+## Worked Example (2 Drugs, Synergy)
+
+Assume two drugs (A and B), each tested at concentrations:
+
+$$
+\{0, 1, 2, 4\}
+$$
+
+For simplicity, assume one OD value per concentration pair.
+
+### Example OD Grid
+
+Rows are drug A concentrations, columns are drug B concentrations.
+
+| A \ B | 0    | 1    | 2    | 4    |
+|------:|:-----|:-----|:-----|:-----|
+| 0     | 1.00 | 0.92 | 0.82 | 0.65 |
+| 1     | 0.90 | 0.80 | 0.68 | 0.50 |
+| 2     | 0.78 | 0.62 | 0.45 | 0.28 |
+| 4     | 0.60 | 0.42 | 0.25 | 0.10 |
+
+### Step A: Compute Control Mean
+
+Control is $(A=0, B=0)$, so:
+
+$$
+\overline{OD}_{ctrl} = 1.00
+$$
+
+### Step B: Convert OD to Effect
+
+Use:
+
+$$
+E = 1 - \frac{OD}{\overline{OD}_{ctrl}} = 1 - OD
+$$
+
+because $\overline{OD}_{ctrl}=1.00$.
+
+### Step C: Pick One Combination to Evaluate
+
+Evaluate $(A=2, B=2)$.
+
+#### 2 × 2 Concentration Diagram (for this Bliss calculation)
+
+|        | B = 0 | B = 2 |
+|:-------|:------|:------|
+| A = 0  | Control $(0,0)$ | B-alone $(0,2)$ |
+| A = 2  | A-alone $(2,0)$ | Combo $(2,2)$ |
+
+These four cells provide all terms needed for the two-drug Bliss equation.
+
+### Step D: Compute Each Required Term
+
+From the OD grid:
+
+- Control: $OD(0,0)=1.00$
+- A-alone at dose 2: $OD(2,0)=0.78$
+- B-alone at dose 2: $OD(0,2)=0.82$
+- Combo at $(2,2)$: $OD(2,2)=0.45$
+
+Convert each to effect:
+
+$$
+E_A = 1 - 0.78 = 0.22
+$$
+
+$$
+E_B = 1 - 0.82 = 0.18
+$$
+
+$$
+E_{\text{obs}} = 1 - 0.45 = 0.55
+$$
+
+### Step E: Compute Bliss Expected Effect
+
+Two-drug Bliss formula:
+
+$$
+E_{\text{Bliss}} = E_A + E_B - E_AE_B
+$$
+
+Plug in values:
+
+$$
+E_{\text{Bliss}} = 0.22 + 0.18 - (0.22 \times 0.18)
+$$
+
+$$
+E_{\text{Bliss}} = 0.40 - 0.0396 = 0.3604
+$$
+
+### Step F: Compute Bliss Interaction
+
+$$
+\Delta_{\text{Bliss}} = E_{\text{obs}} - E_{\text{Bliss}} = 0.55 - 0.3604 = 0.1896
+$$
+
+Since $\Delta_{\text{Bliss}} > 0$, this example shows **synergy** at $(A=2, B=2)$.
+
+### Optional Percent-Growth View (same example)
+
+If you want to express growth instead of inhibition effect:
+
+$$
+\%\,\text{Growth} = 100\times(1-E)
+$$
+
+For the combo $(2,2)$:
+
+$$
+\%\,\text{Growth}_{obs} = 100\times(1-0.55)=45\%
+$$
+
+and expected (Bliss):
+
+$$
+\%\,\text{Growth}_{Bliss} = 100\times(1-0.3604)=63.96\%
+$$
+
+Observed growth is lower than expected growth, consistent with synergy.
+
+where:
+
+- $E_{\text{obs}}$ is the observed combination effect.
+- $E_{\text{Bliss}}$ is the expected effect under Bliss independence.
+
+For two drugs A and B:
+
+$$
+E_{\text{Bliss}} = E_A + E_B - E_AE_B
+$$
+
+## Variable Definitions
+
+- $OD_i$: optical density measured in row $i$.
+- $C$: set of control rows where all drug concentrations are 0.
+- $\overline{OD}_{ctrl}$: mean control OD.
+- $E_i^{raw}$: raw inhibition effect for row $i$.
+- $E_i$: clipped inhibition effect for row $i$.
+- $\mathbf{d}$: concentration vector for a row (for 2 drugs, $\mathbf{d}=(d_A,d_B)$).
+- $\bar E(\mathbf{d})$: mean effect across replicates at concentration combination $\mathbf{d}$.
+- $E_A$: single-agent effect of drug A at dose $d_A$ with all other drugs at 0.
+- $E_B$: single-agent effect of drug B at dose $d_B$ with all other drugs at 0.
+- $E_{\text{obs}}$: observed effect for the combination $(d_A,d_B)$.
+- $E_{\text{Bliss}}$: Bliss-expected effect for $(d_A,d_B)$.
+- $\Delta_{\text{Bliss}}$: interaction score.
+
+## Step 1: Compute Control Mean
+
+Identify all control rows (all drug concentrations equal 0), then compute:
+
+$$
+\overline{OD}_{ctrl} = \frac{1}{|C|}\sum_{i\in C} OD_i
+$$
+
+This is the baseline (untreated growth).
+
+## Step 2: Convert OD to Effect
+
+For each row $i$:
+
+$$
+E_i^{raw} = 1 - \frac{OD_i}{\overline{OD}_{ctrl}}
+$$
+
+Then clamp to $[0,1]$:
+
+$$
+E_i = \min\left(1,\max(0,E_i^{raw})\right)
+$$
+
+Control-point guard (all concentrations = 0):
+
+$$
+E_i = 0
+$$
+
+Interpretation:
+
+- $E=0$: no inhibition (same as control growth)
+- $E=1$: full inhibition
+
+## Step 3: Average Replicates
+
+For each unique concentration combination $\mathbf{d}$:
+
+$$
+\bar E(\mathbf{d}) = \frac{1}{n_{\mathbf{d}}}\sum_{i:\mathbf{d}_i=\mathbf{d}} E_i
+$$
+
+This is the effect value used downstream.
+
+## Step 4: Get Single-Agent Effects for the Target Combination
+
+Suppose the target combination is $(d_A,d_B)$.
+
+- Drug A single-agent effect at $d_A$:
+
+$$
+E_A = \bar E(d_A,0)
+$$
+
+- Drug B single-agent effect at $d_B$:
+
+$$
+E_B = \bar E(0,d_B)
+$$
+
+## Step 5: Compute Expected Bliss Effect
+
+Two equivalent forms for two drugs:
+
+$$
+E_{\text{Bliss}} = 1-(1-E_A)(1-E_B)
+$$
+
+$$
+E_{\text{Bliss}} = E_A + E_B - E_AE_B
+$$
+
+## Step 6: Compute Observed Combination Effect
+
+$$
+E_{\text{obs}} = \bar E(d_A,d_B)
+$$
+
+## Step 7: Compute Bliss Interaction
+
+$$
+\Delta_{\text{Bliss}} = E_{\text{obs}} - E_{\text{Bliss}}
+$$
+
+Interpretation:
+
+- $\Delta_{\text{Bliss}} > 0$: more inhibition than expected (synergy)
+- $\Delta_{\text{Bliss}} \approx 0$: additive-like
+- $\Delta_{\text{Bliss}} < 0$: less inhibition than expected (antagonism)
+
+## Generalization to m Drugs
+
+For concentrations $(d_1,\dots,d_m)$ with single-agent effects $E_k(d_k)$:
+
+$$
+E_{\text{Bliss}} = 1 - \prod_{k=1}^{m}(1 - E_k(d_k))
+$$
+
+and:
+
+$$
+\Delta_{\text{Bliss}} = E_{\text{obs}} - E_{\text{Bliss}}
+$$

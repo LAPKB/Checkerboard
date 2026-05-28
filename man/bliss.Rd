@@ -57,7 +57,25 @@ Create a new bliss object and import data from a data frame or a \code{.xlsx}/\c
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{file}}{A data frame, or a path to a \code{.xlsx} or \code{.csv} file containing drug combination data.}
+\item{\code{file}}{A data frame, or a path to a \code{.xlsx} or \code{.csv} file containing drug combination data.
+The structure of the file should be as follows:
+\itemize{
+\item Columns for drug concentrations (e.g., "DrugA Concentration", "DrugB Concentration", "DrugC Concentration" for 3 drugs).
+The order of drug columns does not matter, but they must be named with "Concentration" in the header.
+\item A column for the observed response (e.g., "OD" or "Relative OD"). The header must contain "OD" or "Relative".
+\item The file can contain multiple rows for the same drug combination (replicates), which will be averaged during processing.
+\item The file can contain additional columns (e.g., "Organism") which will be ignored during processing.
+}
+
+Example file structure:\tabular{lllll}{
+   DrugA.Concentration \tab DrugB.Concentration \tab DrugC.Concentration \tab Relative OD \tab Organism \cr
+   0 \tab 0 \tab 0 \tab 1.0 \tab E. coli \cr
+   0.1 \tab 0 \tab 0 \tab 0.8 \tab E. coli \cr
+   0 \tab 0.1 \tab 0 \tab 0.85 \tab E. coli \cr
+   0.1 \tab 0.1 \tab 0 \tab 0.6 \tab E. coli \cr
+   0.1 \tab 0.1 \tab 0.1 \tab 0.4 \tab E. coli \cr
+   ... \tab ... \tab ... \tab ... \tab ... \cr
+}}
 }
 \if{html}{\out{</div>}}
 }

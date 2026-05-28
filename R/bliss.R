@@ -20,6 +20,24 @@ bliss <- R6::R6Class(
     ##' @description
     ##' Create a new bliss object and import data from a data frame or a `.xlsx`/`.csv` file.
     ##' @param file A data frame, or a path to a `.xlsx` or `.csv` file containing drug combination data.
+    #' The structure of the file should be as follows:
+    #' - Columns for drug concentrations (e.g., "DrugA Concentration", "DrugB Concentration", "DrugC Concentration" for 3 drugs). 
+    #' The order of drug columns does not matter, but they must be named with "Concentration" in the header.
+    #' - A column for the observed response (e.g., "OD" or "Relative OD"). The header must contain "OD" or "Relative".
+    #' - The file can contain multiple rows for the same drug combination (replicates), which will be averaged during processing.
+    #' - The file can contain additional columns (e.g., "Organism") which will be ignored during processing.
+    #' 
+    #' Example file structure:
+    #'
+    #' | DrugA.Concentration | DrugB.Concentration | DrugC.Concentration | Relative OD | Organism |
+    #' |---|---|---|---|---|
+    #' | 0 | 0 | 0 | 1.0 | E. coli |
+    #' | 0.1 | 0 | 0 | 0.8 | E. coli |
+    #' | 0 | 0.1 | 0 | 0.85 | E. coli |
+    #' | 0.1 | 0.1 | 0 | 0.6 | E. coli |
+    #' | 0.1 | 0.1 | 0.1 | 0.4 | E. coli |
+    #' | ... | ... | ... | ... | ... |
+    #' 
     ##' @return A new bliss object with data loaded and processed.
     initialize = function(file) {
       # Internal calc_bliss implementation
@@ -74,7 +92,12 @@ bliss <- R6::R6Class(
         dat <- dat |> 
           dplyr::mutate(
             effect = 1 - od / control_od,
-            effect = pmax(0, pmin(1, effect))
+            effect = pmax(0, pmin(1, effect)),
+            effect = dplyr::if_else(
+              dplyr::if_all(dplyr::all_of(drug_names), ~ .x == 0),
+              0,
+              effect
+            )
           )
         
         # Average replicates
@@ -217,8 +240,17 @@ bliss <- R6::R6Class(
     ##' @return Invisibly returns the ggplot object (2 drugs) or prints the plot (3 drugs).
     heatmap = function(stratify = NULL, print = TRUE) {
       if (length(self$drugs) == 2) {
+        plot_data <- self$data |>
+          dplyr::mutate(
+            bliss_interaction = dplyr::if_else(
+              dplyr::if_all(dplyr::all_of(self$drugs), ~ abs(.x) < 1e-12),
+              0,
+              bliss_interaction
+            )
+          )
+
         # 2-drug heatmap (stratify argument ignored)
-        p_ggplot <- ggplot2::ggplot(self$data, ggplot2::aes(
+        p_ggplot <- ggplot2::ggplot(plot_data, ggplot2::aes(
           x = factor(.data[[self$drugs[2]]]),
           y = factor(.data[[self$drugs[1]]]),
           fill = bliss_interaction
@@ -239,14 +271,23 @@ bliss <- R6::R6Class(
           ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
         print(p_ggplot)
       } else if (length(self$drugs) == 3) {
+        plot_data <- self$data |>
+          dplyr::mutate(
+            bliss_interaction = dplyr::if_else(
+              dplyr::if_all(dplyr::all_of(self$drugs), ~ abs(.x) < 1e-12),
+              0,
+              bliss_interaction
+            )
+          )
+
         # 3-drug faceted heatmap, stratified by 'stratify' argument
         drug_names <- self$drugs
         if (is.null(stratify) || !stratify %in% drug_names) {
           stratify <- drug_names[3]  # default to 3rd drug
         }
         other_drugs <- setdiff(drug_names, stratify)
-        max_abs <- max(abs(self$data$bliss_interaction), na.rm = TRUE)
-        p_ggplot_3d <- ggplot2::ggplot(self$data, ggplot2::aes(
+        max_abs <- max(abs(plot_data$bliss_interaction), na.rm = TRUE)
+        p_ggplot_3d <- ggplot2::ggplot(plot_data, ggplot2::aes(
           x = factor(.data[[other_drugs[2]]]),
           y = factor(.data[[other_drugs[1]]]),
           fill = bliss_interaction
@@ -392,39 +433,30 @@ bliss <- R6::R6Class(
       expected_wire_y <- c()
       expected_wire_z <- c()
       
-      for (i in 1:(n_row - 1)) {
-        for (j in 1:(n_col - 1)) {
-          # Get average values for this cell
-          bliss_avg <- mean(c(
-            bliss_matrix[i, j],
-            bliss_matrix[i, j + 1],
-            bliss_matrix[i + 1, j],
-            bliss_matrix[i + 1, j + 1]
-          ), na.rm = TRUE)
-          
-          effect_avg <- mean(c(
-            effect_matrix[i, j],
-            effect_matrix[i, j + 1],
-            effect_matrix[i + 1, j],
-            effect_matrix[i + 1, j + 1]
-          ))
-          
-          growth_avg <- (1 - effect_avg) * 100
-          
-          # Calculate expected growth from Bliss expected
-          bliss_expected <- effect_avg - bliss_avg
+      for (i in 1:n_row) {
+        for (j in 1:n_col) {
+          bliss_val <- bliss_matrix[i, j]
+          effect_val <- effect_matrix[i, j]
+
+          is_control_point <- abs(drug1_vals[i]) < 1e-12 && abs(drug2_vals[j]) < 1e-12
+
+          growth_val <- (1 - effect_val) * 100
+          if (is_control_point) growth_val <- 100
+
+          bliss_expected <- effect_val - bliss_val
           expected_growth <- (1 - bliss_expected) * 100
+          if (is_control_point) expected_growth <- 100
           expected_growth <- pmax(0, pmin(100, expected_growth))
-          
-          bar_color <- bliss_to_color(bliss_avg, max_z)
-          
-          # Bar dimensions (centered in each cell with small gap)
-          x_min <- j + 0.1
-          x_max <- j + 0.9
-          y_min <- i + 0.1
-          y_max <- i + 0.9
+
+          bar_color <- bliss_to_color(bliss_val, max_z)
+
+          # Bar dimensions (centered at each concentration point with small gap)
+          x_min <- j - 0.35
+          x_max <- j + 0.35
+          y_min <- i - 0.35
+          y_max <- i + 0.35
           z_min <- 0
-          z_max <- growth_avg
+          z_max <- growth_val
           
           # 8 vertices of the rectangular prism
           bar_x <- c(x_min, x_max, x_max, x_min, x_min, x_max, x_max, x_min)
@@ -491,37 +523,31 @@ bliss <- R6::R6Class(
       bar_hover_text <- character(0)
       bar_hover_colors <- character(0)
       
-      for (i in 1:(n_row - 1)) {
-        for (j in 1:(n_col - 1)) {
-          bliss_avg <- mean(c(
-            bliss_matrix[i, j],
-            bliss_matrix[i, j + 1],
-            bliss_matrix[i + 1, j],
-            bliss_matrix[i + 1, j + 1]
-          ), na.rm = TRUE)
-          
-          effect_avg <- mean(c(
-            effect_matrix[i, j],
-            effect_matrix[i, j + 1],
-            effect_matrix[i + 1, j],
-            effect_matrix[i + 1, j + 1]
-          ))
-          
-          growth_avg <- (1 - effect_avg) * 100
-          bliss_expected <- effect_avg - bliss_avg
+      for (i in 1:n_row) {
+        for (j in 1:n_col) {
+          bliss_val <- bliss_matrix[i, j]
+          effect_val <- effect_matrix[i, j]
+
+          is_control_point <- abs(drug1_vals[i]) < 1e-12 && abs(drug2_vals[j]) < 1e-12
+
+          growth_val <- (1 - effect_val) * 100
+          if (is_control_point) growth_val <- 100
+
+          bliss_expected <- effect_val - bliss_val
           expected_growth <- (1 - bliss_expected) * 100
-          
-          bar_hover_x <- c(bar_hover_x, j + 0.5)
-          bar_hover_y <- c(bar_hover_y, i + 0.5)
-          bar_hover_z <- c(bar_hover_z, growth_avg + 2)
+          if (is_control_point) expected_growth <- 100
+
+          bar_hover_x <- c(bar_hover_x, j)
+          bar_hover_y <- c(bar_hover_y, i)
+          bar_hover_z <- c(bar_hover_z, growth_val + 2)
           bar_hover_text <- c(bar_hover_text, paste0(
-            self$drugs[2], ": ", signif(drug2_vals[j], 3), "-", signif(drug2_vals[j + 1], 3), "<br>",
-            self$drugs[1], ": ", signif(drug1_vals[i], 3), "-", signif(drug1_vals[i + 1], 3), "<br>",
-            "Growth: ", round(growth_avg, 1), "%<br>",
+            self$drugs[2], ": ", signif(drug2_vals[j], 3), "<br>",
+            self$drugs[1], ": ", signif(drug1_vals[i], 3), "<br>",
+            "Growth: ", round(growth_val, 1), "%<br>",
             "Expected: ", round(expected_growth, 1), "%<br>",
-            "Bliss: ", round(bliss_avg, 3)
+            "Bliss: ", round(bliss_val, 3)
           ))
-          bar_hover_colors <- c(bar_hover_colors, bliss_to_color(bliss_avg, max_z))
+          bar_hover_colors <- c(bar_hover_colors, bliss_to_color(bliss_val, max_z))
         }
       }
       

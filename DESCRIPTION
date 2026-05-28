@@ -7,16 +7,26 @@ Authors@R:
 Description: Calculates interactions for checkerboard data.
 License: GPL (>= 2)
 URL: http://lapk.org
-Encoding: UTF-8
-Language: es
 Imports:
-    tidyverse,
+    cli,
+    dplyr,
+    flextable,
+    ggplot2,
+    grid,
+    gridExtra,
     openxlsx,
     plotly,
-    flextable,
+    purrr,
     R6,
-    grid,
-    gridExtra
+    readr,
+    rlang,
+    stats,
+    stringr,
+    tibble,
+    tidyr,
+    tools
+Encoding: UTF-8
+Language: es
 LazyData: TRUE
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
