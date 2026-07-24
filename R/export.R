@@ -54,7 +54,7 @@ export <- function(..., stratify, file) {
       }
       # check if the bliss object has a heatmap plot
       if (!is.null(bliss_obj$heatmap)) {
-        heatmap_plot <- bliss_obj$heatmap(stratify = stratify)
+        heatmap_plot <- bliss_obj$heatmap(stratify = stratify, print = FALSE)
         # save the heatmap plot as an image      
         heatmap_file <- file.path(tempdir(),paste0("heatmap",i,".png"))
         ggplot2::ggsave(
@@ -72,7 +72,7 @@ export <- function(..., stratify, file) {
         if (length(bliss_obj$drugs) == 2) {
           cli::cli_inform("2-drug bar plot is a plotly object, so cannot be exported to Excel.")
         } else {
-          bar_plot <- bliss_obj$bar(stratify = stratify)
+          bar_plot <- bliss_obj$bar(stratify = stratify, print = FALSE)
           # save the bar plot as an image      
           bar_file <- file.path(tempdir(),paste0("bar",i,".png"))
           ggplot2::ggsave(

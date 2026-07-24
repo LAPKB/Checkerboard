@@ -426,6 +426,19 @@ bliss <- R6::R6Class(
       n_col <- ncol(effect_matrix)
       max_z <- max(abs(bliss_matrix), na.rm = TRUE)
       legend_bound <- max(max_z, 0.05)
+      expected_rgb <- tryCatch(
+        grDevices::col2rgb(expected_color, alpha = TRUE),
+        error = function(e) NULL
+      )
+      if (!is.null(expected_rgb)) {
+        expected_color <- sprintf(
+          "rgba(%d,%d,%d,%.3f)",
+          expected_rgb[["red", 1]],
+          expected_rgb[["green", 1]],
+          expected_rgb[["blue", 1]],
+          expected_rgb[["alpha", 1]] / 255
+        )
+      }
       bliss_to_color <- function(bliss_val, max_abs) {
         if (bliss_val >= -0.05 && bliss_val <= 0.05) {
           return(mid_color)

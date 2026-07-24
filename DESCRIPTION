@@ -1,6 +1,6 @@
 Package: Checkerboard
 Title: Checkerboard Interactions
-Version: 0.1
+Version: 1.0
 Authors@R: 
     person("Michael", "Neely", , "mneely@usc.edu", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-1675-8276"))
@@ -16,6 +16,7 @@ Imports:
     ggplot2,
     grid,
     gridExtra,
+    jsonlite,
     openxlsx,
     plotly,
     purrr,

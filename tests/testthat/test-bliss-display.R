@@ -31,6 +31,14 @@ test_that("plot methods accept custom colors for two drugs", {
 
   expect_s3_class(heatmap, "ggplot")
   expect_s3_class(bars, "plotly")
+
+  built_bars <- plotly::plotly_build(bars)
+  line_colors <- vapply(
+    built_bars$x$data,
+    function(trace) trace$line$color %||% NA_character_,
+    character(1)
+  )
+  expect_true("rgba(36,88,166,1.000)" %in% line_colors)
 })
 
 test_that("three-drug summary and plots use the requested stratification", {
@@ -50,10 +58,15 @@ test_that("three-drug summary and plots use the requested stratification", {
 
 test_that("export writes a workbook containing rendered results", {
   object <- bliss$new(example_bliss_data())
-  path <- tempfile(fileext = ".xlsx")
+  export_dir <- tempfile("checkerboard-export-")
+  dir.create(export_dir)
+  old_dir <- setwd(export_dir)
+  on.exit(setwd(old_dir), add = TRUE)
+  path <- file.path(export_dir, "results.xlsx")
 
   capture.output(export(object, stratify = NULL, file = path))
 
   expect_true(file.exists(path))
   expect_gt(file.info(path)$size, 0)
+  expect_false(file.exists(file.path(export_dir, "Rplots.pdf")))
 })
