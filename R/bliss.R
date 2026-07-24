@@ -209,14 +209,13 @@ bliss <- R6::R6Class(
             total_sum < 0 ~ "Antagonistic",
             TRUE ~ "Additive"
           )
+          summary_df[[stratify]] <- as.character(summary_df[[stratify]])
           total_row <- tibble::tibble(
+            !!stratify := "Total",
             sum_bliss = total_sum,
             interpretation = total_interp
           )
           summary_df_total <- dplyr::bind_rows(summary_df, total_row)
-          # Add label for total row
-          strat_col <- setdiff(names(summary_df), c("sum_bliss", "interpretation"))
-          summary_df_total[[strat_col]][nrow(summary_df_total)] <- "Total"
           ft <- summary_df_total |>
             flextable::flextable() |>
             flextable::set_header_labels(
@@ -237,8 +236,17 @@ bliss <- R6::R6Class(
     ##' Plot a heatmap of Bliss interaction values. For 2 drugs, shows a single heatmap. For 3 drugs, facets by the third drug (or specified stratify argument).
     ##' @param stratify (Optional) Name of drug to facet by (for 3-drug data).
     ##' @param print (Optional) Whether to print the plot immediately. Default TRUE.
+    ##' @param low_color Color used for antagonistic interactions.
+    ##' @param mid_color Color used for additive interactions at zero.
+    ##' @param high_color Color used for synergistic interactions.
     ##' @return Invisibly returns the ggplot object (2 drugs) or prints the plot (3 drugs).
-    heatmap = function(stratify = NULL, print = TRUE) {
+    heatmap = function(
+      stratify = NULL,
+      print = TRUE,
+      low_color = "red",
+      mid_color = "white",
+      high_color = "green"
+    ) {
       if (length(self$drugs) == 2) {
         plot_data <- self$data |>
           dplyr::mutate(
@@ -257,7 +265,7 @@ bliss <- R6::R6Class(
         )) +
           ggplot2::geom_tile(color = "grey50", linewidth = 0.5) +
           ggplot2::scale_fill_gradient2(
-            low = "red", mid = "white", high = "green", midpoint = 0,
+            low = low_color, mid = mid_color, high = high_color, midpoint = 0,
             name = "Bliss\nInteraction",
             limits = c(-max(abs(self$data$bliss_interaction), na.rm = TRUE), max(abs(self$data$bliss_interaction), na.rm = TRUE))
           ) +
@@ -269,7 +277,8 @@ bliss <- R6::R6Class(
           ggplot2::coord_fixed() +
           ggplot2::theme_minimal() +
           ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
-        print(p_ggplot)
+        if (print) print(p_ggplot)
+        return(invisible(p_ggplot))
       } else if (length(self$drugs) == 3) {
         plot_data <- self$data |>
           dplyr::mutate(
@@ -294,7 +303,7 @@ bliss <- R6::R6Class(
         )) +
           ggplot2::geom_tile(color = "grey50", linewidth = 0.3) +
           ggplot2::scale_fill_gradient2(
-            low = "red", mid = "white", high = "green", midpoint = 0,
+            low = low_color, mid = mid_color, high = high_color, midpoint = 0,
             name = "Bliss\nInteraction",
             limits = c(-max_abs, max_abs)
           ) +
@@ -337,6 +346,10 @@ bliss <- R6::R6Class(
     ##' @param legend_tick_size (Optional) Legend tick font size for 2-drug plotly bar plots. Default 11.
     ##' @param legend_thickness (Optional) Legend colorbar thickness (pixels) for 2-drug plotly bar plots. Default 20.
     ##' @param legend_length (Optional) Legend colorbar relative length (0-1) for 2-drug plotly bar plots. Default 0.6.
+    ##' @param low_color Color used for antagonistic interactions.
+    ##' @param mid_color Color used for additive interactions.
+    ##' @param high_color Color used for synergistic interactions.
+    ##' @param expected_color Color used for the expected-growth wireframe in the 2-drug plot.
     ##' @return A plotly object (2 drugs) or ggplot object (3 drugs).
     bar = function(
       stratify = NULL,
@@ -353,7 +366,11 @@ bliss <- R6::R6Class(
       legend_title_size = 14,
       legend_tick_size = 11,
       legend_thickness = 20,
-      legend_length = 0.6
+      legend_length = 0.6,
+      low_color = "red",
+      mid_color = "white",
+      high_color = "green",
+      expected_color = "cornflowerblue"
     ) {
       if (length(self$drugs) == 3) {
         # 3-drug summary bar plot
@@ -366,9 +383,9 @@ bliss <- R6::R6Class(
         summary_tbl[[strat_col]] <- factor(summary_tbl[[strat_col]], levels = summary_tbl[[strat_col]])
         # Color mapping
         bar_colors <- dplyr::case_when(
-          summary_tbl$sum_bliss < 0 ~ "red",
-          summary_tbl$sum_bliss > 1 ~ "green",
-          TRUE ~ "white"
+          summary_tbl$sum_bliss < 0 ~ low_color,
+          summary_tbl$sum_bliss > 1 ~ high_color,
+          TRUE ~ mid_color
         )
         # Plot
         x_axis_label <- if (is.null(x_label)) strat_col else x_label
@@ -408,24 +425,22 @@ bliss <- R6::R6Class(
       n_row <- nrow(effect_matrix)
       n_col <- ncol(effect_matrix)
       max_z <- max(abs(bliss_matrix), na.rm = TRUE)
+      legend_bound <- max(max_z, 0.05)
       bliss_to_color <- function(bliss_val, max_abs) {
         if (bliss_val >= -0.05 && bliss_val <= 0.05) {
-          return("rgb(255,255,255)")
+          return(mid_color)
         }
+        denominator <- max(max_abs - 0.05, .Machine$double.eps)
         if (bliss_val < -0.05) {
-          intensity <- (abs(bliss_val) - 0.05) / (max_abs - 0.05)
-          intensity <- pmin(1, pmax(0, intensity))
-          r <- round(255 - 75 * intensity)
-          g <- round(255 * (1 - intensity))
-          b <- round(255 * (1 - intensity))
+          intensity <- (abs(bliss_val) - 0.05) / denominator
+          palette <- grDevices::colorRamp(c(mid_color, low_color))
         } else {
-          intensity <- (bliss_val - 0.05) / (max_abs - 0.05)
-          intensity <- pmin(1, pmax(0, intensity))
-          r <- round(255 * (1 - intensity))
-          g <- round(255 - 105 * intensity)
-          b <- round(255 * (1 - intensity))
+          intensity <- (bliss_val - 0.05) / denominator
+          palette <- grDevices::colorRamp(c(mid_color, high_color))
         }
-        sprintf("rgb(%d,%d,%d)", r, g, b)
+        intensity <- pmin(1, pmax(0, intensity))
+        rgb <- palette(intensity)
+        sprintf("rgb(%d,%d,%d)", round(rgb[[1]]), round(rgb[[2]]), round(rgb[[3]]))
       }
       # 3D Bar Plot
       bar_traces <- list()
@@ -593,7 +608,7 @@ bliss <- R6::R6Class(
           y = expected_wire_y,
           z = expected_wire_z,
           mode = "lines",
-          line = list(color = "rgb(100,149,237)", width = 3),
+          line = list(color = expected_color, width = 3),
           showlegend = FALSE,
           hoverinfo = "none"
         )
@@ -630,18 +645,18 @@ bliss <- R6::R6Class(
           marker = list(
             size = 0.01,
             opacity = 0,
-            color = c(-max_z, max_z),
+            color = c(-legend_bound, legend_bound),
             colorscale = list(
-              list(0, "rgb(180,0,0)"),
-              list((max_z - 0.05) / (2 * max_z), "rgb(255,255,255)"),
-              list((max_z + 0.05) / (2 * max_z), "rgb(255,255,255)"),
-              list(1, "rgb(0,150,0)")
+              list(0, low_color),
+              list((legend_bound - 0.05) / (2 * legend_bound), mid_color),
+              list((legend_bound + 0.05) / (2 * legend_bound), mid_color),
+              list(1, high_color)
             ),
-            cmin = -max_z,
-            cmax = max_z,
+            cmin = -legend_bound,
+            cmax = legend_bound,
             colorbar = list(
               title = list(text = "Bliss<br>Interaction", font = list(size = legend_title_size)),
-              tickvals = c(-max_z, 0, max_z),
+              tickvals = c(-legend_bound, 0, legend_bound),
               ticktext = c("Antagonism", "Additive<br>(-0.05 to 0.05)", "Synergy"),
               tickfont = list(size = legend_tick_size),
               len = legend_length,
@@ -723,4 +738,3 @@ bliss <- R6::R6Class(
     }
   )
 )
-

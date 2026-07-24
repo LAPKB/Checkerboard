@@ -2,3 +2,4 @@
 
 export(bliss)
 export(export)
+export(run_checkerboard_app)

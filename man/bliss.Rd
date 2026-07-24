@@ -4,11 +4,6 @@
 \alias{bliss}
 \title{Bliss Independence R6 Class}
 \description{
-Bliss Independence R6 Class
-
-Bliss Independence R6 Class
-}
-\details{
 An R6 class for analyzing drug combination data using the Bliss independence model. Provides methods for data import, summary statistics, and visualization (heatmap, bar plot) of Bliss interactions.
 }
 \section{Methods}{
@@ -27,37 +22,38 @@ An R6 class for analyzing drug combination data using the Bliss independence mod
 \keyword{interaction}
 \keyword{synergy,}
 \section{Public fields}{
-\if{html}{\out{<div class="r6-fields">}}
-\describe{
-\item{\code{data}}{A tibble containing the processed drug combination data with Bliss calculations.}
+  \if{html}{\out{<div class="r6-fields">}}
+  \describe{
+    \item{\code{data}}{A tibble containing the processed drug combination data with Bliss calculations.}
 
-\item{\code{drugs}}{A character vector of drug names extracted from the data.}
-}
-\if{html}{\out{</div>}}
+    \item{\code{drugs}}{A character vector of drug names extracted from the data.}
+  }
+  \if{html}{\out{</div>}}
 }
 \section{Methods}{
 \subsection{Public methods}{
-\itemize{
-\item \href{#method-bliss-new}{\code{bliss$new()}}
-\item \href{#method-bliss-summary}{\code{bliss$summary()}}
-\item \href{#method-bliss-heatmap}{\code{bliss$heatmap()}}
-\item \href{#method-bliss-bar}{\code{bliss$bar()}}
-\item \href{#method-bliss-clone}{\code{bliss$clone()}}
-}
+  \itemize{
+    \item \href{#method-bliss-initialize}{\code{bliss$new()}}
+    \item \href{#method-bliss-summary}{\code{bliss$summary()}}
+    \item \href{#method-bliss-heatmap}{\code{bliss$heatmap()}}
+    \item \href{#method-bliss-bar}{\code{bliss$bar()}}
+    \item \href{#method-bliss-clone}{\code{bliss$clone()}}
+  }
 }
 \if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-bliss-new"></a>}}
-\if{latex}{\out{\hypertarget{method-bliss-new}{}}}
-\subsection{Method \code{new()}}{
-Create a new bliss object and import data from a data frame or a \code{.xlsx}/\code{.csv} file.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{bliss$new(file)}\if{html}{\out{</div>}}
-}
-
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{file}}{A data frame, or a path to a \code{.xlsx} or \code{.csv} file containing drug combination data.
+\if{html}{\out{<a id="method-bliss-initialize"></a>}}
+\if{latex}{\out{\hypertarget{method-bliss-initialize}{}}}
+\subsection{\code{bliss$new()}}{
+  Create a new bliss object and import data from a data frame or a \code{.xlsx}/\code{.csv} file.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{bliss$new(file)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{file}}{A data frame, or a path to a \code{.xlsx} or \code{.csv} file containing drug combination data.
 The structure of the file should be as follows:
 \itemize{
 \item Columns for drug concentrations (e.g., "DrugA Concentration", "DrugB Concentration", "DrugC Concentration" for 3 drugs).
@@ -76,62 +72,76 @@ Example file structure:\tabular{lllll}{
    0.1 \tab 0.1 \tab 0.1 \tab 0.4 \tab E. coli \cr
    ... \tab ... \tab ... \tab ... \tab ... \cr
 }}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    A new bliss object with data loaded and processed.
+  }
 }
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-A new bliss object with data loaded and processed.
-}
-}
+
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-bliss-summary"></a>}}
 \if{latex}{\out{\hypertarget{method-bliss-summary}{}}}
-\subsection{Method \code{summary()}}{
-Summarize Bliss interaction results, optionally stratified by a drug.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{bliss$summary(stratify = NULL)}\if{html}{\out{</div>}}
+\subsection{\code{bliss$summary()}}{
+  Summarize Bliss interaction results, optionally stratified by a drug.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{bliss$summary(stratify = NULL)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{stratify}}{(Optional) Name of drug to stratify summary by (for 3-drug data).}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    A tibble with Bliss interaction summary and interpretation.
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{stratify}}{(Optional) Name of drug to stratify summary by (for 3-drug data).}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-A tibble with Bliss interaction summary and interpretation.
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-bliss-heatmap"></a>}}
 \if{latex}{\out{\hypertarget{method-bliss-heatmap}{}}}
-\subsection{Method \code{heatmap()}}{
-Plot a heatmap of Bliss interaction values. For 2 drugs, shows a single heatmap. For 3 drugs, facets by the third drug (or specified stratify argument).
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{bliss$heatmap(stratify = NULL, print = TRUE)}\if{html}{\out{</div>}}
+\subsection{\code{bliss$heatmap()}}{
+  Plot a heatmap of Bliss interaction values. For 2 drugs, shows a single heatmap. For 3 drugs, facets by the third drug (or specified stratify argument).
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{bliss$heatmap(
+  stratify = NULL,
+  print = TRUE,
+  low_color = "red",
+  mid_color = "white",
+  high_color = "green"
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{stratify}}{(Optional) Name of drug to facet by (for 3-drug data).}
+      \item{\code{print}}{(Optional) Whether to print the plot immediately. Default TRUE.}
+      \item{\code{low_color}}{Color used for antagonistic interactions.}
+      \item{\code{mid_color}}{Color used for additive interactions at zero.}
+      \item{\code{high_color}}{Color used for synergistic interactions.}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    Invisibly returns the ggplot object (2 drugs) or prints the plot (3 drugs).
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{stratify}}{(Optional) Name of drug to facet by (for 3-drug data).}
-
-\item{\code{print}}{(Optional) Whether to print the plot immediately. Default TRUE.}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-Invisibly returns the ggplot object (2 drugs) or prints the plot (3 drugs).
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-bliss-bar"></a>}}
 \if{latex}{\out{\hypertarget{method-bliss-bar}{}}}
-\subsection{Method \code{bar()}}{
-Create a bar plot of Bliss interaction. For 2 drugs, creates a 3D interactive plotly bar plot. For 3 drugs, creates a summary bar plot stratified by one drug.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{bliss$bar(
+\subsection{\code{bliss$bar()}}{
+  Create a bar plot of Bliss interaction. For 2 drugs, creates a 3D interactive plotly bar plot. For 3 drugs, creates a summary bar plot stratified by one drug.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{bliss$bar(
   stratify = NULL,
   print = TRUE,
   x_label = NULL,
@@ -146,64 +156,61 @@ Create a bar plot of Bliss interaction. For 2 drugs, creates a 3D interactive pl
   legend_title_size = 14,
   legend_tick_size = 11,
   legend_thickness = 20,
-  legend_length = 0.6
-)}\if{html}{\out{</div>}}
+  legend_length = 0.6,
+  low_color = "red",
+  mid_color = "white",
+  high_color = "green",
+  expected_color = "cornflowerblue"
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{stratify}}{(Optional) Name of drug to stratify by (for 3-drug data).}
+      \item{\code{print}}{(Optional) Whether to print the plot immediately. Default TRUE.}
+      \item{\code{x_label}}{(Optional) Custom x-axis label. Defaults to the second drug name.}
+      \item{\code{y_label}}{(Optional) Custom y-axis label. Defaults to the first drug name (2-drug) or "Sum Bliss" (3-drug).}
+      \item{\code{snapshot_file}}{(Optional) File path to save a static high-resolution image of the 2-drug plotly bar plot (e.g., .png, .pdf, .svg).}
+      \item{\code{snapshot_width}}{(Optional) Snapshot width in pixels. Default 2400.}
+      \item{\code{snapshot_height}}{(Optional) Snapshot height in pixels. Default 1800.}
+      \item{\code{snapshot_scale}}{(Optional) Snapshot scale multiplier for higher resolution. Default 2.}
+      \item{\code{camera_eye}}{(Optional) 3D camera eye position controlling rotation/view for 2-drug plotly bar plots. Accepts either a named list (e.g., list(x = 1.5, y = 1.5, z = 1.2)) or numeric vector (e.g., c(1.5, 1.5, 1.2)). The values define the camera location relative to the plot center: x controls left-right viewpoint (positive x views more from the +x side, negative x from the opposite side); y controls front-back viewpoint (positive y views more from the +y side, negative y from the opposite side); z controls vertical elevation (larger z looks more from above, smaller z flattens toward a side-on view). Increasing the overall magnitude (distance from the origin) zooms out, decreasing it zooms in. Useful presets: isometric = c(1.5, 1.5, 1.2), front-ish = c(0.2, 2.2, 0.9), side-ish = c(2.2, 0.2, 0.9), top-down = c(0.01, 0.01, 3.0).}
+      \item{\code{axis_title_size}}{(Optional) Axis title font size for 2-drug plotly bar plots. Default 14.}
+      \item{\code{axis_tick_size}}{(Optional) Axis tick font size for 2-drug plotly bar plots. Default 12.}
+      \item{\code{legend_title_size}}{(Optional) Legend title font size for 2-drug plotly bar plots. Default 14.}
+      \item{\code{legend_tick_size}}{(Optional) Legend tick font size for 2-drug plotly bar plots. Default 11.}
+      \item{\code{legend_thickness}}{(Optional) Legend colorbar thickness (pixels) for 2-drug plotly bar plots. Default 20.}
+      \item{\code{legend_length}}{(Optional) Legend colorbar relative length (0-1) for 2-drug plotly bar plots. Default 0.6.}
+      \item{\code{low_color}}{Color used for antagonistic interactions.}
+      \item{\code{mid_color}}{Color used for additive interactions.}
+      \item{\code{high_color}}{Color used for synergistic interactions.}
+      \item{\code{expected_color}}{Color used for the expected-growth wireframe in the 2-drug plot.}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    A plotly object (2 drugs) or ggplot object (3 drugs).
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{stratify}}{(Optional) Name of drug to stratify by (for 3-drug data).}
-
-\item{\code{print}}{(Optional) Whether to print the plot immediately. Default TRUE.}
-
-\item{\code{x_label}}{(Optional) Custom x-axis label. Defaults to the second drug name.}
-
-\item{\code{y_label}}{(Optional) Custom y-axis label. Defaults to the first drug name (2-drug) or "Sum Bliss" (3-drug).}
-
-\item{\code{snapshot_file}}{(Optional) File path to save a static high-resolution image of the 2-drug plotly bar plot (e.g., .png, .pdf, .svg).}
-
-\item{\code{snapshot_width}}{(Optional) Snapshot width in pixels. Default 2400.}
-
-\item{\code{snapshot_height}}{(Optional) Snapshot height in pixels. Default 1800.}
-
-\item{\code{snapshot_scale}}{(Optional) Snapshot scale multiplier for higher resolution. Default 2.}
-
-\item{\code{camera_eye}}{(Optional) 3D camera eye position controlling rotation/view for 2-drug plotly bar plots. Accepts either a named list (e.g., list(x = 1.5, y = 1.5, z = 1.2)) or numeric vector (e.g., c(1.5, 1.5, 1.2)). The values define the camera location relative to the plot center: x controls left-right viewpoint (positive x views more from the +x side, negative x from the opposite side); y controls front-back viewpoint (positive y views more from the +y side, negative y from the opposite side); z controls vertical elevation (larger z looks more from above, smaller z flattens toward a side-on view). Increasing the overall magnitude (distance from the origin) zooms out, decreasing it zooms in. Useful presets: isometric = c(1.5, 1.5, 1.2), front-ish = c(0.2, 2.2, 0.9), side-ish = c(2.2, 0.2, 0.9), top-down = c(0.01, 0.01, 3.0).}
-
-\item{\code{axis_title_size}}{(Optional) Axis title font size for 2-drug plotly bar plots. Default 14.}
-
-\item{\code{axis_tick_size}}{(Optional) Axis tick font size for 2-drug plotly bar plots. Default 12.}
-
-\item{\code{legend_title_size}}{(Optional) Legend title font size for 2-drug plotly bar plots. Default 14.}
-
-\item{\code{legend_tick_size}}{(Optional) Legend tick font size for 2-drug plotly bar plots. Default 11.}
-
-\item{\code{legend_thickness}}{(Optional) Legend colorbar thickness (pixels) for 2-drug plotly bar plots. Default 20.}
-
-\item{\code{legend_length}}{(Optional) Legend colorbar relative length (0-1) for 2-drug plotly bar plots. Default 0.6.}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-A plotly object (2 drugs) or ggplot object (3 drugs).
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-bliss-clone"></a>}}
 \if{latex}{\out{\hypertarget{method-bliss-clone}{}}}
-\subsection{Method \code{clone()}}{
-The objects of this class are cloneable with this method.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{bliss$clone(deep = FALSE)}\if{html}{\out{</div>}}
+\subsection{\code{bliss$clone()}}{
+  The objects of this class are cloneable with this method.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{bliss$clone(deep = FALSE)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{deep}}{Whether to make a deep clone.}
+    }
+    \if{html}{\out{</div>}}
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{deep}}{Whether to make a deep clone.}
-}
-\if{html}{\out{</div>}}
-}
-}
 }

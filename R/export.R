@@ -57,7 +57,13 @@ export <- function(..., stratify, file) {
         heatmap_plot <- bliss_obj$heatmap(stratify = stratify)
         # save the heatmap plot as an image      
         heatmap_file <- file.path(tempdir(),paste0("heatmap",i,".png"))
-        ggsave(heatmap_plot, filename = heatmap_file, width = 10, height = 10, dpi = 300)
+        ggplot2::ggsave(
+          filename = heatmap_file,
+          plot = heatmap_plot,
+          width = 10,
+          height = 10,
+          dpi = 300
+        )
         # insert the heatmap image into the sheet      
         insertImage(wb, sheet_name, heatmap_file, startCol = 5, startRow = 1, width = 10, height = 10)
       }
@@ -69,7 +75,13 @@ export <- function(..., stratify, file) {
           bar_plot <- bliss_obj$bar(stratify = stratify)
           # save the bar plot as an image      
           bar_file <- file.path(tempdir(),paste0("bar",i,".png"))
-          ggsave(bar_plot, filename = bar_file, width = 10, height = 10, dpi = 300)
+          ggplot2::ggsave(
+            filename = bar_file,
+            plot = bar_plot,
+            width = 10,
+            height = 10,
+            dpi = 300
+          )
           # insert the bar plot image into the sheet      
           insertImage(wb, sheet_name, bar_file, startCol = 15, startRow = 1, width = 10, height = 10)   
         }
@@ -87,4 +99,3 @@ export <- function(..., stratify, file) {
     cli::cli_abort("File extension must be .xlsx.")
   } 
 }
-
