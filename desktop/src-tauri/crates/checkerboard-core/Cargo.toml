@@ -1,0 +1,15 @@
+[package]
+name = "checkerboard-core"
+version = "0.1.0"
+description = "Presentation-independent Bliss analysis for Checkerboard"
+edition = "2024"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+csv = "1"
+serde_json = "1"
+

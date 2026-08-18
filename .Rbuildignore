@@ -3,3 +3,6 @@
 test.R
 ^\Build
 ^dev$
+^desktop$
+^docs$
+^fixtures$

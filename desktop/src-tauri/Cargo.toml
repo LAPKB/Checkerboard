@@ -1,0 +1,35 @@
+[package]
+name = "checkerboard-desktop"
+version = "0.1.0"
+description = "Desktop interface for Checkerboard Bliss analysis"
+authors = ["Michael Neely"]
+edition = "2024"
+
+[workspace]
+members = [".", "crates/checkerboard-core"]
+resolver = "2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "checkerboard_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+checkerboard-core = { path = "crates/checkerboard-core" }
+calamine = "0.36"
+csv = "1"
+rust_xlsxwriter = "0.96"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

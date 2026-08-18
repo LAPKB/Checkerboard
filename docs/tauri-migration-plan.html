@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.25">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>tauri-migration-plan</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="tauri-migration-plan_files/libs/clipboard/clipboard.min.js"></script>
+<script src="tauri-migration-plan_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="tauri-migration-plan_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="tauri-migration-plan_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="tauri-migration-plan_files/libs/quarto-html/popper.min.js"></script>
+<script src="tauri-migration-plan_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="tauri-migration-plan_files/libs/quarto-html/anchor.min.js"></script>
+<link href="tauri-migration-plan_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="tauri-migration-plan_files/libs/quarto-html/quarto-syntax-highlighting-7b89279ff1a6dce999919e0e67d4d9ec.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="tauri-migration-plan_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="tauri-migration-plan_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="tauri-migration-plan_files/libs/bootstrap/bootstrap-d6a003b94517c951b2d65075d42fb01b.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="checkerboard-taurirust-migration-analysis-and-plan" class="level1">
+<h1>Checkerboard Tauri/Rust Migration Analysis and Plan</h1>
+<p>Date: 2026-08-14</p>
+<section id="executive-recommendation" class="level2">
+<h2 class="anchored" data-anchor-id="executive-recommendation">Executive recommendation</h2>
+<p>Preserve the R package at the repository root and develop the new desktop application in an isolated <code>desktop/</code> directory in the same repository. Keep migration and architecture documentation in <code>docs/</code>.</p>
+<p>Recommended layout:</p>
+<pre class="text"><code>Checkerboard/
+├── R/                         Existing R implementation
+├── tests/testthat/            Existing R tests
+├── man/                       Existing R documentation
+├── DESCRIPTION                Existing R package metadata
+├── NAMESPACE                  Existing R exports
+├── app.R                      Existing Shiny launcher
+├── desktop/                   New Tauri application
+│   ├── src/                   TypeScript/React frontend
+│   ├── src-tauri/             Tauri shell and Rust application layer
+│   └── package.json
+├── fixtures/                  Optional shared parity fixtures
+├── docs/
+│   └── tauri-migration-plan.md
+└── .Rbuildignore</code></pre>
+<p>This monorepo arrangement is preferable to creating a separate repository because it:</p>
+<ul>
+<li>Preserves the current R Shiny package as a working reference implementation.</li>
+<li>Keeps the scientific model, fixtures, documentation, and both implementations under one version history.</li>
+<li>Makes cross-language parity testing practical.</li>
+<li>Allows the Rust implementation to be validated against R before the Shiny package is retired or placed into maintenance mode.</li>
+<li>Avoids coordinating releases and behavioral changes across two repositories during migration.</li>
+</ul>
+<p>The R source does not need to depend on the Tauri application. The <code>desktop/</code>, <code>docs/</code>, and optional repository-level <code>fixtures/</code> directories are excluded in <code>.Rbuildignore</code>, so they will not be included in the generated R package tarball.</p>
+</section>
+<section id="current-repository-and-architecture" class="level2">
+<h2 class="anchored" data-anchor-id="current-repository-and-architecture">Current repository and architecture</h2>
+<p>Checkerboard is an R package containing an embedded Shiny application rather than a standalone collection of Shiny scripts.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Component</th>
+<th>Location</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Shiny application</td>
+<td><code>R/shiny_app.R</code></td>
+<td>Import workflow, column mapping, application state, analysis UI, preferences, and export actions</td>
+</tr>
+<tr class="even">
+<td>Bliss engine</td>
+<td><code>R/bliss.R</code></td>
+<td>Normalization, replicate averaging, Bliss calculations, summaries, heatmaps, and bar plots</td>
+</tr>
+<tr class="odd">
+<td>Workbook export</td>
+<td><code>R/export.R</code></td>
+<td>Excel workbook generation, styling, and embedded plot images</td>
+</tr>
+<tr class="even">
+<td>Mathematical guide</td>
+<td><code>R/logic.Rmd</code></td>
+<td>Equations and a worked Bliss example</td>
+</tr>
+<tr class="odd">
+<td>Launcher</td>
+<td><code>app.R</code></td>
+<td>Loads the package from the source tree and launches Shiny</td>
+</tr>
+<tr class="even">
+<td>Tests</td>
+<td><code>tests/testthat/</code></td>
+<td>Import, naming, colors, plots, workbook export, and Shiny startup tests</td>
+</tr>
+</tbody>
+</table>
+<p>The current automated test suite passes.</p>
+<section id="current-user-workflow" class="level3">
+<h3 class="anchored" data-anchor-id="current-user-workflow">Current user workflow</h3>
+<ol type="1">
+<li>Select a <code>.csv</code>, <code>.txt</code>, <code>.xls</code>, or <code>.xlsx</code> input file.</li>
+<li>Select a worksheet for Excel inputs.</li>
+<li>Set a start row, start column, and optional row and column limits. Zero means to read all remaining values.</li>
+<li>Preview the selected range, limited to the first 100 rows.</li>
+<li>Assign columns to Drug A, Drug B, optional Drug C, and OD. Unrelated columns are ignored.</li>
+<li>Infer cleaned drug names from source column headers.</li>
+<li>Convert mapped values to numeric and create a Bliss object.</li>
+<li>View the summary, heatmap, bar plot, or processed-data table.</li>
+<li>Select a stratifying drug for three-drug analyses.</li>
+<li>Customize and persist plot colors.</li>
+<li>Export results to an Excel workbook.</li>
+</ol>
+</section>
+</section>
+<section id="current-bliss-model" class="level2">
+<h2 class="anchored" data-anchor-id="current-bliss-model">Current Bliss model</h2>
+<p>For each observation, the application computes an inhibition effect relative to the mean untreated control OD:</p>
+<pre class="text"><code>raw_effect = 1 - OD / mean_control_OD
+effect = clamp(raw_effect, 0, 1)</code></pre>
+<p>Rows where every drug concentration is zero are explicitly assigned an effect of zero. Replicate effects are averaged for each unique concentration combination.</p>
+<p>For each concentration combination, the single-agent effect for drug <code>k</code> is obtained at that drug’s selected concentration while every other drug is at zero. Bliss expected effect is:</p>
+<pre class="text"><code>expected_effect = 1 - product(1 - single_agent_effect[k])</code></pre>
+<p>The interaction score is:</p>
+<pre class="text"><code>bliss_interaction = observed_effect - expected_effect</code></pre>
+<p>A positive interaction means greater inhibition than predicted by Bliss independence; a negative interaction means less inhibition than predicted.</p>
+<section id="two-drug-presentation" class="level3">
+<h3 class="anchored" data-anchor-id="two-drug-presentation">Two-drug presentation</h3>
+<ul>
+<li>Summary: total sum of all Bliss interaction values.</li>
+<li>Heatmap: one concentration grid with a diverging scale centered at zero.</li>
+<li>Bar plot: interactive three-dimensional observed percent-growth bars.</li>
+<li>Expected growth: a wireframe over each bar.</li>
+<li>Bar color: derived from the Bliss interaction at that concentration pair.</li>
+</ul>
+</section>
+<section id="three-drug-presentation" class="level3">
+<h3 class="anchored" data-anchor-id="three-drug-presentation">Three-drug presentation</h3>
+<ul>
+<li>Summary: Bliss sums grouped by the chosen stratifying drug concentration, followed by a total row.</li>
+<li>Heatmap: one two-drug heatmap facet for each concentration of the stratifying drug.</li>
+<li>Bar plot: summary bars for each stratum plus the total.</li>
+</ul>
+</section>
+</section>
+<section id="current-ui-appearance" class="level2">
+<h2 class="anchored" data-anchor-id="current-ui-appearance">Current UI appearance</h2>
+<p>The Shiny interface uses Bootstrap 5 with the Flatly theme and a compact desktop-oriented layout:</p>
+<ul>
+<li>Dark blue primary navigation and card accents.</li>
+<li>Light gray application background.</li>
+<li>Pmetrics logo in the navigation bar.</li>
+<li>Two main pages: <strong>Import &amp; map</strong> and <strong>Analyze</strong>.</li>
+<li>Fixed-width sidebars for controls.</li>
+<li>Horizontally scrollable mapping table with sticky assignment and column-name headers.</li>
+<li>Small typography and dense data tables.</li>
+<li>Analysis tabs for Summary, Heatmap, Bar plot, and Processed data.</li>
+<li>Fixed red Exit button.</li>
+</ul>
+<p>The Tauri implementation should retain the information density and recognizable two-stage workflow while making loading, validation, warning, and error states more explicit.</p>
+</section>
+<section id="behavioral-issues-to-resolve-before-porting" class="level2">
+<h2 class="anchored" data-anchor-id="behavioral-issues-to-resolve-before-porting">Behavioral issues to resolve before porting</h2>
+<p>These decisions should be recorded in tests before implementing the Rust engine.</p>
+<section id="inconsistent-interpretation-thresholds" class="level3">
+<h3 class="anchored" data-anchor-id="inconsistent-interpretation-thresholds">1. Inconsistent interpretation thresholds</h3>
+<p>The summary classifies a total Bliss sum as:</p>
+<ul>
+<li>Antagonistic when the sum is less than zero.</li>
+<li>Additive when the sum is between zero and one, inclusive.</li>
+<li>Synergistic when the sum is greater than one.</li>
+</ul>
+<p>The two-drug three-dimensional plot instead describes individual scores from <code>-0.05</code> through <code>0.05</code> as additive. The heatmap uses a continuous scale centered at zero. A single interpretation policy should be defined for per-cell scores and a separate, explicitly justified policy should be defined for aggregate results.</p>
+</section>
+<section id="grid-size-sensitive-aggregate-summary" class="level3">
+<h3 class="anchored" data-anchor-id="grid-size-sensitive-aggregate-summary">2. Grid-size-sensitive aggregate summary</h3>
+<p>The summary adds every Bliss interaction score. Its magnitude therefore changes with the number of tested concentration combinations. A fixed threshold such as <code>&gt; 1</code> is sensitive to checkerboard size.</p>
+<p>Recommended approach: preserve <code>sum_bliss</code> for backward compatibility, but consider also reporting the mean interaction, the number of evaluated combinations, positive and negative interaction sums, and possibly a pre-specified active-region summary.</p>
+</section>
+<section id="missing-scientific-input-validation" class="level3">
+<h3 class="anchored" data-anchor-id="missing-scientific-input-validation">3. Missing scientific input validation</h3>
+<p>The new implementation should explicitly detect and report:</p>
+<ul>
+<li>No all-zero control rows.</li>
+<li>A zero, missing, or non-finite mean control OD.</li>
+<li>Missing single-agent rows required for a tested combination.</li>
+<li>Missing or non-finite concentrations or OD values.</li>
+<li>Incomplete checkerboard grids.</li>
+<li>Duplicate rows and how they will be treated as replicates.</li>
+<li>Replicate groups containing missing effects.</li>
+<li>Negative concentrations, if those are invalid for the domain.</li>
+</ul>
+</section>
+<section id="direct-r-api-and-shiny-import-differences" class="level3">
+<h3 class="anchored" data-anchor-id="direct-r-api-and-shiny-import-differences">4. Direct R API and Shiny import differences</h3>
+<p>The R6 implementation selects source headers matching <code>Concentration</code> and <code>Relative</code>. A response column named only <code>OD</code>, although described as valid in documentation, may not be selected when the class is used directly. The Shiny workflow avoids this by mapping and renaming the response to <code>RelativeOD</code>.</p>
+<p>The new input model should not infer scientific roles solely from header patterns. Header matching should supply defaults, while the explicit user mapping remains authoritative.</p>
+</section>
+<section id="export-does-not-exactly-reflect-the-active-view" class="level3">
+<h3 class="anchored" data-anchor-id="export-does-not-exactly-reflect-the-active-view">5. Export does not exactly reflect the active view</h3>
+<ul>
+<li>User-selected colors are not passed to the current exported plots.</li>
+<li>The two-drug interactive plot is omitted from Excel.</li>
+<li>The export layer generates temporary image files and then removes matching files from the shared R temporary directory.</li>
+</ul>
+<p>The new export should use the active stratification and color configuration, use uniquely owned temporary resources, and explicitly decide whether a static snapshot of the two-drug plot belongs in the workbook.</p>
+</section>
+<section id="calculation-and-presentation-are-coupled" class="level3">
+<h3 class="anchored" data-anchor-id="calculation-and-presentation-are-coupled">6. Calculation and presentation are coupled</h3>
+<p>The R <code>summary()</code> method calculates data and prints a <code>flextable</code>. Plot methods both transform analysis data and render it. The Rust implementation should return presentation-neutral domain results, leaving tables and plots to the frontend or export adapter.</p>
+</section>
+</section>
+<section id="proposed-tauri-architecture" class="level2">
+<h2 class="anchored" data-anchor-id="proposed-tauri-architecture">Proposed Tauri architecture</h2>
+<p>Use Tauri 2 with a TypeScript/React frontend and a Rust analysis core. The frontend should own interaction and visualization; Rust should own parsing, validation, scientific calculation, preferences, and workbook creation.</p>
+<pre class="text"><code>TypeScript/React webview
+├── Import and range selection
+├── Column mapping
+├── Analysis workflow state
+├── Summary and processed-data tables
+├── Plotly heatmaps and three-dimensional plots
+└── User-facing errors and warnings
+                  │
+                  │ typed Tauri commands
+                  ▼
+Rust application layer
+├── Import services
+├── Mapping validation
+├── Bliss analysis core
+├── Summary services
+├── Preferences
+└── Excel export</code></pre>
+<p>Suggested Rust layout:</p>
+<pre class="text"><code>desktop/src-tauri/src/
+├── commands/
+│   ├── import.rs
+│   ├── analysis.rs
+│   ├── export.rs
+│   └── preferences.rs
+├── domain/
+│   ├── assay.rs
+│   ├── mapping.rs
+│   └── results.rs
+├── services/
+│   ├── importer.rs
+│   ├── validation.rs
+│   ├── bliss.rs
+│   ├── summary.rs
+│   └── workbook.rs
+├── error.rs
+└── lib.rs</code></pre>
+<p>Prefer a separate Rust workspace crate for the scientific core:</p>
+<pre class="text"><code>desktop/src-tauri/crates/checkerboard-core/</code></pre>
+<p>That crate should have no dependency on Tauri. This makes its calculations independently testable and leaves open the possibility of a future command-line interface or reuse in another application.</p>
+<section id="recommended-technology-choices" class="level3">
+<h3 class="anchored" data-anchor-id="recommended-technology-choices">Recommended technology choices</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Concern</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Desktop shell</td>
+<td>Tauri 2</td>
+</tr>
+<tr class="even">
+<td>Frontend</td>
+<td>TypeScript and React</td>
+</tr>
+<tr class="odd">
+<td>Application commands</td>
+<td>Tauri commands with Serde request and response types</td>
+</tr>
+<tr class="even">
+<td>CSV/TXT input</td>
+<td>Rust <code>csv</code> crate with explicit delimiter handling</td>
+</tr>
+<tr class="odd">
+<td>XLS/XLSX input</td>
+<td><code>calamine</code></td>
+</tr>
+<tr class="even">
+<td>Error types</td>
+<td><code>thiserror</code> plus a serializable application error payload</td>
+</tr>
+<tr class="odd">
+<td>Interactive plots</td>
+<td>Plotly.js</td>
+</tr>
+<tr class="even">
+<td>Excel output</td>
+<td><code>rust_xlsxwriter</code></td>
+</tr>
+<tr class="odd">
+<td>Preferences</td>
+<td>Tauri store plugin or a small Rust-owned JSON settings service</td>
+</tr>
+<tr class="even">
+<td>Frontend tests</td>
+<td>Vitest and Testing Library</td>
+</tr>
+<tr class="odd">
+<td>Rust tests</td>
+<td>Standard unit and integration tests</td>
+</tr>
+<tr class="even">
+<td>Desktop end-to-end tests</td>
+<td>Add after the main workflow stabilizes</td>
+</tr>
+</tbody>
+</table>
+<p>Only the file-dialog, approved file-read/write, application preference, and window capabilities needed by the main webview should be enabled.</p>
+</section>
+</section>
+<section id="domain-model" class="level2">
+<h2 class="anchored" data-anchor-id="domain-model">Domain model</h2>
+<p>Avoid sending loosely typed data frames across the Tauri boundary. Define explicit structures such as:</p>
+<pre class="text"><code>ImportOptions
+├── path
+├── worksheet
+├── start_row
+├── start_column
+├── row_limit
+└── column_limit
+
+ImportedTable
+├── source metadata
+├── headers
+├── inferred column types
+├── dimensions
+└── preview rows
+
+ColumnMapping
+├── drug columns and display names
+└── response column
+
+AnalysisResult
+├── drug names
+├── processed combinations
+├── control statistics
+├── validation warnings
+└── summary metadata</code></pre>
+<p>The result for each processed concentration combination should contain:</p>
+<ul>
+<li>Drug concentrations in stable order.</li>
+<li>Observed mean effect.</li>
+<li>Each required single-agent effect.</li>
+<li>Expected Bliss effect.</li>
+<li>Bliss interaction.</li>
+<li>Replicate count.</li>
+<li>Optional warning flags.</li>
+</ul>
+</section>
+<section id="implementation-plan" class="level2">
+<h2 class="anchored" data-anchor-id="implementation-plan">Implementation plan</h2>
+<section id="phase-1-freeze-the-behavioral-specification" class="level3">
+<h3 class="anchored" data-anchor-id="phase-1-freeze-the-behavioral-specification">Phase 1: Freeze the behavioral specification</h3>
+<ol type="1">
+<li>Create representative two-drug and three-drug input fixtures.</li>
+<li>Include replicated controls, replicated combinations, multiple concentration levels, and non-unit control OD.</li>
+<li>Add invalid fixtures for missing controls, missing single-agent rows, nonnumeric values, non-finite values, and incomplete grids.</li>
+<li>Export canonical processed results from R to machine-readable CSV or JSON.</li>
+<li>Decide and document per-cell and aggregate interpretation thresholds.</li>
+<li>Decide whether incomplete grids are rejected or represented with missing cells.</li>
+<li>Decide which additional normalized summary statistics will accompany <code>sum_bliss</code>.</li>
+</ol>
+<p>Deliverable: a language-neutral scientific specification and golden parity fixture set.</p>
+</section>
+<section id="phase-2-scaffold-the-desktop-application" class="level3">
+<h3 class="anchored" data-anchor-id="phase-2-scaffold-the-desktop-application">Phase 2: Scaffold the desktop application</h3>
+<ol type="1">
+<li>Create <code>desktop/</code> with a Tauri 2 and TypeScript/React application.</li>
+<li>Establish frontend and Rust test runners.</li>
+<li>Configure the minimum Tauri capabilities.</li>
+<li>Reuse the existing logo and establish visual design tokens matching the Shiny application.</li>
+<li>Create the Import &amp; map and Analyze application shells.</li>
+</ol>
+<p>Deliverable: an installable desktop shell with the intended navigation and layout.</p>
+</section>
+<section id="phase-3-implement-rust-import-and-mapping" class="level3">
+<h3 class="anchored" data-anchor-id="phase-3-implement-rust-import-and-mapping">Phase 3: Implement Rust import and mapping</h3>
+<ol type="1">
+<li>Add native file selection.</li>
+<li>Parse CSV, tab-delimited text, comma-fallback text, XLS, and XLSX.</li>
+<li>Return worksheet names for spreadsheet files.</li>
+<li>Match the current start row, start column, row limit, and column limit semantics.</li>
+<li>Return a 100-row preview without forcing the frontend to hold the entire source table.</li>
+<li>Port default role and drug-name inference.</li>
+<li>Validate unique role assignments and numeric conversion.</li>
+</ol>
+<p>Deliverable: complete Import &amp; map behavior without invoking R.</p>
+</section>
+<section id="phase-4-port-the-bliss-engine" class="level3">
+<h3 class="anchored" data-anchor-id="phase-4-port-the-bliss-engine">Phase 4: Port the Bliss engine</h3>
+<ol type="1">
+<li>Implement typed assay input and result structures.</li>
+<li>Validate controls and required single-agent observations.</li>
+<li>Normalize OD against the mean all-zero control.</li>
+<li>Clip effect values and force controls to zero.</li>
+<li>Average replicates and retain replicate counts.</li>
+<li>Resolve single-agent effects.</li>
+<li>Calculate expected effect and interaction for two or three drugs.</li>
+<li>Compare Rust results against every R golden fixture using a documented floating-point tolerance.</li>
+</ol>
+<p>Deliverable: an independently tested Rust scientific core with R parity.</p>
+</section>
+<section id="phase-5-build-the-analysis-interface" class="level3">
+<h3 class="anchored" data-anchor-id="phase-5-build-the-analysis-interface">Phase 5: Build the analysis interface</h3>
+<ol type="1">
+<li>Render the summary using presentation-neutral Rust results.</li>
+<li>Add stratification controls for three-drug assays.</li>
+<li>Add a symmetric, zero-centered interaction heatmap.</li>
+<li>Add faceted heatmaps for three-drug analysis.</li>
+<li>Add a virtualized processed-data table with filtering and consistent numeric formatting.</li>
+<li>Add explicit empty, loading, validation, warning, and failure states.</li>
+</ol>
+<p>Deliverable: summary, heatmap, and processed-data parity.</p>
+</section>
+<section id="phase-6-recreate-the-bar-plots" class="level3">
+<h3 class="anchored" data-anchor-id="phase-6-recreate-the-bar-plots">Phase 6: Recreate the bar plots</h3>
+<ol type="1">
+<li>Reproduce the two-drug observed percent-growth bars with Plotly.js.</li>
+<li>Add expected-growth wireframes.</li>
+<li>Preserve concentration labels, camera behavior, hover details, and control behavior.</li>
+<li>Implement the three-drug stratified summary bar plot.</li>
+<li>Centralize the color scale and interpretation bands so every view uses the same policy.</li>
+</ol>
+<p>Deliverable: interactive visualization parity.</p>
+</section>
+<section id="phase-7-implement-preferences-and-export" class="level3">
+<h3 class="anchored" data-anchor-id="phase-7-implement-preferences-and-export">Phase 7: Implement preferences and export</h3>
+<ol type="1">
+<li>Persist plot color preferences in the application data directory.</li>
+<li>Use a native save-file dialog.</li>
+<li>Generate styled summary and processed-data worksheets in Rust.</li>
+<li>Render plots to images in the frontend and pass owned image data to the Rust exporter.</li>
+<li>Embed the active heatmap and summary plot in the workbook.</li>
+<li>If approved, include a static two-drug three-dimensional plot snapshot.</li>
+<li>Ensure export uses the visible stratification and plot colors.</li>
+</ol>
+<p>Deliverable: deterministic Excel output reflecting the active analysis.</p>
+</section>
+<section id="phase-8-harden-package-and-compare" class="level3">
+<h3 class="anchored" data-anchor-id="phase-8-harden-package-and-compare">Phase 8: Harden, package, and compare</h3>
+<ol type="1">
+<li>Add unit tests for import, naming, validation, calculations, summaries, and workbook generation.</li>
+<li>Add frontend component tests for mapping and analysis states.</li>
+<li>Add end-to-end import, analyze, and export tests.</li>
+<li>Test macOS and Windows behavior; add Linux if it is a supported target.</li>
+<li>Test large datasets and add progress reporting or documented limits where necessary.</li>
+<li>Configure icons, version metadata, signing, and installers.</li>
+<li>Run R and Rust against the shared fixture corpus before declaring feature parity.</li>
+</ol>
+<p>Deliverable: distributable builds backed by cross-language parity evidence.</p>
+</section>
+</section>
+<section id="recommended-delivery-sequence" class="level2">
+<h2 class="anchored" data-anchor-id="recommended-delivery-sequence">Recommended delivery sequence</h2>
+<p>The first vertical slice should deliberately be narrow:</p>
+<ol type="1">
+<li>Two-drug CSV import.</li>
+<li>Column mapping and validation.</li>
+<li>Rust Bliss calculation.</li>
+<li>Summary and processed-data table.</li>
+<li>Heatmap.</li>
+<li>Excel import and three-drug analysis.</li>
+<li>Interactive bar plots.</li>
+<li>Workbook export and packaging.</li>
+</ol>
+<p>This proves the scientific core early and leaves the most presentation-specific work until numerical parity is established.</p>
+</section>
+<section id="preservation-policy-for-the-r-package" class="level2">
+<h2 class="anchored" data-anchor-id="preservation-policy-for-the-r-package">Preservation policy for the R package</h2>
+<p>During migration:</p>
+<ul>
+<li>Treat the R implementation as the behavioral reference, not as a dependency of the desktop application.</li>
+<li>Continue running the current R tests in CI.</li>
+<li>Add regression fixtures to R first when clarifying scientific behavior.</li>
+<li>Do not reorganize the existing R package merely to accommodate Tauri.</li>
+<li>Keep desktop dependencies entirely below <code>desktop/</code>.</li>
+<li>Exclude <code>desktop/</code>, <code>docs/</code>, and repository-level parity fixtures from <code>R CMD build</code> through <code>.Rbuildignore</code>.</li>
+<li>Do not retire the Shiny application until the Rust implementation passes the agreed parity suite and workbook export checks.</li>
+</ul>
+<p>After parity, the R package can remain supported as a scripting and reproducibility interface even if the Tauri application becomes the primary interactive product.</p>
+</section>
+<section id="immediate-next-decisions" class="level2">
+<h2 class="anchored" data-anchor-id="immediate-next-decisions">Immediate next decisions</h2>
+<p>Before scaffolding the desktop application, decide:</p>
+<ol type="1">
+<li>The authoritative additive, synergistic, and antagonistic thresholds for individual combinations.</li>
+<li>The intended interpretation of aggregate Bliss sums.</li>
+<li>Whether incomplete grids are errors or allowed with missing results.</li>
+<li>Whether non-finite and missing replicate values invalidate a group or are omitted with a warning.</li>
+<li>Whether the Excel export should include raw imported data in addition to processed results.</li>
+<li>Whether a static image of the two-drug three-dimensional plot should be embedded in Excel.</li>
+<li>Initial operating-system targets and signing requirements.</li>
+</ol>
+<p>These choices affect the scientific contract and should be settled before implementation details make them expensive to change.</p>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>
