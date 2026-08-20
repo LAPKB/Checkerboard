@@ -1,8 +1,8 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
-import { buildMapping, compareRegimens, formatNumber, roleLabel, validateRoles } from "./analysis";
+import { aggregateBliss, buildMapping, compareRegimens, exceedanceDomain, formatNumber, inactiveDrugPairSummary, roleLabel, validateRoles } from "./analysis";
 import logo from "./assets/logo.png";
 import {
   defaultPlotColors,
@@ -11,23 +11,29 @@ import {
   type PlotColors,
 } from "./preferences";
 import type {
+  AnalysisPolicy,
   AnalysisResult,
   AppError,
+  BaselineCorrection,
   ColumnRole,
   ComparisonRegimen,
   ComparisonSettings,
   ImportPreview,
   ImportRequest,
+  MicEstimate,
   ProcessedCombination,
+  ResponseType,
 } from "./types";
 import "./App.css";
 
 type Page = "import" | "analyze" | "compare";
 type ResultTab = "summary" | "heatmap" | "bar" | "processed";
+type AnalysisProgress = { completedIterations: number; totalIterations: number };
 
 const BarPlot = lazy(() => import("./BarPlot"));
+const appBuild = "0.7.0";
 
-const roleOptions: ColumnRole[] = ["ignore", "drugA", "drugB", "drugC", "od"];
+const roleOptions: ColumnRole[] = ["ignore", "drugA", "drugB", "drugC", "response"];
 
 const initialImport: ImportRequest = {
   path: "",
@@ -40,8 +46,8 @@ const initialImport: ImportRequest = {
 
 const initialComparisonSettings: ComparisonSettings = {
   minimumEffect: 0,
-  synergyThresholds: [0.1, 0.2],
-  antagonismThreshold: 0.1,
+  synergyThresholds: [10, 20],
+  antagonismThreshold: 10,
 };
 
 function App() {
@@ -53,19 +59,68 @@ function App() {
   const [roles, setRoles] = useState<ColumnRole[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stratifyIndex, setStratifyIndex] = useState(2);
-  const [odThreshold, setOdThreshold] = useState(0.05);
-  const [showCensoredOd, setShowCensoredOd] = useState(true);
+  const [responseType, setResponseType] = useState<ResponseType>("viability");
+  const [baselineCorrection, setBaselineCorrection] = useState<BaselineCorrection>("none");
+  const [bootstrapIterations, setBootstrapIterations] = useState(10);
+  const [randomSeed, setRandomSeed] = useState(123);
+  const [showConfidenceIntervals, setShowConfidenceIntervals] = useState(false);
+  const [micZeroTolerance, setMicZeroTolerance] = useState(5);
+  const [micValues, setMicValues] = useState<(number | null)[]>([]);
+  const [micEstimates, setMicEstimates] = useState<MicEstimate[]>([]);
+  const [micBusy, setMicBusy] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
   const [colors, setColors] = useState<PlotColors>(defaultPlotColors);
   const [comparisonRegimens, setComparisonRegimens] = useState<ComparisonRegimen[]>([]);
   const [comparisonSettings, setComparisonSettings] = useState(initialComparisonSettings);
+  const [editingComparisonId, setEditingComparisonId] = useState<string | null>(null);
+  const suppressNextMicInference = useRef(false);
 
   useEffect(() => {
     loadPlotColors().then(setColors).catch(() => undefined);
   }, []);
 
   const mappingErrors = useMemo(() => validateRoles(roles), [roles]);
+  const currentMapping = useMemo(
+    () => preview ? buildMapping(preview, roles) : null,
+    [preview, roles],
+  );
+
+  useEffect(() => {
+    if (!preview || !currentMapping) {
+      setMicValues([]);
+      setMicEstimates([]);
+      return;
+    }
+    if (suppressNextMicInference.current) {
+      suppressNextMicInference.current = false;
+      setMicBusy(false);
+      setMicError(null);
+      return;
+    }
+    let cancelled = false;
+    setMicBusy(true);
+    setMicError(null);
+    invoke<MicEstimate[]>("infer_mics", {
+      request: {
+        import: importRequest,
+        mapping: currentMapping,
+        responseType,
+        zeroTolerance: micZeroTolerance,
+      },
+    }).then((estimates) => {
+      if (cancelled) return;
+      setMicEstimates(estimates);
+      setMicValues(estimates.map((estimate) => estimate.mic));
+    }).catch((reason) => {
+      if (!cancelled) setMicError(errorMessage(reason));
+    }).finally(() => {
+      if (!cancelled) setMicBusy(false);
+    });
+    return () => { cancelled = true; };
+  }, [preview, currentMapping, importRequest, responseType, micZeroTolerance]);
 
   async function chooseFile() {
     const selected = await open({
@@ -84,6 +139,7 @@ function App() {
     setImportRequest(next);
     setPreview(null);
     setAnalysis(null);
+    setEditingComparisonId(null);
     setError(null);
     try {
       const sheets = await invoke<string[]>("list_worksheets", { path });
@@ -113,25 +169,75 @@ function App() {
     }
   }
 
-  async function runAnalysis(threshold = odThreshold, preserveView = false) {
+  async function runAnalysis(preserveView = false) {
     if (!preview) return;
     const mapping = buildMapping(preview, roles);
     if (!mapping) return;
+    if (micValues.length !== mapping.drugs.length || micValues.some((value) => value === null || !Number.isFinite(value) || value <= 0)) {
+      setError("Enter one positive MIC value for each mapped drug before analysis.");
+      return;
+    }
     setBusy(true);
+    setAnalysisProgress({ completedIterations: 0, totalIterations: bootstrapIterations });
     setError(null);
     try {
+      const requestedPolicy: AnalysisPolicy = {
+        mode: "synergyFinderPlus",
+        responseType,
+        baselineCorrection,
+        bootstrapIterations,
+        randomSeed,
+        cellAdditiveThreshold: 10,
+        odCensorThreshold: 0,
+        allowIncompleteGrid: true,
+      };
+      const onProgress = new Channel<AnalysisProgress>();
+      onProgress.onmessage = setAnalysisProgress;
       const result = await invoke<AnalysisResult>("analyze_table", {
         request: {
           import: importRequest,
           mapping,
-          policy: {
-            cellAdditiveThreshold: 0.05,
-            odCensorThreshold: threshold,
-            allowIncompleteGrid: true,
-          },
+          micValues,
+          micZeroTolerance,
+          policy: requestedPolicy,
         },
+        onProgress,
       });
+      if (
+        result.policy.randomSeed !== requestedPolicy.randomSeed
+        || result.policy.bootstrapIterations !== requestedPolicy.bootstrapIterations
+        || result.policy.responseType !== requestedPolicy.responseType
+        || result.policy.baselineCorrection !== requestedPolicy.baselineCorrection
+      ) {
+        throw new Error("The analysis backend returned settings that differ from the submitted settings.");
+      }
+      if (result.micValues.length !== micValues.length || result.micValues.some((value, index) => value !== micValues[index])) {
+        throw new Error("The analysis backend returned MIC values that differ from the submitted values.");
+      }
+      if (result.micZeroTolerance !== micZeroTolerance) {
+        throw new Error("The analysis backend returned a MIC tolerance that differs from the submitted value.");
+      }
+      const combinationScores = result.processed
+        .filter((row) => row.concentrations.every((value) => value > 0))
+        .map((row) => row.blissInteraction);
+      const calculatedMean = combinationScores.reduce((sum, value) => sum + value, 0) / combinationScores.length;
+      if (!Number.isFinite(calculatedMean) || Math.abs(calculatedMean - result.summary.meanBliss) > 1e-9) {
+        throw new Error("The returned Bliss summary does not match the returned combination-level scores.");
+      }
       setAnalysis(result);
+      if (editingComparisonId) {
+        setComparisonRegimens((current) => current.map((regimen) => regimen.id === editingComparisonId ? {
+          ...regimen,
+          analysis: result,
+          source: {
+            importRequest: { ...importRequest },
+            preview,
+            roles: [...roles],
+            worksheets: [...worksheets],
+            micEstimates: micEstimates.map((estimate) => ({ ...estimate })),
+          },
+        } : regimen));
+      }
       if (!preserveView) {
         setStratifyIndex(result.drugNames.length - 1);
         setPage("analyze");
@@ -141,6 +247,7 @@ function App() {
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
+      setAnalysisProgress(null);
     }
   }
 
@@ -165,8 +272,41 @@ function App() {
       id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${current.length}`,
       label,
       analysis,
+      source: preview ? {
+        importRequest: { ...importRequest },
+        preview,
+        roles: [...roles],
+        worksheets: [...worksheets],
+        micEstimates: micEstimates.map((estimate) => ({ ...estimate })),
+      } : undefined,
     }]);
+    setEditingComparisonId(null);
     setPage("compare");
+  }
+
+  function editComparisonRegimen(regimen: ComparisonRegimen) {
+    if (!regimen.source) {
+      setError("This comparison entry does not contain editable import context. Re-import it once to enable editing.");
+      return;
+    }
+    suppressNextMicInference.current = true;
+    setImportRequest({ ...regimen.source.importRequest });
+    setPreview(regimen.source.preview);
+    setRoles([...regimen.source.roles]);
+    setWorksheets([...regimen.source.worksheets]);
+    setAnalysis(regimen.analysis);
+    setResponseType(regimen.analysis.policy.responseType);
+    setBaselineCorrection(regimen.analysis.policy.baselineCorrection);
+    setBootstrapIterations(regimen.analysis.policy.bootstrapIterations);
+    setRandomSeed(regimen.analysis.policy.randomSeed);
+    setMicValues([...regimen.analysis.micValues]);
+    setMicEstimates(regimen.source.micEstimates.map((estimate) => ({ ...estimate })));
+    setMicZeroTolerance(regimen.analysis.micZeroTolerance);
+    setStratifyIndex(regimen.analysis.drugNames.length - 1);
+    setEditingComparisonId(regimen.id);
+    setError(null);
+    setTab("summary");
+    setPage("analyze");
   }
 
   return (
@@ -174,7 +314,7 @@ function App() {
       <header className="app-header">
         <div className="brand">
           <img className="brand-mark" src={logo} alt="Pmetrics logo" />
-          <span>Checkerboard Bliss</span>
+          <span>Checkerboard Bliss <small>v{appBuild}</small></span>
         </div>
         <nav aria-label="Primary navigation">
           <button className={page === "import" ? "nav-active" : ""} onClick={() => setPage("import")}>
@@ -239,11 +379,15 @@ function App() {
               <NumberField label="Columns to read" value={importRequest.columnLimit} min={0} onChange={(value) => updateRange("columnLimit", value)} />
             </div>
             <p className="help-text">Use 0 to read every remaining row or column. The start row is the header row.</p>
-            <OdDisplayControls
-              threshold={odThreshold}
-              onThresholdChange={setOdThreshold}
-              showCensored={showCensoredOd}
-              onShowCensoredChange={setShowCensoredOd}
+            <AnalysisSettingsControls
+              responseType={responseType}
+              setResponseType={setResponseType}
+              baselineCorrection={baselineCorrection}
+              setBaselineCorrection={setBaselineCorrection}
+              bootstrapIterations={bootstrapIterations}
+              setBootstrapIterations={setBootstrapIterations}
+              randomSeed={randomSeed}
+              setRandomSeed={setRandomSeed}
             />
             <button className="secondary-button full-width" disabled={!importRequest.path || busy} onClick={() => loadPreview()}>
               {busy ? "Reading…" : "Refresh selected range"}
@@ -295,15 +439,8 @@ function App() {
                           <td className="row-number">{rowIndex + 1}</td>
                           {preview.headers.map((_, columnIndex) => {
                             const value = row[columnIndex];
-                            const censored = roles[columnIndex] === "od" && shouldCensorOd(value, odThreshold);
                             return (
-                              <td
-                                className={showCensoredOd && censored ? "censored-value" : undefined}
-                                title={showCensoredOd && censored ? `Original OD: ${value}; analyzed as 0` : value ?? ""}
-                                key={columnIndex}
-                              >
-                                {showCensoredOd && censored ? displayCell("0") : displayCell(value)}
-                              </td>
+                              <td title={value ?? ""} key={columnIndex}>{displayCell(value)}</td>
                             );
                           })}
                         </tr>
@@ -314,9 +451,42 @@ function App() {
                 <div className={mappingErrors.length ? "mapping-status warning" : "mapping-status ready"}>
                   {mappingErrors.length ? mappingErrors.join(" ") : "Ready to analyze the mapped numeric columns."}
                 </div>
-                <button className="success-button" disabled={mappingErrors.length > 0 || busy} onClick={() => runAnalysis()}>
+                {currentMapping && (
+                  <section className="mic-panel">
+                    <h2>MIC-relative comparison coordinates</h2>
+                    <p className="help-text">MICs are inferred from single-agent wells as the lowest dose whose mean viability is within ± the zero tolerance. Review or overwrite them before analysis.</p>
+                    <label>
+                      MIC zero tolerance (percentage points)
+                      <input type="number" min={0} step="any" value={micZeroTolerance} onChange={(event) => setMicZeroTolerance(Math.max(0, Number(event.target.value) || 0))} />
+                    </label>
+                    <div className="range-grid">
+                      {currentMapping.drugs.map((drug, index) => (
+                        <label key={`${drug.name}-${index}`}>
+                          {drug.name} MIC
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={micValues[index] ?? ""}
+                            onChange={(event) => {
+                              const next = [...micValues];
+                              const value = Number(event.target.value);
+                              next[index] = event.target.value === "" || !Number.isFinite(value) ? null : value;
+                              setMicValues(next);
+                            }}
+                          />
+                          <span className="field-help">{micEstimates[index]?.mic == null ? `No qualifying MIC among ${micEstimates[index]?.singleAgentLevels ?? 0} levels.` : `Inferred at mean viability ${formatNumber(micEstimates[index].meanResponseAtMic ?? NaN)}%.`}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {micBusy && <p className="help-text">Inferring MICs…</p>}
+                    {micError && <p className="side-warning">{micError}</p>}
+                  </section>
+                )}
+                <button className="success-button" disabled={mappingErrors.length > 0 || busy || micBusy || micValues.some((value) => value === null || value <= 0)} onClick={() => runAnalysis()}>
                   {busy ? "Analyzing…" : "Analyze with Bliss"}
                 </button>
+                {analysisProgress && <AnalysisProgressBar progress={analysisProgress} />}
               </>
             )}
           </section>
@@ -330,67 +500,95 @@ function App() {
           setStratifyIndex={setStratifyIndex}
           colors={colors}
           setColors={setColors}
-          odThreshold={odThreshold}
-          setOdThreshold={setOdThreshold}
-          showCensoredOd={showCensoredOd}
-          setShowCensoredOd={setShowCensoredOd}
-          applyThreshold={() => runAnalysis(odThreshold, true)}
+          responseType={responseType}
+          setResponseType={setResponseType}
+          baselineCorrection={baselineCorrection}
+          setBaselineCorrection={setBaselineCorrection}
+          bootstrapIterations={bootstrapIterations}
+          setBootstrapIterations={setBootstrapIterations}
+          randomSeed={randomSeed}
+          setRandomSeed={setRandomSeed}
+          showConfidenceIntervals={showConfidenceIntervals}
+          setShowConfidenceIntervals={setShowConfidenceIntervals}
+          rerun={() => runAnalysis(true)}
           busy={busy}
+          analysisProgress={analysisProgress}
           addToComparison={addCurrentToComparison}
           alreadyAdded={comparisonRegimens.some((regimen) => regimen.analysis === analysis)}
+          comparisonEditLabel={comparisonRegimens.find((regimen) => regimen.id === editingComparisonId)?.label ?? null}
         />
       ) : (
         <ComparisonWorkspace
           regimens={comparisonRegimens}
           settings={comparisonSettings}
           setSettings={setComparisonSettings}
-          setRegimens={setComparisonRegimens}
-          importAnother={() => setPage("import")}
+          setRegimens={(next) => {
+            setComparisonRegimens(next);
+            if (editingComparisonId && !next.some((regimen) => regimen.id === editingComparisonId)) {
+              setEditingComparisonId(null);
+            }
+          }}
+          editRegimen={editComparisonRegimen}
+          importAnother={() => {
+            setEditingComparisonId(null);
+            setPage("import");
+          }}
         />
       )}
     </div>
   );
 }
 
-function NumberField({ label, value, min, onChange }: { label: string; value: number; min: number; onChange: (value: number) => void }) {
+function NumberField({ label, value, min, onChange, help }: { label: string; value: number; min: number; onChange: (value: number) => void; help?: string }) {
   return (
     <label>
-      {label}
+      <span className="setting-label">{label}{help && <InfoTip text={help} />}</span>
       <input type="number" min={min} step={1} value={value} onChange={(event) => onChange(Math.max(min, Number(event.target.value) || 0))} />
     </label>
   );
 }
 
-function OdDisplayControls({ threshold, onThresholdChange, showCensored, onShowCensoredChange }: {
-  threshold: number;
-  onThresholdChange: (value: number) => void;
-  showCensored: boolean;
-  onShowCensoredChange: (value: boolean) => void;
+function InfoTip({ text }: { text: string }) {
+  return (
+    <details className="info-tip">
+      <summary aria-label="More information">i</summary>
+      <div className="info-popup" role="tooltip">{text}</div>
+    </details>
+  );
+}
+
+function AnalysisSettingsControls({ responseType, setResponseType, baselineCorrection, setBaselineCorrection, bootstrapIterations, setBootstrapIterations, randomSeed, setRandomSeed }: {
+  responseType: ResponseType;
+  setResponseType: (value: ResponseType) => void;
+  baselineCorrection: BaselineCorrection;
+  setBaselineCorrection: (value: BaselineCorrection) => void;
+  bootstrapIterations: number;
+  setBootstrapIterations: (value: number) => void;
+  randomSeed: number;
+  setRandomSeed: (value: number) => void;
 }) {
   return (
     <div className="od-display-controls">
       <label>
-        OD censor threshold
-        <input
-          type="number"
-          min={0}
-          step={0.001}
-          value={threshold}
-          onChange={(event) => onThresholdChange(Math.max(0, Number(event.target.value) || 0))}
-        />
+        <span className="setting-label">Response type<InfoTip text="Choose Viability (%) when untreated controls are near 100; Fractional viability when controls are near 1; Inhibition (%) when untreated controls are near 0 and larger values mean more inhibition; Raw OD only for unnormalized absorbance values. Raw OD should already be blank-corrected." /></span>
+        <select value={responseType} onChange={(event) => setResponseType(event.target.value as ResponseType)}>
+          <option value="viability">Viability (%)</option>
+          <option value="viabilityFraction">Fractional viability (0–1)</option>
+          <option value="inhibition">Inhibition (%)</option>
+          <option value="rawOd">Raw OD</option>
+        </select>
       </label>
-      <label className="switch-field">
-        Display
-        <span className="switch-control">
-          <input
-            type="checkbox"
-            checked={showCensored}
-            onChange={(event) => onShowCensoredChange(event.target.checked)}
-          />
-          <span>{showCensored ? "Censored OD" : "Original OD"}</span>
-        </span>
+      <label>
+        <span className="setting-label">Synergy baseline correction<InfoTip text="Non leaves responses unchanged. Part adjusts only negative inhibition values (viability above 100%). All applies the fitted single-agent baseline adjustment to every response. Use Non for direct benchmarking unless a correction was prespecified." /></span>
+        <select value={baselineCorrection} onChange={(event) => setBaselineCorrection(event.target.value as BaselineCorrection)}>
+          <option value="none">Non (no correction)</option>
+          <option value="part">Part (negative values)</option>
+          <option value="all">All values</option>
+        </select>
       </label>
-      <span className="field-help">Negative OD values and values with absolute magnitude below the threshold are analyzed as zero. Displayed censored values are highlighted.</span>
+      <NumberField label="Bootstrap iterations" value={bootstrapIterations} min={2} onChange={setBootstrapIterations} help="The number of parametric replicate datasets the native engine simulates. More iterations stabilize the score, p-value, and confidence intervals but take longer. Use at least 1,000 for final reporting when practical." />
+      <NumberField label="Random seed" value={randomSeed} min={0} onChange={setRandomSeed} help="Initializes the native R-compatible random-number generator so the bootstrap is reproducible. The same data, settings, iteration count, and seed produce the same result." />
+      <span className="field-help">Native Rust profile benchmarked against synergyfinder 3.20.0; no imputation or added noise.</span>
     </div>
   );
 }
@@ -405,7 +603,19 @@ function EmptyState({ busy }: { busy: boolean }) {
   );
 }
 
-function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIndex, colors, setColors, odThreshold, setOdThreshold, showCensoredOd, setShowCensoredOd, applyThreshold, busy, addToComparison, alreadyAdded }: {
+function AnalysisProgressBar({ progress }: { progress: AnalysisProgress }) {
+  const total = Math.max(1, progress.totalIterations);
+  const completed = Math.min(total, Math.max(0, progress.completedIterations));
+  const percentage = Math.round(completed / total * 100);
+  return (
+    <div className="analysis-progress" role="status" aria-live="polite">
+      <div><strong>Calculating Bliss surfaces</strong><span>{completed} / {total} iterations · {percentage}%</span></div>
+      <progress max={total} value={completed} aria-label={`Bliss calculation progress: ${percentage}%`} />
+    </div>
+  );
+}
+
+function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIndex, colors, setColors, responseType, setResponseType, baselineCorrection, setBaselineCorrection, bootstrapIterations, setBootstrapIterations, randomSeed, setRandomSeed, showConfidenceIntervals, setShowConfidenceIntervals, rerun, busy, analysisProgress, addToComparison, alreadyAdded, comparisonEditLabel }: {
   analysis: AnalysisResult;
   tab: ResultTab;
   setTab: (tab: ResultTab) => void;
@@ -413,16 +623,28 @@ function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIn
   setStratifyIndex: (index: number) => void;
   colors: PlotColors;
   setColors: (colors: PlotColors) => void;
-  odThreshold: number;
-  setOdThreshold: (value: number) => void;
-  showCensoredOd: boolean;
-  setShowCensoredOd: (value: boolean) => void;
-  applyThreshold: () => Promise<void>;
+  responseType: ResponseType;
+  setResponseType: (value: ResponseType) => void;
+  baselineCorrection: BaselineCorrection;
+  setBaselineCorrection: (value: BaselineCorrection) => void;
+  bootstrapIterations: number;
+  setBootstrapIterations: (value: number) => void;
+  randomSeed: number;
+  setRandomSeed: (value: number) => void;
+  showConfidenceIntervals: boolean;
+  setShowConfidenceIntervals: (value: boolean) => void;
+  rerun: () => Promise<void>;
   busy: boolean;
+  analysisProgress: AnalysisProgress | null;
   addToComparison: () => void;
   alreadyAdded: boolean;
+  comparisonEditLabel: string | null;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
+  const settingsChanged = responseType !== analysis.policy.responseType
+    || baselineCorrection !== analysis.policy.baselineCorrection
+    || bootstrapIterations !== analysis.policy.bootstrapIterations
+    || randomSeed !== analysis.policy.randomSeed;
 
   async function persistColors() {
     try {
@@ -459,18 +681,35 @@ function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIn
       <aside className="sidebar">
         <section>
           <h2>Analysis</h2>
+          {comparisonEditLabel && (
+            <div className="comparison-edit-notice" role="status">
+              <strong>Editing “{comparisonEditLabel}”</strong>
+              <span>Recalculate to replace this comparison result in place.</span>
+            </div>
+          )}
           <p className="combination-name">{analysis.drugNames.join(" + ")}</p>
-          <p className="help-text">Control mean OD: {formatNumber(analysis.control.meanOd)} from {analysis.control.replicateCount} replicate{analysis.control.replicateCount === 1 ? "" : "s"}.</p>
+          <p className="help-text">Native SynergyFinder+ compatible Bliss · scores in percentage points.</p>
+          <p className="help-text">MICs: {analysis.drugNames.map((name, index) => `${name} ${analysis.micValues[index]}`).join(" · ")}</p>
+          <p className="help-text">MIC inference tolerance: ±{analysis.micZeroTolerance} viability percentage points.</p>
         </section>
-        <OdDisplayControls
-          threshold={odThreshold}
-          onThresholdChange={setOdThreshold}
-          showCensored={showCensoredOd}
-          onShowCensoredChange={setShowCensoredOd}
+        <AnalysisSettingsControls
+          responseType={responseType}
+          setResponseType={setResponseType}
+          baselineCorrection={baselineCorrection}
+          setBaselineCorrection={setBaselineCorrection}
+          bootstrapIterations={bootstrapIterations}
+          setBootstrapIterations={setBootstrapIterations}
+          randomSeed={randomSeed}
+          setRandomSeed={setRandomSeed}
         />
-        <button className="secondary-button full-width" disabled={busy} onClick={applyThreshold}>
-          {busy ? "Applying…" : "Apply OD censoring"}
+        <button className="secondary-button full-width" disabled={busy} onClick={rerun}>
+          {busy ? "Recalculating…" : "Recalculate"}
         </button>
+        {analysisProgress && <AnalysisProgressBar progress={analysisProgress} />}
+        <p className={settingsChanged ? "side-warning" : "help-text"}>
+          Displayed result calculated with seed {analysis.policy.randomSeed} and {analysis.policy.bootstrapIterations} iterations.
+          {settingsChanged ? " Settings have changed; click Recalculate." : ""}
+        </p>
         {analysis.drugNames.length === 3 && (
           <label>
             Stratify / facet by
@@ -479,6 +718,14 @@ function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIn
             </select>
           </label>
         )}
+        <label className="switch-control confidence-toggle">
+          <input type="checkbox" checked={showConfidenceIntervals} onChange={(event) => setShowConfidenceIntervals(event.target.checked)} />
+          Show 95% confidence intervals
+        </label>
+        <button className="success-button full-width comparison-add" disabled={alreadyAdded || comparisonEditLabel !== null} onClick={addToComparison}>
+          {comparisonEditLabel ? "Linked to comparison" : alreadyAdded ? "Added to comparison" : "Add to comparison"}
+        </button>
+        <p className="help-text">{comparisonEditLabel ? "Successful recalculation updates the existing entry and keeps its name." : "Add this analysis to the MIC-relative regimen comparison."}</p>
         <hr />
         <h2>Plot colors</h2>
         <ColorField label="Antagonism" value={colors.low} onChange={(low) => setColors({ ...colors, low })} />
@@ -489,11 +736,6 @@ function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIn
         <hr />
         <button className="primary-button full-width" onClick={exportWorkbook}>Export results (.xlsx)</button>
         <p className="help-text">Exports summary metrics and all processed combinations.</p>
-        <hr />
-        <button className="success-button full-width comparison-add" disabled={alreadyAdded} onClick={addToComparison}>
-          {alreadyAdded ? "Added to comparison" : "Add to comparison"}
-        </button>
-        <p className="help-text">Add two or more analyzed regimens, then rank them at matched relative dose locations.</p>
         {notice && <div className="side-notice">{notice}</div>}
         {analysis.warnings.map((warning) => <div className="side-warning" key={warning.code}>{warning.message}</div>)}
       </aside>
@@ -507,25 +749,26 @@ function AnalysisWorkspace({ analysis, tab, setTab, stratifyIndex, setStratifyIn
           ))}
         </div>
         <div className="result-panel">
-          {tab === "summary" && <SummaryPanel analysis={analysis} stratifyIndex={stratifyIndex} />}
-          {tab === "heatmap" && <HeatmapPanel analysis={analysis} stratifyIndex={stratifyIndex} colors={colors} />}
+          {tab === "summary" && <SummaryPanel analysis={analysis} stratifyIndex={stratifyIndex} showConfidenceIntervals={showConfidenceIntervals} />}
+          {tab === "heatmap" && <HeatmapPanel analysis={analysis} stratifyIndex={stratifyIndex} colors={colors} showConfidenceIntervals={showConfidenceIntervals} />}
           {tab === "bar" && (
             <Suspense fallback={<div className="empty-state"><h2>Loading interactive plot…</h2></div>}>
-              <BarPlot analysis={analysis} stratifyIndex={stratifyIndex} colors={colors} />
+              <BarPlot analysis={analysis} stratifyIndex={stratifyIndex} colors={colors} showConfidenceIntervals={showConfidenceIntervals} />
             </Suspense>
           )}
-          {tab === "processed" && <ProcessedTable analysis={analysis} showCensoredOd={showCensoredOd} />}
+          {tab === "processed" && <ProcessedTable analysis={analysis} />}
         </div>
       </section>
     </main>
   );
 }
 
-function ComparisonWorkspace({ regimens, settings, setSettings, setRegimens, importAnother }: {
+function ComparisonWorkspace({ regimens, settings, setSettings, setRegimens, editRegimen, importAnother }: {
   regimens: ComparisonRegimen[];
   settings: ComparisonSettings;
   setSettings: (settings: ComparisonSettings) => void;
   setRegimens: (regimens: ComparisonRegimen[]) => void;
+  editRegimen: (regimen: ComparisonRegimen) => void;
   importAnother: () => void;
 }) {
   const cohorts = ([2, 3] as const).map((drugCount) => ({
@@ -552,7 +795,7 @@ function ComparisonWorkspace({ regimens, settings, setSettings, setRegimens, imp
         <div className="card-heading">
           <div>
             <h1>Dose-stratified regimen ranking</h1>
-            <p>Probability of superiority at matched relative dose coordinates.</p>
+            <p>Ranked by synergy exceedance AUC; matched-dose probability of superiority remains available as a secondary measure.</p>
           </div>
           <span className="count-badge">{regimens.length} regimen{regimens.length === 1 ? "" : "s"}</span>
         </div>
@@ -565,6 +808,7 @@ function ComparisonWorkspace({ regimens, settings, setSettings, setRegimens, imp
               settings={settings}
               rename={(id, label) => setRegimens(regimens.map((regimen) => regimen.id === id ? { ...regimen, label } : regimen))}
               remove={(id) => setRegimens(regimens.filter((regimen) => regimen.id !== id))}
+              edit={editRegimen}
             />
           ))}
         </div>
@@ -574,15 +818,16 @@ function ComparisonWorkspace({ regimens, settings, setSettings, setRegimens, imp
 }
 
 function ComparisonPercentField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
-  return <label>{label} (%)<input type="number" step={1} value={value * 100} onChange={(event) => onChange(Math.max(0, Number(event.target.value) || 0) / 100)} /></label>;
+  return <label>{label} (%)<input type="number" step={1} value={value} onChange={(event) => onChange(Math.max(0, Number(event.target.value) || 0))} /></label>;
 }
 
-function ComparisonCohort({ drugCount, regimens, settings, rename, remove }: {
+function ComparisonCohort({ drugCount, regimens, settings, rename, remove, edit }: {
   drugCount: 2 | 3;
   regimens: ComparisonRegimen[];
   settings: ComparisonSettings;
   rename: (id: string, label: string) => void;
   remove: (id: string) => void;
+  edit: (regimen: ComparisonRegimen) => void;
 }) {
   const result = regimens.length >= 2 ? compareRegimens(regimens, settings) : null;
   return (
@@ -592,8 +837,13 @@ function ComparisonCohort({ drugCount, regimens, settings, rename, remove }: {
         {regimens.map((regimen) => (
           <div className="regimen-item" key={regimen.id}>
             <input aria-label={`Name for ${regimen.label}`} value={regimen.label} onChange={(event) => rename(regimen.id, event.target.value)} />
-            <span>{regimen.analysis.processed.filter((row) => row.concentrations.every((value) => value > 0)).length} combination locations</span>
-            <button aria-label={`Remove ${regimen.label}`} onClick={() => remove(regimen.id)}>Remove</button>
+            <span>
+              {regimen.analysis.processed.filter((row) => row.concentrations.every((value) => value > 0)).length} locations · MICs {regimen.analysis.micValues.join(" / ")}
+            </span>
+            <div className="regimen-actions">
+              <button className="edit-regimen-button" aria-label={`Edit ${regimen.label}`} title="Edit and recalculate this regimen" onClick={() => edit(regimen)}>✎</button>
+              <button aria-label={`Remove ${regimen.label}`} onClick={() => remove(regimen.id)}>Remove</button>
+            </div>
           </div>
         ))}
       </div>
@@ -602,11 +852,11 @@ function ComparisonCohort({ drugCount, regimens, settings, rename, remove }: {
           <h3>Overall ranking</h3>
           <div className="result-table-wrap">
             <table className="result-table ranking-table">
-              <thead><tr><th>Rank</th><th>Regimen</th><th>Avg. win probability</th><th>Eligible locations</th><th>Bliss ≥ {formatPercent(settings.synergyThresholds[0])}</th><th>Bliss ≥ {formatPercent(settings.synergyThresholds[1])}</th><th>Bliss ≤ −{formatPercent(settings.antagonismThreshold)}</th></tr></thead>
-              <tbody>{result.rankings.map((row) => <tr key={row.regimen.id}><td>{row.rank}</td><td><strong>{row.regimen.label}</strong></td><td>{formatProbability(row.averageWinProbability)}</td><td>{row.eligibleLocations}</td><td>{formatProbability(row.synergyBreadth[0])}</td><td>{formatProbability(row.synergyBreadth[1])}</td><td>{formatProbability(row.antagonismBurden)}</td></tr>)}</tbody>
+              <thead><tr><th>Rank</th><th>Regimen</th><th>Exceedance AUC</th><th>Avg. win probability</th><th>Eligible locations</th><th>Bliss ≥ {formatPercent(settings.synergyThresholds[0])}</th><th>Bliss ≥ {formatPercent(settings.synergyThresholds[1])}</th><th>Bliss ≤ −{formatPercent(settings.antagonismThreshold)}</th></tr></thead>
+              <tbody>{result.rankings.map((row) => <tr key={row.regimen.id}><td>{row.rank}</td><td><strong>{row.regimen.label}</strong></td><td>{row.exceedanceAuc === null ? "—" : formatNumber(row.exceedanceAuc)}</td><td>{formatProbability(row.averageWinProbability)}</td><td>{row.eligibleLocations}</td><td>{formatProbability(row.synergyBreadth[0])}</td><td>{formatProbability(row.synergyBreadth[1])}</td><td>{formatProbability(row.antagonismBurden)}</td></tr>)}</tbody>
             </table>
           </div>
-          <h3>Synergy exceedance curves</h3>
+          <h3 className="title-with-info">Synergy exceedance curves<InfoTip text="For every Bliss threshold on the horizontal axis, the curve shows the percentage of eligible combination locations whose Bliss score is at least that threshold. A curve that stays higher and extends farther right indicates broader and stronger positive interaction. Exceedance AUC integrates this proportion over the shared displayed threshold range; larger AUC ranks higher. Eligibility follows the minimum observed-effect filter. The curve is descriptive and does not itself provide a p-value or confidence interval." /></h3>
           <ExceedanceChart regimens={regimens} minimumEffect={settings.minimumEffect} />
           <h3>Pairwise probability of superiority</h3>
           <div className="result-table-wrap">
@@ -618,7 +868,7 @@ function ComparisonCohort({ drugCount, regimens, settings, rename, remove }: {
               })}</tr>)}</tbody>
             </table>
           </div>
-          <p className="policy-note">Rows are compared only where every component is present, observed effect meets the filter, and normalized dose coordinates match. Ties count as half a win. These are descriptive results; confidence intervals require replicate experiments and hierarchical resampling.</p>
+          <p className="policy-note">Ranking is by descending exceedance AUC over the cohort's shared Bliss-threshold range. Pairwise rows are compared only where every component is present, observed effect meets the filter, and normalized dose coordinates match. Ties count as half a win. These are descriptive results; confidence intervals require replicate experiments and hierarchical resampling.</p>
         </>
       )}
     </section>
@@ -636,12 +886,7 @@ function ExceedanceChart({ regimens, minimumEffect }: { regimens: ComparisonRegi
   }));
   const allValues = series.flatMap((item) => item.values);
   if (allValues.length === 0) return <div className="comparison-empty">No locations meet the current effect filter.</div>;
-  let minimum = Math.min(0, ...allValues);
-  let maximum = Math.max(0, ...allValues);
-  if (maximum - minimum < 0.01) {
-    minimum -= 0.01;
-    maximum += 0.01;
-  }
+  const [minimum, maximum] = exceedanceDomain(allValues);
   const thresholds = Array.from({ length: 61 }, (_, index) => minimum + (maximum - minimum) * index / 60);
   const left = 52;
   const top = 14;
@@ -676,28 +921,38 @@ function formatProbability(value: number | null) {
 }
 
 function formatPercent(value: number) {
-  return `${(value * 100).toFixed(value * 100 % 1 ? 1 : 0)}%`;
+  return `${value.toFixed(value % 1 ? 1 : 0)}%`;
 }
 
-function SummaryPanel({ analysis, stratifyIndex }: { analysis: AnalysisResult; stratifyIndex: number }) {
+function SummaryPanel({ analysis, stratifyIndex, showConfidenceIntervals }: { analysis: AnalysisResult; stratifyIndex: number; showConfidenceIntervals: boolean }) {
   const strata = analysis.drugNames.length === 3 ? groupedSummaries(analysis, stratifyIndex) : [];
+  const overall = aggregateBliss(analysis.processed.filter((row) => row.concentrations.every((value) => value > 0)));
+  const pairAxes = analysis.drugNames.map((_, index) => index).filter((index) => index !== stratifyIndex);
+  const pair = inactiveDrugPairSummary(analysis, stratifyIndex);
   return (
     <div className="summary-panel">
       <h1>Bliss interaction summary</h1>
       <div className="metrics-grid">
-        <Metric label="Bliss sum" value={formatNumber(analysis.summary.sumBliss)} />
-        <Metric label="Mean Bliss" value={formatNumber(analysis.summary.meanBliss)} />
-        <Metric label="Positive sum" value={formatNumber(analysis.summary.positiveSum)} />
-        <Metric label="Negative sum" value={formatNumber(analysis.summary.negativeSum)} />
+        <Metric label="Bliss synergy score" value={formatNumber(analysis.summary.meanBliss)} />
+        <Metric label="Combination locations" value={String(analysis.summary.combinationCount)} />
+        <Metric label="P value vs zero" value={analysis.summary.pValue ?? "—"} />
+        <Metric label="Score unit" value="percentage points" />
       </div>
       <table className="result-table summary-table">
-        <thead><tr>{strata.length > 0 && <th>{analysis.drugNames[stratifyIndex]}</th>}<th>Bliss Sum</th><th>Interpretation</th></tr></thead>
+        <thead><tr>{strata.length > 0 && <th>{analysis.drugNames[stratifyIndex]}</th>}<th>Mean Bliss synergy</th>{showConfidenceIntervals && <th>Approx. 95% CI</th>}<th>Interpretation</th></tr></thead>
         <tbody>
-          {strata.map((stratum) => <tr key={stratum.concentration}><td>{stratum.concentration}</td><td>{formatNumber(stratum.sum)}</td><td>{legacyInterpretation(stratum.sum)}</td></tr>)}
-          <tr><td>{strata.length > 0 ? "Total" : formatNumber(analysis.summary.sumBliss)}</td>{strata.length > 0 && <td>{formatNumber(analysis.summary.sumBliss)}</td>}<td><span className={`interpretation ${analysis.summary.interpretation}`}>{capitalize(analysis.summary.interpretation)}</span></td></tr>
+          {strata.map((stratum) => <tr key={stratum.concentration}><td>{stratum.concentration}</td><td>{formatNumber(stratum.mean)}</td>{showConfidenceIntervals && <td>{formatCi(stratum)}</td>}<td>{synergyFinderInterpretation(stratum.mean)}</td></tr>)}
+          <tr><td>{strata.length > 0 ? "Overall" : formatNumber(analysis.summary.meanBliss)}</td>{strata.length > 0 && <td>{formatNumber(analysis.summary.meanBliss)}</td>}{showConfidenceIntervals && <td>{formatCi(overall)}</td>}<td><span className={`interpretation ${analysis.summary.interpretation}`}>{capitalize(analysis.summary.interpretation)}</span></td></tr>
         </tbody>
       </table>
-      <p className="policy-note">Legacy aggregate thresholds are preserved for compatibility. Mean and signed sums are shown because the total depends on grid size.</p>
+      {pair && (
+        <div className="pair-summary">
+          <strong>{pairAxes.map((index) => analysis.drugNames[index]).join(" + ")} when {analysis.drugNames[stratifyIndex]} = 0:</strong>
+          <span>mean Bliss {formatNumber(pair.mean)}{showConfidenceIntervals ? `; approximate 95% CI ${formatCi(pair)}` : ""} ({pair.count} locations)</span>
+        </div>
+      )}
+      <p className="policy-note">The matrix score is the mean over locations where every drug concentration is positive, matching synergyfinder 3.20.0.</p>
+      {showConfidenceIntervals && <p className="policy-note">Summary confidence intervals are approximate and propagate the cellwise bootstrap SEMs; heatmap intervals are the native engine's empirical cellwise bootstrap intervals.</p>}
     </div>
   );
 }
@@ -706,7 +961,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function HeatmapPanel({ analysis, stratifyIndex, colors }: { analysis: AnalysisResult; stratifyIndex: number; colors: PlotColors }) {
+function HeatmapPanel({ analysis, stratifyIndex, colors, showConfidenceIntervals }: { analysis: AnalysisResult; stratifyIndex: number; colors: PlotColors; showConfidenceIntervals: boolean }) {
   const facetValues = analysis.drugNames.length === 3
     ? uniqueSorted(analysis.processed.map((row) => row.concentrations[stratifyIndex]))
     : [null];
@@ -719,14 +974,14 @@ function HeatmapPanel({ analysis, stratifyIndex, colors }: { analysis: AnalysisR
       <div className="facet-grid">
         {facetValues.map((facet) => {
           const rows = facet === null ? analysis.processed : analysis.processed.filter((row) => row.concentrations[stratifyIndex] === facet);
-          return <Heatmap key={facet ?? "all"} rows={rows} xIndex={axes[1]} yIndex={axes[0]} xName={analysis.drugNames[axes[1]]} yName={analysis.drugNames[axes[0]]} title={facet === null ? null : `${analysis.drugNames[stratifyIndex]} = ${facet}`} maxAbs={maxAbs} colors={colors} />;
+          return <Heatmap key={facet ?? "all"} rows={rows} xIndex={axes[1]} yIndex={axes[0]} xName={analysis.drugNames[axes[1]]} yName={analysis.drugNames[axes[0]]} title={facet === null ? null : `${analysis.drugNames[stratifyIndex]} = ${facet}`} maxAbs={maxAbs} colors={colors} showConfidenceIntervals={showConfidenceIntervals} />;
         })}
       </div>
     </div>
   );
 }
 
-function Heatmap({ rows, xIndex, yIndex, xName, yName, title, maxAbs, colors }: { rows: ProcessedCombination[]; xIndex: number; yIndex: number; xName: string; yName: string; title: string | null; maxAbs: number; colors: PlotColors }) {
+function Heatmap({ rows, xIndex, yIndex, xName, yName, title, maxAbs, colors, showConfidenceIntervals }: { rows: ProcessedCombination[]; xIndex: number; yIndex: number; xName: string; yName: string; title: string | null; maxAbs: number; colors: PlotColors; showConfidenceIntervals: boolean }) {
   const xValues = uniqueSorted(rows.map((row) => row.concentrations[xIndex]));
   const yValues = uniqueSorted(rows.map((row) => row.concentrations[yIndex])).reverse();
   const lookup = new Map(rows.map((row) => [`${row.concentrations[xIndex]}|${row.concentrations[yIndex]}`, row]));
@@ -734,14 +989,14 @@ function Heatmap({ rows, xIndex, yIndex, xName, yName, title, maxAbs, colors }: 
     <figure className="heatmap-figure">
       {title && <figcaption>{title}</figcaption>}
       <div className="heatmap-y-name">{yName}</div>
-      <div className="heatmap-grid" style={{ gridTemplateColumns: `3.2rem repeat(${xValues.length}, minmax(3rem, 1fr))` }}>
+      <div className="heatmap-grid" style={{ gridTemplateColumns: `4rem repeat(${xValues.length}, minmax(5rem, 1fr))` }}>
         <span />
         {xValues.map((value) => <span className="axis-label" key={`x-${value}`}>{value}</span>)}
         {yValues.flatMap((y) => [
           <span className="axis-label" key={`yl-${y}`}>{y}</span>,
           ...xValues.map((x) => {
             const row = lookup.get(`${x}|${y}`);
-            return <span className="heat-cell" key={`${x}-${y}`} title={row ? `Bliss: ${formatNumber(row.blissInteraction)}` : "Not observed"} style={{ backgroundColor: row ? interactionColor(row.blissInteraction, maxAbs, colors) : "#edf0f2" }}>{row ? formatNumber(row.blissInteraction, 2) : "—"}</span>;
+            return <span className="heat-cell" key={`${x}-${y}`} title={row ? `Bliss: ${formatNumber(row.blissInteraction)}${row.blissCiLeft == null || row.blissCiRight == null ? "" : `; 95% CI ${formatNumber(row.blissCiLeft)} to ${formatNumber(row.blissCiRight)}`}` : "Not observed"} style={{ backgroundColor: row ? interactionColor(row.blissInteraction, maxAbs, colors) : "#edf0f2" }}>{row ? <><strong>{formatNumber(row.blissInteraction, 2)}</strong>{showConfidenceIntervals && row.blissCiLeft != null && row.blissCiRight != null && <small>{formatNumber(row.blissCiLeft, 1)} to {formatNumber(row.blissCiRight, 1)}</small>}</> : "—"}</span>;
           }),
         ])}
       </div>
@@ -750,14 +1005,14 @@ function Heatmap({ rows, xIndex, yIndex, xName, yName, title, maxAbs, colors }: 
   );
 }
 
-function ProcessedTable({ analysis, showCensoredOd }: { analysis: AnalysisResult; showCensoredOd: boolean }) {
+function ProcessedTable({ analysis }: { analysis: AnalysisResult }) {
   return (
     <div className="processed-panel">
       <h1>Processed combinations</h1>
       <div className="result-table-wrap">
         <table className="result-table">
-          <thead><tr>{analysis.drugNames.map((name) => <th key={name}>{name}</th>)}<th>Mean OD</th><th>Effect</th>{analysis.drugNames.map((name) => <th key={`effect-${name}`}>Effect {name}</th>)}<th>Bliss expected</th><th>Bliss interaction</th><th>Replicates</th></tr></thead>
-          <tbody>{analysis.processed.map((row, index) => <tr key={index}>{row.concentrations.map((value, column) => <td key={column}>{value}</td>)}<td className={showCensoredOd && row.censoredReplicateCount > 0 ? "censored-value" : undefined} title={row.censoredReplicateCount > 0 ? `${row.censoredReplicateCount} of ${row.replicateCount} OD values censored; original mean ${formatNumber(row.meanOriginalOd)}` : undefined}>{formatNumber(showCensoredOd ? row.meanCensoredOd : row.meanOriginalOd)}</td><td>{formatNumber(row.effect)}</td>{row.singleAgentEffects.map((value, column) => <td key={column}>{formatNumber(value)}</td>)}<td>{formatNumber(row.blissExpected)}</td><td className={row.interpretation}>{formatNumber(row.blissInteraction)}</td><td>{row.replicateCount}</td></tr>)}</tbody>
+          <thead><tr>{analysis.drugNames.map((name) => <th key={name}>{name}</th>)}{analysis.drugNames.map((name) => <th key={`mic-${name}`}>{name} log₂(dose/MIC)</th>)}<th>Original response</th><th>Inhibition (%)</th>{analysis.drugNames.map((name) => <th key={`effect-${name}`}>{name} inhibition</th>)}<th>Bliss expected</th><th>Bliss synergy</th><th>95% CI</th><th>Replicates</th></tr></thead>
+          <tbody>{analysis.processed.map((row, index) => <tr key={index}>{row.concentrations.map((value, column) => <td key={column}>{value}</td>)}{row.concentrations.map((value, column) => <td key={`mic-${column}`}>{value > 0 ? formatNumber(Math.log2(value / analysis.micValues[column])) : "—"}</td>)}<td>{formatNumber(row.meanOriginalOd)}</td><td>{formatNumber(row.effect)}</td>{row.singleAgentEffects.map((value, column) => <td key={column}>{formatNumber(value)}</td>)}<td>{formatNumber(row.blissExpected)}</td><td className={row.interpretation}>{formatNumber(row.blissInteraction)}</td><td>{row.blissCiLeft == null || row.blissCiRight == null ? "—" : `${formatNumber(row.blissCiLeft)} to ${formatNumber(row.blissCiRight)}`}</td><td>{row.replicateCount}</td></tr>)}</tbody>
         </table>
       </div>
     </div>
@@ -769,10 +1024,14 @@ function ColorField({ label, value, onChange }: { label: string; value: string; 
 }
 
 function groupedSummaries(analysis: AnalysisResult, index: number) {
-  return uniqueSorted(analysis.processed.map((row) => row.concentrations[index])).map((concentration) => ({
-    concentration,
-    sum: analysis.processed.filter((row) => row.concentrations[index] === concentration).reduce((total, row) => total + row.blissInteraction, 0),
-  }));
+  return uniqueSorted(analysis.processed.filter((row) => row.concentrations.every((value) => value > 0)).map((row) => row.concentrations[index])).map((concentration) => {
+    const rows = analysis.processed.filter((row) => row.concentrations.every((value) => value > 0) && row.concentrations[index] === concentration);
+    return { concentration, ...aggregateBliss(rows) };
+  });
+}
+
+function formatCi(summary: { ciLeft: number | null; ciRight: number | null }) {
+  return summary.ciLeft == null || summary.ciRight == null ? "—" : `${formatNumber(summary.ciLeft)} to ${formatNumber(summary.ciRight)}`;
 }
 
 function uniqueSorted(values: number[]) {
@@ -795,20 +1054,14 @@ function hexRgb(value: string) {
   return [0, 2, 4].map((offset) => parseInt(normalized.slice(offset, offset + 2), 16));
 }
 
-function legacyInterpretation(value: number) {
-  return value > 1 ? "Synergistic" : value < 0 ? "Antagonistic" : "Additive";
+function synergyFinderInterpretation(value: number) {
+  return value > 10 ? "Synergistic" : value < -10 ? "Antagonistic" : "Additive";
 }
 
 function displayCell(value?: string) {
   if (value === undefined || value === "") return "";
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric.toFixed(3) : value;
-}
-
-function shouldCensorOd(value: string | undefined, threshold: number) {
-  if (value === undefined || value.trim() === "") return false;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && (numeric < 0 || Math.abs(numeric) < threshold);
 }
 
 function errorMessage(reason: unknown) {

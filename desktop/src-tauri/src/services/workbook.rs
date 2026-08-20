@@ -12,6 +12,17 @@ pub fn export_results(
     analysis: &AnalysisResult,
     stratify_index: Option<usize>,
 ) -> Result<(), AppError> {
+    if analysis.mic_values.len() != analysis.drug_names.len()
+        || analysis
+            .mic_values
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(AppError::new(
+            "invalidMicValues",
+            "The analysis must contain one positive MIC for each drug before export.",
+        ));
+    }
     if Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -42,7 +53,12 @@ pub fn export_results(
     let number_format = Format::new().set_num_format("0.000");
 
     worksheet
-        .write_string_with_format(0, 0, "Checkerboard Bliss Analysis", &title_format)
+        .write_string_with_format(
+            0,
+            0,
+            "SynergyFinder+ Compatible Bliss Analysis",
+            &title_format,
+        )
         .map_err(xlsx_error)?;
     worksheet
         .write_string(
@@ -56,13 +72,33 @@ pub fn export_results(
             2,
             0,
             format!(
-                "Control mean OD: {:.6} ({} replicates)",
-                analysis.control.mean_od, analysis.control.replicate_count
+                "Native Rust analysis benchmarked against synergyfinder 3.20.0; response type: {:?}; baseline correction: {:?}; bootstrap iterations: {}; seed: {}",
+                analysis.policy.response_type,
+                analysis.policy.baseline_correction,
+                analysis.policy.bootstrap_iterations,
+                analysis.policy.random_seed
+            ),
+        )
+        .map_err(xlsx_error)?;
+    worksheet
+        .write_string(
+            3,
+            0,
+            format!(
+                "MIC-relative coordinates (inference tolerance ±{} viability percentage points): {}",
+                analysis.mic_zero_tolerance,
+                analysis
+                    .drug_names
+                    .iter()
+                    .zip(&analysis.mic_values)
+                    .map(|(drug, mic)| format!("{drug} MIC={mic}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
         )
         .map_err(xlsx_error)?;
 
-    let mut row = 4;
+    let mut row = 5;
     if analysis.drug_names.len() == 3 {
         let index = stratify_index.unwrap_or(2);
         let stratified = summarize_by(analysis, index).ok_or_else(|| {
@@ -73,7 +109,7 @@ pub fn export_results(
         })?;
         for (column, heading) in [
             stratified.stratify_drug.as_str(),
-            "Bliss Sum",
+            "Mean Bliss Synergy",
             "Interpretation",
         ]
         .iter()
@@ -89,7 +125,7 @@ pub fn export_results(
                 .write_number(row, 0, summary_row.concentration)
                 .map_err(xlsx_error)?;
             worksheet
-                .write_number_with_format(row, 1, summary_row.summary.sum_bliss, &number_format)
+                .write_number_with_format(row, 1, summary_row.summary.mean_bliss, &number_format)
                 .map_err(xlsx_error)?;
             write_aggregate_interpretation(worksheet, row, 2, summary_row.summary.interpretation)?;
             row += 1;
@@ -98,31 +134,51 @@ pub fn export_results(
             .write_string(row, 0, "Total")
             .map_err(xlsx_error)?;
         worksheet
-            .write_number_with_format(row, 1, analysis.summary.sum_bliss, &number_format)
+            .write_number_with_format(row, 1, analysis.summary.mean_bliss, &number_format)
             .map_err(xlsx_error)?;
         write_aggregate_interpretation(worksheet, row, 2, analysis.summary.interpretation)?;
         row += 3;
     } else {
-        for (column, heading) in ["Bliss Sum", "Interpretation"].iter().enumerate() {
+        for (column, heading) in [
+            "Mean Bliss Synergy",
+            "P Value",
+            "Combination Locations",
+            "Interpretation",
+        ]
+        .iter()
+        .enumerate()
+        {
             worksheet
                 .write_string_with_format(row, column as u16, *heading, &header_format)
                 .map_err(xlsx_error)?;
         }
         row += 1;
         worksheet
-            .write_number_with_format(row, 0, analysis.summary.sum_bliss, &number_format)
+            .write_number_with_format(row, 0, analysis.summary.mean_bliss, &number_format)
             .map_err(xlsx_error)?;
-        write_aggregate_interpretation(worksheet, row, 1, analysis.summary.interpretation)?;
+        worksheet
+            .write_string(row, 1, analysis.summary.p_value.as_deref().unwrap_or(""))
+            .map_err(xlsx_error)?;
+        worksheet
+            .write_number(row, 2, analysis.summary.combination_count as f64)
+            .map_err(xlsx_error)?;
+        write_aggregate_interpretation(worksheet, row, 3, analysis.summary.interpretation)?;
         row += 3;
     }
 
     let mut headers = analysis.drug_names.clone();
+    headers.extend(
+        analysis
+            .drug_names
+            .iter()
+            .map(|drug| format!("{drug} log2(Dose/MIC)")),
+    );
     headers.extend([
-        "Mean Original OD".into(),
-        "Mean Censored OD".into(),
-        "Censored Replicates".into(),
+        "Mean Original Response".into(),
+        "Mean Inhibition (%)".into(),
+        "Adjusted Replicates".into(),
     ]);
-    headers.push("Effect".into());
+    headers.push("Observed Inhibition (%)".into());
     headers.extend(
         analysis
             .drug_names
@@ -131,7 +187,10 @@ pub fn export_results(
     );
     headers.extend([
         "Bliss Expected".into(),
-        "Bliss Interaction".into(),
+        "Bliss Synergy (percentage points)".into(),
+        "Bliss Bootstrap SEM".into(),
+        "Bliss 95% CI Left".into(),
+        "Bliss 95% CI Right".into(),
         "Interpretation".into(),
         "Replicates".into(),
     ]);
@@ -148,6 +207,18 @@ pub fn export_results(
             worksheet
                 .write_number(row, column, *value)
                 .map_err(xlsx_error)?;
+            column += 1;
+        }
+        for (value, mic) in combination.concentrations.iter().zip(&analysis.mic_values) {
+            if *value > 0.0 {
+                worksheet
+                    .write_number_with_format(row, column, (value / mic).log2(), &number_format)
+                    .map_err(xlsx_error)?;
+            } else {
+                worksheet
+                    .write_string(row, column, "NA")
+                    .map_err(xlsx_error)?;
+            }
             column += 1;
         }
         worksheet
@@ -180,6 +251,18 @@ pub fn export_results(
             .write_number_with_format(row, column, combination.bliss_interaction, &number_format)
             .map_err(xlsx_error)?;
         column += 1;
+        for statistic in [
+            combination.bliss_sem,
+            combination.bliss_ci_left,
+            combination.bliss_ci_right,
+        ] {
+            if let Some(value) = statistic {
+                worksheet
+                    .write_number_with_format(row, column, value, &number_format)
+                    .map_err(xlsx_error)?;
+            }
+            column += 1;
+        }
         worksheet
             .write_string(row, column, interaction_label(combination.interpretation))
             .map_err(xlsx_error)?;
@@ -194,7 +277,7 @@ pub fn export_results(
         worksheet
             .set_column_width(
                 column,
-                if column < analysis.drug_names.len() as u16 {
+                if column < (analysis.drug_names.len() * 2) as u16 {
                     14
                 } else {
                     18
@@ -213,9 +296,9 @@ fn write_aggregate_interpretation(
     interpretation: AggregateInterpretation,
 ) -> Result<(), AppError> {
     let (label, background, foreground) = match interpretation {
-        AggregateInterpretation::Antagonistic => ("Antagonistic", 0xD73027, Color::White),
+        AggregateInterpretation::Antagonistic => ("Antagonistic", 0x00A83B, Color::White),
         AggregateInterpretation::Additive => ("Additive", 0xFFFFFF, Color::Black),
-        AggregateInterpretation::Synergistic => ("Synergistic", 0x66BD63, Color::Black),
+        AggregateInterpretation::Synergistic => ("Synergistic", 0xFF2B20, Color::White),
     };
     let format = Format::new()
         .set_background_color(Color::RGB(background))
@@ -257,7 +340,9 @@ fn xlsx_error(error: XlsxError) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use checkerboard_core::{AnalysisPolicy, ColumnMapping, MappedDrug, analyze, assay_from_rows};
+    use checkerboard_core::{
+        AnalysisPolicy, ColumnMapping, MappedDrug, ResponseType, analyze, assay_from_rows,
+    };
 
     use super::*;
 
@@ -292,7 +377,16 @@ mod tests {
             },
         )
         .unwrap();
-        let analysis = analyze(&assay, AnalysisPolicy::default()).unwrap();
+        let mut analysis = analyze(
+            &assay,
+            AnalysisPolicy {
+                response_type: ResponseType::RawOd,
+                ..AnalysisPolicy::default()
+            },
+        )
+        .unwrap();
+        analysis.mic_values = vec![1.0, 1.0];
+        analysis.mic_zero_tolerance = 5.0;
         let path = std::env::temp_dir().join(format!(
             "checkerboard-workbook-test-{}.xlsx",
             std::process::id()

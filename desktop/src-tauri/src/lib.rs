@@ -11,6 +11,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_worksheets,
             commands::import_preview,
+            commands::infer_mics,
             commands::analyze_table,
             commands::export_results,
             commands::quit_application,

@@ -1,4 +1,8 @@
-export type ColumnRole = "ignore" | "drugA" | "drugB" | "drugC" | "od";
+export type ColumnRole = "ignore" | "drugA" | "drugB" | "drugC" | "response";
+
+export type AnalysisMode = "synergyFinderPlus" | "legacyOd";
+export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "rawOd";
+export type BaselineCorrection = "none" | "part" | "all";
 
 export interface ImportRequest {
   path: string;
@@ -29,6 +33,11 @@ export interface ColumnMapping {
 }
 
 export interface AnalysisPolicy {
+  mode: AnalysisMode;
+  responseType: ResponseType;
+  baselineCorrection: BaselineCorrection;
+  bootstrapIterations: number;
+  randomSeed: number;
   cellAdditiveThreshold: number;
   odCensorThreshold: number;
   allowIncompleteGrid: boolean;
@@ -50,6 +59,9 @@ export interface ProcessedCombination {
   blissInteraction: number;
   replicateCount: number;
   interpretation: InteractionInterpretation;
+  blissSem?: number | null;
+  blissCiLeft?: number | null;
+  blissCiRight?: number | null;
 }
 
 export interface AnalysisSummary {
@@ -58,11 +70,14 @@ export interface AnalysisSummary {
   positiveSum: number;
   negativeSum: number;
   combinationCount: number;
+  pValue: string | null;
   interpretation: InteractionInterpretation;
 }
 
 export interface AnalysisResult {
   drugNames: string[];
+  micValues: number[];
+  micZeroTolerance: number;
   control: { replicateCount: number; meanOd: number };
   processed: ProcessedCombination[];
   summary: AnalysisSummary;
@@ -74,6 +89,15 @@ export interface ComparisonRegimen {
   id: string;
   label: string;
   analysis: AnalysisResult;
+  source?: ComparisonSource;
+}
+
+export interface ComparisonSource {
+  importRequest: ImportRequest;
+  preview: ImportPreview;
+  roles: ColumnRole[];
+  worksheets: string[];
+  micEstimates: MicEstimate[];
 }
 
 export interface ComparisonSettings {
@@ -92,6 +116,7 @@ export interface PairwiseComparison {
 export interface RegimenRanking {
   regimen: ComparisonRegimen;
   rank: number;
+  exceedanceAuc: number | null;
   averageWinProbability: number | null;
   eligibleLocations: number;
   synergyBreadth: [number, number];
@@ -107,4 +132,11 @@ export interface ComparisonResult {
 export interface AppError {
   code?: string;
   message: string;
+}
+
+export interface MicEstimate {
+  drugName: string;
+  mic: number | null;
+  meanResponseAtMic: number | null;
+  singleAgentLevels: number;
 }

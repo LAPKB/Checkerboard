@@ -1,10 +1,12 @@
 import type {
+  AnalysisResult,
   ComparisonRegimen,
   ComparisonResult,
   ComparisonSettings,
   ColumnMapping,
   ColumnRole,
   ImportPreview,
+  ProcessedCombination,
 } from "./types";
 
 const comparisonTolerance = 1e-12;
@@ -13,7 +15,7 @@ const orderedDrugRoles: ColumnRole[] = ["drugA", "drugB", "drugC"];
 
 export function validateRoles(roles: ColumnRole[]): string[] {
   const errors: string[] = [];
-  for (const role of ["drugA", "drugB", "od"] as ColumnRole[]) {
+  for (const role of ["drugA", "drugB", "response"] as ColumnRole[]) {
     if (roles.filter((value) => value === role).length !== 1) {
       errors.push(`${roleLabel(role)} must be assigned exactly once.`);
     }
@@ -34,7 +36,7 @@ export function buildMapping(
     if (column < 0) return [];
     return [{ column, name: preview.suggestedDrugNames[column] || roleLabel(role) }];
   });
-  return { drugs, responseColumn: roles.indexOf("od") };
+  return { drugs, responseColumn: roles.indexOf("response") };
 }
 
 export function roleLabel(role: ColumnRole): string {
@@ -43,12 +45,43 @@ export function roleLabel(role: ColumnRole): string {
     drugA: "Drug A",
     drugB: "Drug B",
     drugC: "Drug C",
-    od: "OD",
+    response: "Response",
   }[role];
 }
 
 export function formatNumber(value: number, digits = 3): string {
   return Number.isFinite(value) ? value.toFixed(digits) : "—";
+}
+
+export interface BlissAggregate {
+  mean: number;
+  count: number;
+  ciLeft: number | null;
+  ciRight: number | null;
+}
+
+export function aggregateBliss(rows: ProcessedCombination[]): BlissAggregate {
+  const mean = rows.length ? rows.reduce((total, row) => total + row.blissInteraction, 0) / rows.length : NaN;
+  const sems = rows.map((row) => row.blissSem).filter((value): value is number => value != null && Number.isFinite(value));
+  const sem = sems.length === rows.length && rows.length > 0
+    ? Math.sqrt(sems.reduce((total, value) => total + value * value, 0)) / rows.length
+    : null;
+  return {
+    mean,
+    count: rows.length,
+    ciLeft: sem === null ? null : mean - 1.96 * sem,
+    ciRight: sem === null ? null : mean + 1.96 * sem,
+  };
+}
+
+export function inactiveDrugPairSummary(analysis: AnalysisResult, inactiveIndex: number): BlissAggregate | null {
+  if (analysis.drugNames.length !== 3 || inactiveIndex < 0 || inactiveIndex >= 3) return null;
+  const activeIndices = [0, 1, 2].filter((index) => index !== inactiveIndex);
+  const rows = analysis.processed.filter((row) =>
+    row.concentrations[inactiveIndex] === 0
+    && activeIndices.every((index) => row.concentrations[index] > 0),
+  );
+  return rows.length ? aggregateBliss(rows) : null;
 }
 
 export function compareRegimens(
@@ -63,6 +96,7 @@ export function compareRegimens(
   if (![2, 3].includes(drugCount)) throw new Error("Only two-drug and three-drug regimens can be compared.");
 
   const surfaces = new Map(regimens.map((regimen) => [regimen.id, normalizedSurface(regimen, settings.minimumEffect)]));
+  const aucDomain = exceedanceDomain([...surfaces.values()].flatMap((surface) => [...surface.values()]));
   const pairwise = regimens.flatMap((left) => regimens.map((right) => {
     if (left.id === right.id) {
       return { leftId: left.id, rightId: right.id, winProbability: 0.5, matchedLocations: surfaces.get(left.id)!.size };
@@ -95,6 +129,7 @@ export function compareRegimens(
     return {
       regimen,
       rank: 0,
+      exceedanceAuc: exceedanceAuc(blissValues, aucDomain),
       averageWinProbability: opponentScores.length
         ? opponentScores.reduce((sum, value) => sum + value, 0) / opponentScores.length
         : null,
@@ -102,17 +137,20 @@ export function compareRegimens(
       synergyBreadth: settings.synergyThresholds.map((threshold) => proportion(blissValues, (value) => value >= threshold)) as [number, number],
       antagonismBurden: proportion(blissValues, (value) => value <= -settings.antagonismThreshold),
     };
-  }).sort((left, right) => (right.averageWinProbability ?? -1) - (left.averageWinProbability ?? -1));
+  }).sort((left, right) => {
+    const aucDifference = (right.exceedanceAuc ?? Number.NEGATIVE_INFINITY) - (left.exceedanceAuc ?? Number.NEGATIVE_INFINITY);
+    if (Math.abs(aucDifference) > comparisonTolerance) return aucDifference;
+    return (right.averageWinProbability ?? -1) - (left.averageWinProbability ?? -1);
+  });
 
   let previousScore: number | null | undefined;
   let previousRank = 0;
   const rankings = unranked.map((row, index) => {
     const tied = previousScore !== undefined
-      && row.averageWinProbability !== null
-      && previousScore !== null
-      && Math.abs(row.averageWinProbability - previousScore) <= comparisonTolerance;
+      && ((row.exceedanceAuc === null && previousScore === null)
+        || (row.exceedanceAuc !== null && previousScore !== null && Math.abs(row.exceedanceAuc - previousScore) <= comparisonTolerance));
     const rank = tied ? previousRank : index + 1;
-    previousScore = row.averageWinProbability;
+    previousScore = row.exceedanceAuc;
     previousRank = rank;
     return { ...row, rank };
   });
@@ -120,18 +158,34 @@ export function compareRegimens(
   return { drugCount, rankings, pairwise };
 }
 
+export function exceedanceDomain(values: number[]): [number, number] {
+  if (!values.length) return [-0.01, 0.01];
+  let minimum = Math.min(0, ...values);
+  let maximum = Math.max(0, ...values);
+  if (maximum - minimum < 0.01) {
+    minimum -= 0.01;
+    maximum += 0.01;
+  }
+  return [minimum, maximum];
+}
+
+export function exceedanceAuc(values: number[], [minimum, maximum]: [number, number]): number | null {
+  if (!values.length || maximum <= minimum) return null;
+  return values.reduce((area, value) => area + Math.max(0, Math.min(maximum, value) - minimum), 0) / values.length;
+}
+
 function normalizedSurface(regimen: ComparisonRegimen, minimumEffect: number): Map<string, number> {
   const rows = regimen.analysis.processed.filter((row) => row.concentrations.every((value) => value > 0));
-  const levels = regimen.analysis.drugNames.map((_, index) =>
-    [...new Set(rows.map((row) => row.concentrations[index]))].sort((left, right) => left - right),
-  );
+  const mics = regimen.analysis.micValues;
+  if (mics.length !== regimen.analysis.drugNames.length || mics.some((value) => !Number.isFinite(value) || value <= 0)) {
+    throw new Error(`${regimen.label} does not have one positive MIC for each drug.`);
+  }
   const surface = new Map<string, number>();
   for (const row of rows) {
     if (row.effect < minimumEffect) continue;
-    const coordinate = row.concentrations.map((concentration, index) => {
-      const levelIndex = levels[index].indexOf(concentration);
-      return levels[index].length === 1 ? 1 : levelIndex / (levels[index].length - 1);
-    }).map((value) => value.toFixed(12)).join("|");
+    const coordinate = row.concentrations
+      .map((concentration, index) => Math.log2(concentration / mics[index]).toFixed(12))
+      .join("|");
     surface.set(coordinate, row.blissInteraction);
   }
   return surface;

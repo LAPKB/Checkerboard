@@ -1,13 +1,15 @@
 {
   "name": "checkerboard-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm run test:all && tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --workspace",
+    "test:all": "npm test && npm run test:rust",
     "tauri": "tauri"
   },
   "dependencies": {

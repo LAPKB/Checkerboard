@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod synergyfinder_native;
+
 const ZERO_TOLERANCE: f64 = 1e-12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -36,6 +38,11 @@ pub struct MappedDrug {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisPolicy {
+    pub mode: AnalysisMode,
+    pub response_type: ResponseType,
+    pub baseline_correction: BaselineCorrection,
+    pub bootstrap_iterations: usize,
+    pub random_seed: u64,
     pub cell_additive_threshold: f64,
     pub od_censor_threshold: f64,
     pub allow_incomplete_grid: bool,
@@ -44,17 +51,50 @@ pub struct AnalysisPolicy {
 impl Default for AnalysisPolicy {
     fn default() -> Self {
         Self {
-            cell_additive_threshold: 0.05,
+            mode: AnalysisMode::SynergyFinderPlus,
+            response_type: ResponseType::Viability,
+            baseline_correction: BaselineCorrection::None,
+            bootstrap_iterations: 10,
+            random_seed: 123,
+            cell_additive_threshold: 10.0,
             od_censor_threshold: 0.05,
             allow_incomplete_grid: true,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AnalysisMode {
+    SynergyFinderPlus,
+    LegacyOd,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ResponseType {
+    Viability,
+    ViabilityFraction,
+    Inhibition,
+    RawOd,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BaselineCorrection {
+    None,
+    Part,
+    All,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisResult {
     pub drug_names: Vec<String>,
+    #[serde(default)]
+    pub mic_values: Vec<f64>,
+    #[serde(default)]
+    pub mic_zero_tolerance: f64,
     pub control: ControlStatistics,
     pub processed: Vec<ProcessedCombination>,
     pub summary: AnalysisSummary,
@@ -82,6 +122,12 @@ pub struct ProcessedCombination {
     pub bliss_interaction: f64,
     pub replicate_count: usize,
     pub interpretation: InteractionInterpretation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bliss_sem: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bliss_ci_left: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bliss_ci_right: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -92,6 +138,7 @@ pub struct AnalysisSummary {
     pub positive_sum: f64,
     pub negative_sum: f64,
     pub combination_count: usize,
+    pub p_value: Option<String>,
     pub interpretation: AggregateInterpretation,
 }
 
@@ -160,6 +207,14 @@ pub enum AnalysisError {
     #[error("The mean untreated control OD must be finite and greater than zero; found {0}.")]
     InvalidControlMean(f64),
     #[error(
+        "The untreated control response is near 1, but Viability (%) expects controls near 100. Select Fractional viability (0–1)."
+    )]
+    ViabilityScaleMismatch,
+    #[error("Bootstrap iterations must be at least 2; found {0}.")]
+    InvalidBootstrapIterations(usize),
+    #[error("The random seed must be no greater than 2147483647; found {0}.")]
+    InvalidRandomSeed(u64),
+    #[error(
         "Missing the required single-agent observation for {drug} at concentration {concentration}."
     )]
     MissingSingleAgent { drug: String, concentration: f64 },
@@ -225,7 +280,18 @@ pub fn analyze(
     input: &AssayInput,
     policy: AnalysisPolicy,
 ) -> Result<AnalysisResult, AnalysisError> {
+    analyze_with_progress(input, policy, |_, _| {})
+}
+
+pub fn analyze_with_progress(
+    input: &AssayInput,
+    policy: AnalysisPolicy,
+    progress: impl FnMut(usize, usize),
+) -> Result<AnalysisResult, AnalysisError> {
     validate_input(input)?;
+    if policy.mode == AnalysisMode::SynergyFinderPlus {
+        return synergyfinder_native::analyze(input, policy, progress);
+    }
     if !policy.od_censor_threshold.is_finite() || policy.od_censor_threshold < 0.0 {
         return Err(AnalysisError::InvalidOdCensorThreshold(
             policy.od_censor_threshold,
@@ -336,6 +402,9 @@ pub fn analyze(
                 bliss_interaction,
                 policy.cell_additive_threshold,
             ),
+            bliss_sem: None,
+            bliss_ci_left: None,
+            bliss_ci_right: None,
         });
     }
 
@@ -369,8 +438,10 @@ pub fn analyze(
     }
 
     let summary = summarize(processed.iter().map(|row| row.bliss_interaction));
-    Ok(AnalysisResult {
+    let result = AnalysisResult {
         drug_names: input.drug_names.clone(),
+        mic_values: Vec::new(),
+        mic_zero_tolerance: 0.0,
         control: ControlStatistics {
             replicate_count: control_values.len(),
             mean_od: control_mean,
@@ -379,7 +450,8 @@ pub fn analyze(
         summary,
         warnings,
         policy,
-    })
+    };
+    Ok(result)
 }
 
 pub fn summarize_by(result: &AnalysisResult, drug_index: usize) -> Option<StratifiedSummary> {
@@ -389,6 +461,11 @@ pub fn summarize_by(result: &AnalysisResult, drug_index: usize) -> Option<Strati
     let mut indices = HashMap::<u64, usize>::new();
 
     for row in &result.processed {
+        if result.policy.mode == AnalysisMode::SynergyFinderPlus
+            && !row.concentrations.iter().all(|value| *value > 0.0)
+        {
+            continue;
+        }
         let concentration = *row.concentrations.get(drug_index)?;
         let key = canonical_bits(concentration);
         let index = if let Some(index) = indices.get(&key).copied() {
@@ -408,9 +485,15 @@ pub fn summarize_by(result: &AnalysisResult, drug_index: usize) -> Option<Strati
         rows: concentrations
             .into_iter()
             .zip(grouped)
-            .map(|(concentration, values)| StratifiedSummaryRow {
-                concentration,
-                summary: summarize(values),
+            .map(|(concentration, values)| {
+                let mut summary = summarize(values);
+                if result.policy.mode == AnalysisMode::SynergyFinderPlus {
+                    summary.interpretation = interpret_aggregate_mean(summary.mean_bliss);
+                }
+                StratifiedSummaryRow {
+                    concentration,
+                    summary,
+                }
             })
             .collect(),
         total: result.summary.clone(),
@@ -440,6 +523,7 @@ fn summarize(values: impl IntoIterator<Item = f64>) -> AnalysisSummary {
         positive_sum: values.iter().copied().filter(|value| *value > 0.0).sum(),
         negative_sum: values.iter().copied().filter(|value| *value < 0.0).sum(),
         combination_count: values.len(),
+        p_value: None,
         interpretation: if sum_bliss > 1.0 {
             AggregateInterpretation::Synergistic
         } else if sum_bliss < 0.0 {
@@ -447,6 +531,188 @@ fn summarize(values: impl IntoIterator<Item = f64>) -> AnalysisSummary {
         } else {
             AggregateInterpretation::Additive
         },
+    }
+}
+
+#[allow(dead_code)]
+fn analyze_synergyfinder_central(
+    input: &AssayInput,
+    policy: AnalysisPolicy,
+) -> Result<AnalysisResult, AnalysisError> {
+    let control_rows: Vec<f64> = input
+        .rows
+        .iter()
+        .filter(|row| is_control(&row.concentrations))
+        .map(|row| row.od)
+        .collect();
+    if control_rows.is_empty() {
+        return Err(AnalysisError::MissingControl);
+    }
+    let control_mean = control_rows.iter().sum::<f64>() / control_rows.len() as f64;
+    if policy.response_type == ResponseType::RawOd
+        && (!control_mean.is_finite() || control_mean <= 0.0)
+    {
+        return Err(AnalysisError::InvalidControlMean(control_mean));
+    }
+
+    let mut groups = Vec::<EffectGroup>::new();
+    let mut group_indices = HashMap::<ConcentrationKey, usize>::new();
+    for row in &input.rows {
+        let response = match policy.response_type {
+            ResponseType::Viability => 100.0 - row.od,
+            ResponseType::ViabilityFraction => 100.0 * (1.0 - row.od),
+            ResponseType::Inhibition => row.od,
+            ResponseType::RawOd => 100.0 * (1.0 - row.od / control_mean),
+        };
+        let normalized: Vec<f64> = row
+            .concentrations
+            .iter()
+            .map(|value| {
+                if value.abs() < ZERO_TOLERANCE {
+                    0.0
+                } else {
+                    *value
+                }
+            })
+            .collect();
+        let key = ConcentrationKey::new(&normalized);
+        if let Some(index) = group_indices.get(&key).copied() {
+            groups[index].effect_sum += response;
+            groups[index].original_od_sum += row.od;
+            groups[index].censored_od_sum += response;
+            groups[index].replicate_count += 1;
+        } else {
+            group_indices.insert(key, groups.len());
+            groups.push(EffectGroup {
+                concentrations: normalized,
+                effect_sum: response,
+                original_od_sum: row.od,
+                censored_od_sum: response,
+                censored_replicate_count: 0,
+                replicate_count: 1,
+            });
+        }
+    }
+
+    let averaged: HashMap<ConcentrationKey, f64> = groups
+        .iter()
+        .map(|group| {
+            (
+                ConcentrationKey::new(&group.concentrations),
+                group.effect_sum / group.replicate_count as f64,
+            )
+        })
+        .collect();
+    let mut processed = Vec::with_capacity(groups.len());
+    for group in &groups {
+        let effect = group.effect_sum / group.replicate_count as f64;
+        let mut single_agent_effects = Vec::with_capacity(input.drug_names.len());
+        for (drug_index, concentration) in group.concentrations.iter().copied().enumerate() {
+            let mut single = vec![0.0; input.drug_names.len()];
+            single[drug_index] = concentration;
+            single_agent_effects.push(
+                averaged
+                    .get(&ConcentrationKey::new(&single))
+                    .copied()
+                    .ok_or_else(|| AnalysisError::MissingSingleAgent {
+                        drug: input.drug_names[drug_index].clone(),
+                        concentration,
+                    })?,
+            );
+        }
+        let mut bliss_expected = 100.0
+            * (1.0
+                - single_agent_effects
+                    .iter()
+                    .fold(1.0, |product, value| product * (1.0 - value / 100.0)));
+        if group
+            .concentrations
+            .iter()
+            .filter(|value| **value > 0.0)
+            .count()
+            <= 1
+        {
+            bliss_expected = effect;
+        }
+        let bliss_interaction = effect - bliss_expected;
+        processed.push(ProcessedCombination {
+            concentrations: group.concentrations.clone(),
+            mean_original_od: group.original_od_sum / group.replicate_count as f64,
+            mean_censored_od: effect,
+            censored_replicate_count: 0,
+            effect,
+            single_agent_effects,
+            bliss_expected,
+            bliss_interaction,
+            replicate_count: group.replicate_count,
+            interpretation: interpret_interaction(
+                bliss_interaction,
+                policy.cell_additive_threshold,
+            ),
+            bliss_sem: None,
+            bliss_ci_left: None,
+            bliss_ci_right: None,
+        });
+    }
+
+    let expected_grid_size = input
+        .drug_names
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            groups
+                .iter()
+                .map(|group| canonical_bits(group.concentrations[index]))
+                .collect::<HashSet<_>>()
+                .len()
+        })
+        .product::<usize>();
+    let mut warnings = Vec::new();
+    if expected_grid_size != groups.len() {
+        warnings.push(AnalysisWarning {
+            code: "incompleteGrid".into(),
+            message: format!(
+                "The selected concentrations imply {expected_grid_size} combinations, but {} were observed. SynergyFinder+ parity requires a complete matrix when imputation is disabled.",
+                groups.len()
+            ),
+        });
+    }
+    if groups.iter().any(|group| group.replicate_count > 1) {
+        warnings.push(AnalysisWarning {
+            code: "nativeReplicateApproximation".into(),
+            message: "Native analysis reports the replicate-mean central estimate. The desktop compatibility workflow uses the installed SynergyFinder R package for bootstrap statistics.".into(),
+        });
+    }
+
+    let combination_values = processed
+        .iter()
+        .filter(|row| row.concentrations.iter().all(|value| *value > 0.0))
+        .map(|row| row.bliss_interaction);
+    let mut summary = summarize(combination_values);
+    summary.interpretation = interpret_aggregate_mean(summary.mean_bliss);
+
+    Ok(AnalysisResult {
+        drug_names: input.drug_names.clone(),
+        mic_values: Vec::new(),
+        mic_zero_tolerance: 0.0,
+        control: ControlStatistics {
+            replicate_count: control_rows.len(),
+            mean_od: control_mean,
+        },
+        processed,
+        summary,
+        warnings,
+        policy,
+    })
+}
+
+fn interpret_aggregate_mean(value: f64) -> AggregateInterpretation {
+    if value < -10.0 {
+        AggregateInterpretation::Antagonistic
+    } else if value > 10.0 {
+        AggregateInterpretation::Synergistic
+    } else {
+        AggregateInterpretation::Additive
     }
 }
 
@@ -564,6 +830,19 @@ fn censor_od(od: f64, threshold: f64) -> f64 {
 mod tests {
     use super::*;
 
+    fn legacy_policy() -> AnalysisPolicy {
+        AnalysisPolicy {
+            mode: AnalysisMode::LegacyOd,
+            response_type: ResponseType::RawOd,
+            baseline_correction: BaselineCorrection::None,
+            bootstrap_iterations: 10,
+            random_seed: 123,
+            cell_additive_threshold: 0.05,
+            od_censor_threshold: 0.05,
+            allow_incomplete_grid: true,
+        }
+    }
+
     fn assay_from_csv(source: &str, drug_count: usize) -> AssayInput {
         let mut reader = csv::Reader::from_reader(source.as_bytes());
         let rows = reader
@@ -594,7 +873,7 @@ mod tests {
             include_str!("../../../../../fixtures/valid/two_drug.csv"),
             2,
         );
-        let result = analyze(&input, AnalysisPolicy::default()).unwrap();
+        let result = analyze(&input, legacy_policy()).unwrap();
 
         assert_eq!(result.control.replicate_count, 2);
         assert!((result.control.mean_od - 1.1).abs() < 1e-12);
@@ -618,7 +897,7 @@ mod tests {
             include_str!("../../../../../fixtures/valid/three_drug.csv"),
             3,
         );
-        let result = analyze(&input, AnalysisPolicy::default()).unwrap();
+        let result = analyze(&input, legacy_policy()).unwrap();
         assert_eq!(result.processed.len(), 8);
         assert!((result.summary.sum_bliss - 0.4868181818181815).abs() < 1e-12);
 
@@ -634,7 +913,7 @@ mod tests {
             include_str!("../../../../../fixtures/valid/incomplete_grid.csv"),
             2,
         );
-        let result = analyze(&input, AnalysisPolicy::default()).unwrap();
+        let result = analyze(&input, legacy_policy()).unwrap();
         assert_eq!(result.warnings.len(), 1);
         assert_eq!(result.warnings[0].code, "incompleteGrid");
     }
@@ -646,7 +925,7 @@ mod tests {
             2,
         );
         assert_eq!(
-            analyze(&input, AnalysisPolicy::default()),
+            analyze(&input, legacy_policy()),
             Err(AnalysisError::MissingControl)
         );
     }
@@ -658,7 +937,7 @@ mod tests {
             2,
         );
         assert!(matches!(
-            analyze(&input, AnalysisPolicy::default()),
+            analyze(&input, legacy_policy()),
             Err(AnalysisError::MissingSingleAgent { .. })
         ));
     }
@@ -695,11 +974,112 @@ mod tests {
                 },
             ],
         };
-        let result = analyze(&input, AnalysisPolicy::default()).unwrap();
+        let result = analyze(&input, legacy_policy()).unwrap();
         let negative = &result.processed[1];
         assert_eq!(negative.mean_original_od, -0.2);
         assert_eq!(negative.mean_censored_od, 0.0);
         assert_eq!(negative.censored_replicate_count, 1);
         assert_eq!(negative.effect, 1.0);
+    }
+
+    #[test]
+    fn synergyfinder_mode_uses_percent_points_and_combination_only_mean() {
+        let input = AssayInput {
+            drug_names: vec!["A".into(), "B".into()],
+            rows: vec![
+                AssayRow {
+                    concentrations: vec![0.0, 0.0],
+                    od: 100.0,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 0.0],
+                    od: 80.0,
+                },
+                AssayRow {
+                    concentrations: vec![0.0, 1.0],
+                    od: 70.0,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 1.0],
+                    od: 40.0,
+                },
+            ],
+        };
+        let result = analyze(&input, AnalysisPolicy::default()).unwrap();
+        assert_eq!(result.summary.combination_count, 1);
+        assert!((result.summary.mean_bliss - 16.0).abs() < 1e-12);
+        assert_eq!(
+            result.summary.interpretation,
+            AggregateInterpretation::Synergistic
+        );
+        let combination = result
+            .processed
+            .iter()
+            .find(|row| row.concentrations == vec![1.0, 1.0])
+            .unwrap();
+        assert!((combination.effect - 60.0).abs() < 1e-12);
+        assert!((combination.bliss_expected - 44.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fractional_viability_is_converted_to_percentage_units() {
+        let input = AssayInput {
+            drug_names: vec!["A".into(), "B".into()],
+            rows: vec![
+                AssayRow {
+                    concentrations: vec![0.0, 0.0],
+                    od: 1.0,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 0.0],
+                    od: 0.8,
+                },
+                AssayRow {
+                    concentrations: vec![0.0, 1.0],
+                    od: 0.7,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 1.0],
+                    od: 0.4,
+                },
+            ],
+        };
+        let policy = AnalysisPolicy {
+            response_type: ResponseType::ViabilityFraction,
+            ..AnalysisPolicy::default()
+        };
+        let result = analyze(&input, policy).unwrap();
+        assert!((result.summary.mean_bliss - 16.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn native_bootstrap_is_pinned_to_synergyfinder_320() {
+        let input = assay_from_csv(
+            include_str!("../../../../../fixtures/valid/two_drug.csv"),
+            2,
+        );
+        let policy = AnalysisPolicy {
+            response_type: ResponseType::RawOd,
+            ..AnalysisPolicy::default()
+        };
+        let mut progress = Vec::new();
+        let result = analyze_with_progress(&input, policy, |completed, total| {
+            progress.push((completed, total));
+        })
+        .unwrap();
+        assert_eq!(progress.first(), Some(&(0, 10)));
+        assert_eq!(progress.last(), Some(&(10, 10)));
+        assert_eq!(progress.len(), 11);
+        assert!((result.summary.mean_bliss - 12.747065635493996).abs() < 1e-12);
+        assert_eq!(result.summary.p_value.as_deref(), Some("< 2e-324"));
+        let cell = result
+            .processed
+            .iter()
+            .find(|row| row.concentrations == vec![1.0, 1.0])
+            .unwrap();
+        assert!((cell.bliss_interaction - 11.715535269248706).abs() < 1e-12);
+        assert!((cell.bliss_sem.unwrap() - 0.24014442329427563).abs() < 1e-12);
+        assert!((cell.bliss_ci_left.unwrap() - 10.463968061904925).abs() < 1e-12);
+        assert!((cell.bliss_ci_right.unwrap() - 12.4952905824432).abs() < 1e-12);
     }
 }

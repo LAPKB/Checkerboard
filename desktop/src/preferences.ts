@@ -8,9 +8,9 @@ export interface PlotColors {
 }
 
 export const defaultPlotColors: PlotColors = {
-  low: "#d73027",
+  low: "#00a83b",
   midpoint: "#ffffff",
-  high: "#1a9850",
+  high: "#ff2b20",
   expected: "#2458a6",
 };
 

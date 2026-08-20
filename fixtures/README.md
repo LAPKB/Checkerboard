@@ -1,12 +1,23 @@
 # Checkerboard parity fixtures
 
-These fixtures define the compatibility boundary between the preserved R
-package and the new Rust analysis core.
+These fixtures exercise both the native analysis core and the
+SynergyFinder+ compatibility bridge.
 
-## Provisional behavior policy
+## Benchmark behavior policy
 
-- The Bliss calculation must match the current R implementation within an
-  absolute tolerance of `1e-12`.
+- The primary benchmark is Bioconductor `synergyfinder` 3.20.0.
+- Compatibility results are expressed as percentage-point inhibition and
+  summarize only locations where every drug concentration is positive.
+- Replicated inputs use the package's seeded parametric bootstrap rather than
+  the historical replicate-mean shortcut.
+- Viability percentages, fractional viability, inhibition, and raw OD inputs are explicit response types; values
+  are not clipped to 0-100 in the compatibility workflow.
+- Baseline correction choices map directly to `non`, `part`, and `all`.
+- Regimen comparisons match `log2(concentration / MIC)` coordinates. MICs are
+  inferred from single-agent wells with an editable zero-response tolerance
+  and stored with the analysis.
+
+The native core retains a legacy OD policy for focused regression coverage:
 - Individual interactions in `[-0.05, 0.05]` are described as additive-like,
   matching the current two-drug bar-plot legend.
 - The desktop analysis policy has a user-configurable OD censor threshold,

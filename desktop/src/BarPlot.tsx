@@ -1,7 +1,7 @@
 import Plot from "react-plotly.js";
 import type * as Plotly from "plotly.js";
 
-import { formatNumber } from "./analysis";
+import { aggregateBliss, formatNumber } from "./analysis";
 import type { AnalysisResult } from "./types";
 import type { PlotColors } from "./preferences";
 
@@ -9,13 +9,15 @@ export default function BarPlot({
   analysis,
   stratifyIndex,
   colors,
+  showConfidenceIntervals,
 }: {
   analysis: AnalysisResult;
   stratifyIndex: number;
   colors: PlotColors;
+  showConfidenceIntervals: boolean;
 }) {
   if (analysis.drugNames.length === 3) {
-    return <StratifiedBar analysis={analysis} stratifyIndex={stratifyIndex} colors={colors} />;
+    return <StratifiedBar analysis={analysis} stratifyIndex={stratifyIndex} colors={colors} showConfidenceIntervals={showConfidenceIntervals} />;
   }
   return <GrowthBars analysis={analysis} colors={colors} />;
 }
@@ -23,7 +25,7 @@ export default function BarPlot({
 function GrowthBars({ analysis, colors }: { analysis: AnalysisResult; colors: PlotColors }) {
   const xValues = uniqueSorted(analysis.processed.map((row) => row.concentrations[1]));
   const yValues = uniqueSorted(analysis.processed.map((row) => row.concentrations[0]));
-  const maxAbs = Math.max(0.05, ...analysis.processed.map((row) => Math.abs(row.blissInteraction)));
+  const maxAbs = Math.max(10, ...analysis.processed.map((row) => Math.abs(row.blissInteraction)));
   const traces: Plotly.Data[] = [];
   const wireX: Array<number | null> = [];
   const wireY: Array<number | null> = [];
@@ -36,8 +38,8 @@ function GrowthBars({ analysis, colors }: { analysis: AnalysisResult; colors: Pl
   for (const row of analysis.processed) {
     const x = xValues.indexOf(row.concentrations[1]);
     const y = yValues.indexOf(row.concentrations[0]);
-    const growth = clamp((1 - row.effect) * 100, 0, 100);
-    const expectedGrowth = clamp((1 - row.blissExpected) * 100, 0, 100);
+    const growth = clamp(100 - row.effect, 0, 100);
+    const expectedGrowth = clamp(100 - row.blissExpected, 0, 100);
     const x0 = x - 0.36;
     const x1 = x + 0.36;
     const y0 = y - 0.36;
@@ -132,43 +134,59 @@ function GrowthBars({ analysis, colors }: { analysis: AnalysisResult; colors: Pl
   );
 }
 
-function StratifiedBar({ analysis, stratifyIndex, colors }: { analysis: AnalysisResult; stratifyIndex: number; colors: PlotColors }) {
-  const values = uniqueSorted(analysis.processed.map((row) => row.concentrations[stratifyIndex]));
-  const sums = values.map((concentration) =>
-    analysis.processed
-      .filter((row) => row.concentrations[stratifyIndex] === concentration)
-      .reduce((total, row) => total + row.blissInteraction, 0),
-  );
-  const labels = [...values.map(String), "Total"];
-  const allSums = [...sums, analysis.summary.sumBliss];
-  const barColors = allSums.map((value) => value < 0 ? colors.low : value > 1 ? colors.high : colors.midpoint);
+function StratifiedBar({ analysis, stratifyIndex, colors, showConfidenceIntervals }: { analysis: AnalysisResult; stratifyIndex: number; colors: PlotColors; showConfidenceIntervals: boolean }) {
+  const combinations = analysis.processed.filter((row) => row.concentrations.every((value) => value > 0));
+  const values = uniqueSorted(combinations.map((row) => row.concentrations[stratifyIndex]));
+  const summaries = values.map((concentration) => {
+    const rows = combinations.filter((row) => row.concentrations[stratifyIndex] === concentration);
+    return aggregateBliss(rows);
+  });
+  const labels = [...values.map(String), "Overall"];
+  const overall = aggregateBliss(combinations);
+  const allSummaries = [...summaries, overall];
+  const allMeans = allSummaries.map((summary) => summary.mean);
+  const barColors = allMeans.map((value) => value < -10 ? colors.low : value > 10 ? colors.high : colors.midpoint);
+  const errors = allSummaries.map((summary) => summary.ciRight == null ? 0 : summary.ciRight - summary.mean);
+  const traces: Plotly.Data[] = [{
+    type: "bar",
+    x: labels,
+    y: allMeans,
+    text: allMeans.map((value) => formatNumber(value, 2)),
+    textposition: "outside",
+    marker: { color: barColors, line: { color: "#666", width: 1 } },
+    error_y: showConfidenceIntervals ? { type: "data", array: errors, visible: true, color: "#343a40", thickness: 1.5, width: 5 } : undefined,
+    hovertemplate: "%{x}<br>Mean Bliss synergy: %{y:.3f}<extra></extra>",
+    name: "Mean Bliss synergy",
+    showlegend: false,
+  } as Plotly.Data];
+  for (const [name, color] of [["Antagonistic (< −10)", colors.low], ["Additive (−10 to 10)", colors.midpoint], ["Synergistic (> 10)", colors.high]] as const) {
+    traces.push({ type: "scatter", mode: "markers", x: [null], y: [null], marker: { size: 12, color, line: { color: "#666", width: 1 } }, name, hoverinfo: "skip" } as Plotly.Data);
+  }
   return (
     <div className="plot-panel">
       <Plot
-        data={[{
-          type: "bar",
-          x: labels,
-          y: allSums,
-          text: allSums.map((value) => formatNumber(value, 2)),
-          textposition: "outside",
-          marker: { color: barColors, line: { color: "#666", width: 1 } },
-          hovertemplate: "%{x}<br>Bliss sum: %{y:.3f}<extra></extra>",
-        }]}
+        data={traces}
         layout={{
           autosize: true,
           height: 600,
-          margin: { l: 70, r: 25, t: 70, b: 70 },
+          margin: { l: 70, r: 25, t: 70, b: 105 },
           title: { text: `${analysis.drugNames.filter((_, index) => index !== stratifyIndex).join(" + ")}, stratified by ${analysis.drugNames[stratifyIndex]}` },
           xaxis: { title: { text: `${analysis.drugNames[stratifyIndex]} concentration` } },
-          yaxis: { title: { text: "Sum Bliss" }, zeroline: true, zerolinecolor: "#555" },
+          yaxis: { title: { text: "Mean Bliss synergy (percentage points)" }, zeroline: true, zerolinecolor: "#555" },
+          shapes: [
+            { type: "line", xref: "paper", x0: 0, x1: 1, y0: -10, y1: -10, line: { color: colors.low, dash: "dot", width: 1 } },
+            { type: "line", xref: "paper", x0: 0, x1: 1, y0: 10, y1: 10, line: { color: colors.high, dash: "dot", width: 1 } },
+          ],
           paper_bgcolor: "#ffffff",
           plot_bgcolor: "#ffffff",
-          showlegend: false,
+          showlegend: true,
+          legend: { orientation: "h", x: 0.5, xanchor: "center", y: -0.2 },
         }}
         config={{ responsive: true, displaylogo: false, toImageButtonOptions: { filename: "checkerboard-summary" } }}
         style={{ width: "100%", height: "600px" }}
         useResizeHandler
       />
+      {showConfidenceIntervals && <p className="policy-note">Error bars are approximate 95% confidence intervals propagated from the native cellwise bootstrap SEMs.</p>}
     </div>
   );
 }
@@ -179,14 +197,14 @@ function InteractionLegend({ colors }: { colors: PlotColors }) {
       <span>Antagonism</span>
       <i style={{ background: `linear-gradient(90deg, ${colors.low}, ${colors.midpoint} 45%, ${colors.midpoint} 55%, ${colors.high})` }} />
       <span>Synergy</span>
-      <small>Additive-like: −0.05 to 0.05</small>
+      <small>Limited evidence: −10 to 10 percentage points</small>
     </div>
   );
 }
 
 function interactionColor(value: number, maxAbs: number, colors: PlotColors) {
-  if (Math.abs(value) <= 0.05) return colors.midpoint;
-  const amount = Math.min(1, (Math.abs(value) - 0.05) / Math.max(0.000001, maxAbs - 0.05));
+  if (Math.abs(value) <= 10) return colors.midpoint;
+  const amount = Math.min(1, (Math.abs(value) - 10) / Math.max(0.000001, maxAbs - 10));
   return blend(colors.midpoint, value < 0 ? colors.low : colors.high, amount);
 }
 

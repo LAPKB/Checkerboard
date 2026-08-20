@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "checkerboard-desktop"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "calamine",
  "checkerboard-core",
