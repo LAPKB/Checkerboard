@@ -1,0 +1,12 @@
+Drug A,Drug B,Conc A,Conc B,Units A,Units B,Response
+Ampicillin,Meropenem,0,0,mg/L,mg/L,0
+Ampicillin,Meropenem,1,0,mg/L,mg/L,20
+Ampicillin,Meropenem,0,1,mg/L,mg/L,30
+Ampicillin,Meropenem,1,1,mg/L,mg/L,60
+Ampicillin,Meropenem,8,0,mg/L,mg/L,50
+Ampicillin,Meropenem,0,8,mg/L,mg/L,60
+Ampicillin,Meropenem,8,8,mg/L,mg/L,90
+Ciprofloxacin,Rifampin,0,0,µg/mL,µg/mL,1
+Ciprofloxacin,Rifampin,2,0,µg/mL,µg/mL,0.75
+Ciprofloxacin,Rifampin,0,2,µg/mL,µg/mL,0.65
+Ciprofloxacin,Rifampin,2,2,µg/mL,µg/mL,0.3

@@ -1,7 +1,7 @@
 import Plot from "react-plotly.js";
 import type * as Plotly from "plotly.js";
 
-import { aggregateBliss, formatNumber } from "./analysis";
+import { aggregateBliss, formatNumber, withinClinicalWindow } from "./analysis";
 import type { AnalysisResult } from "./types";
 import type { PlotColors } from "./preferences";
 
@@ -117,8 +117,8 @@ function GrowthBars({ analysis, colors }: { analysis: AnalysisResult; colors: Pl
           showlegend: true,
           legend: { orientation: "h", x: 0, y: 1.04 },
           scene: {
-            xaxis: { title: { text: analysis.drugNames[1] }, tickvals: xValues.map((_, index) => index), ticktext: xValues.map(String) },
-            yaxis: { title: { text: analysis.drugNames[0] }, tickvals: yValues.map((_, index) => index), ticktext: yValues.map(String) },
+            xaxis: { title: { text: `${analysis.drugNames[1]}${analysis.concentrationUnits[1] ? ` (${analysis.concentrationUnits[1]})` : ""}` }, tickvals: xValues.map((_, index) => index), ticktext: xValues.map(String) },
+            yaxis: { title: { text: `${analysis.drugNames[0]}${analysis.concentrationUnits[0] ? ` (${analysis.concentrationUnits[0]})` : ""}` }, tickvals: yValues.map((_, index) => index), ticktext: yValues.map(String) },
             zaxis: { title: { text: "% Growth" }, range: [0, 100] },
             camera: { eye: { x: 1.5, y: 1.5, z: 1.2 } },
           },
@@ -135,13 +135,14 @@ function GrowthBars({ analysis, colors }: { analysis: AnalysisResult; colors: Pl
 }
 
 function StratifiedBar({ analysis, stratifyIndex, colors, showConfidenceIntervals }: { analysis: AnalysisResult; stratifyIndex: number; colors: PlotColors; showConfidenceIntervals: boolean }) {
-  const combinations = analysis.processed.filter((row) => row.concentrations.every((value) => value > 0));
+  const combinations = analysis.processed.filter((row) => row.concentrations.every((value) => value > 0) && withinClinicalWindow(analysis, row));
   const values = uniqueSorted(combinations.map((row) => row.concentrations[stratifyIndex]));
   const summaries = values.map((concentration) => {
     const rows = combinations.filter((row) => row.concentrations[stratifyIndex] === concentration);
     return aggregateBliss(rows);
   });
   const labels = [...values.map(String), "Overall"];
+  const xDomain: [number, number] = [0, Math.min(1, Math.max(0.24, labels.length * 0.075))];
   const overall = aggregateBliss(combinations);
   const allSummaries = [...summaries, overall];
   const allMeans = allSummaries.map((summary) => summary.mean);
@@ -155,8 +156,8 @@ function StratifiedBar({ analysis, stratifyIndex, colors, showConfidenceInterval
     textposition: "outside",
     marker: { color: barColors, line: { color: "#666", width: 1 } },
     error_y: showConfidenceIntervals ? { type: "data", array: errors, visible: true, color: "#343a40", thickness: 1.5, width: 5 } : undefined,
-    hovertemplate: "%{x}<br>Mean Bliss synergy: %{y:.3f}<extra></extra>",
-    name: "Mean Bliss synergy",
+    hovertemplate: "%{x}<br>Mean Bliss Interaction: %{y:.3f}<extra></extra>",
+    name: "Mean Bliss Interaction",
     showlegend: false,
   } as Plotly.Data];
   for (const [name, color] of [["Antagonistic (< −10)", colors.low], ["Additive (−10 to 10)", colors.midpoint], ["Synergistic (> 10)", colors.high]] as const) {
@@ -170,17 +171,27 @@ function StratifiedBar({ analysis, stratifyIndex, colors, showConfidenceInterval
           autosize: true,
           height: 600,
           margin: { l: 70, r: 25, t: 70, b: 105 },
+          bargap: 0.18,
           title: { text: `${analysis.drugNames.filter((_, index) => index !== stratifyIndex).join(" + ")}, stratified by ${analysis.drugNames[stratifyIndex]}` },
-          xaxis: { title: { text: `${analysis.drugNames[stratifyIndex]} concentration` } },
-          yaxis: { title: { text: "Mean Bliss synergy (percentage points)" }, zeroline: true, zerolinecolor: "#555" },
+          xaxis: {
+            type: "category",
+            categoryorder: "array",
+            categoryarray: labels,
+            tickmode: "array",
+            tickvals: labels,
+            ticktext: labels,
+            domain: xDomain,
+            title: { text: `${analysis.drugNames[stratifyIndex]} concentration${analysis.concentrationUnits[stratifyIndex] ? ` (${analysis.concentrationUnits[stratifyIndex]})` : ""}` },
+          },
+          yaxis: { title: { text: "Mean Bliss Interaction (percentage points)" }, zeroline: true, zerolinecolor: "#555" },
           shapes: [
-            { type: "line", xref: "paper", x0: 0, x1: 1, y0: -10, y1: -10, line: { color: colors.low, dash: "dot", width: 1 } },
-            { type: "line", xref: "paper", x0: 0, x1: 1, y0: 10, y1: 10, line: { color: colors.high, dash: "dot", width: 1 } },
+            { type: "line", xref: "paper", x0: 0, x1: xDomain[1], y0: -10, y1: -10, line: { color: colors.low, dash: "dot", width: 1 } },
+            { type: "line", xref: "paper", x0: 0, x1: xDomain[1], y0: 10, y1: 10, line: { color: colors.high, dash: "dot", width: 1 } },
           ],
           paper_bgcolor: "#ffffff",
           plot_bgcolor: "#ffffff",
           showlegend: true,
-          legend: { orientation: "h", x: 0.5, xanchor: "center", y: -0.2 },
+          legend: { orientation: "h", x: 0, xanchor: "left", y: -0.2 },
         }}
         config={{ responsive: true, displaylogo: false, toImageButtonOptions: { filename: "checkerboard-summary" } }}
         style={{ width: "100%", height: "600px" }}

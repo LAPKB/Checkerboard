@@ -15,13 +15,17 @@ const orderedDrugRoles: ColumnRole[] = ["drugA", "drugB", "drugC"];
 
 export function validateRoles(roles: ColumnRole[]): string[] {
   const errors: string[] = [];
-  for (const role of ["drugA", "drugB", "response"] as ColumnRole[]) {
+  for (const role of ["drugNameA", "drugNameB", "drugA", "drugB", "unitsA", "unitsB", "response"] as ColumnRole[]) {
     if (roles.filter((value) => value === role).length !== 1) {
       errors.push(`${roleLabel(role)} must be assigned exactly once.`);
     }
   }
-  if (roles.filter((value) => value === "drugC").length > 1) {
-    errors.push("Drug C can be assigned at most once.");
+  const optionalC = (["drugNameC", "drugC", "unitsC"] as ColumnRole[]).map((role) => roles.filter((value) => value === role).length);
+  if (optionalC.some((count) => count > 1)) {
+    errors.push("Drug C, Conc C, and Units C can each be assigned at most once.");
+  }
+  if (optionalC.some((count) => count === 1) && !optionalC.every((count) => count === 1)) {
+    errors.push("Drug C, Conc C, and Units C must be assigned together.");
   }
   return errors;
 }
@@ -29,12 +33,13 @@ export function validateRoles(roles: ColumnRole[]): string[] {
 export function buildMapping(
   preview: ImportPreview,
   roles: ColumnRole[],
+  drugNames?: string[],
 ): ColumnMapping | null {
   if (validateRoles(roles).length > 0) return null;
-  const drugs = orderedDrugRoles.flatMap((role) => {
+  const drugs = orderedDrugRoles.slice(0, drugNames?.length ?? orderedDrugRoles.length).flatMap((role, drugIndex) => {
     const column = roles.indexOf(role);
     if (column < 0) return [];
-    return [{ column, name: preview.suggestedDrugNames[column] || roleLabel(role) }];
+    return [{ column, name: drugNames?.[drugIndex] || preview.suggestedDrugNames[column] || roleLabel(role) }];
   });
   return { drugs, responseColumn: roles.indexOf("response") };
 }
@@ -42,15 +47,47 @@ export function buildMapping(
 export function roleLabel(role: ColumnRole): string {
   return {
     ignore: "Ignore",
-    drugA: "Drug A",
-    drugB: "Drug B",
-    drugC: "Drug C",
+    drugNameA: "Drug A",
+    drugNameB: "Drug B",
+    drugNameC: "Drug C",
+    drugA: "Conc A",
+    drugB: "Conc B",
+    drugC: "Conc C",
+    unitsA: "Units A",
+    unitsB: "Units B",
+    unitsC: "Units C",
     response: "Response",
   }[role];
 }
 
 export function formatNumber(value: number, digits = 3): string {
   return Number.isFinite(value) ? value.toFixed(digits) : "—";
+}
+
+export function formatPValue(value: string | null): string {
+  if (!value) return "—";
+  const normalized = value.trim();
+  if (normalized.startsWith("<")) return normalized;
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric)) return normalized;
+  if (numeric < 0.0001) return numeric.toExponential(3);
+  return numeric.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+export function mostCommonLowerTie(values: number[]): number | null {
+  const counts = new Map<number, number>();
+  for (const value of values.filter((candidate) => Number.isFinite(candidate) && candidate > 0)) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  let selected: number | null = null;
+  let selectedCount = 0;
+  for (const [value, count] of counts) {
+    if (count > selectedCount || (count === selectedCount && (selected === null || value < selected))) {
+      selected = value;
+      selectedCount = count;
+    }
+  }
+  return selected;
 }
 
 export interface BlissAggregate {
@@ -78,10 +115,35 @@ export function inactiveDrugPairSummary(analysis: AnalysisResult, inactiveIndex:
   if (analysis.drugNames.length !== 3 || inactiveIndex < 0 || inactiveIndex >= 3) return null;
   const activeIndices = [0, 1, 2].filter((index) => index !== inactiveIndex);
   const rows = analysis.processed.filter((row) =>
+    withinClinicalWindow(analysis, row)
+    &&
     row.concentrations[inactiveIndex] === 0
     && activeIndices.every((index) => row.concentrations[index] > 0),
   );
   return rows.length ? aggregateBliss(rows) : null;
+}
+
+export function withinClinicalWindow(analysis: AnalysisResult, row: ProcessedCombination): boolean {
+  return row.concentrations.every((dose, index) => {
+    const target = analysis.clinicallyRelevantConcentrations[index];
+    return dose <= 0 || target == null || (dose >= target / 4 && dose <= target * 4);
+  });
+}
+
+export function isClinicalWindowCell(analysis: AnalysisResult, row: ProcessedCombination, xIndex: number, yIndex: number): boolean {
+  return analysis.clinicallyRelevantConcentrations.some((value) => value != null)
+    && row.concentrations[xIndex] > 0
+    && row.concentrations[yIndex] > 0
+    && withinClinicalWindow(analysis, row);
+}
+
+export function stratificationIndexFor(regimen: ComparisonRegimen, overrides: Record<string, string>, sharedDrugs: string[]): number {
+  const drugNames = regimen.analysis.drugNames;
+  const selected = drugNames.includes(overrides[regimen.id])
+    ? overrides[regimen.id]
+    : sharedDrugs.find((drug) => drugNames.includes(drug));
+  const index = selected ? drugNames.indexOf(selected) : -1;
+  return index >= 0 ? index : Math.max(0, drugNames.length - 1);
 }
 
 export function compareRegimens(
@@ -160,11 +222,10 @@ export function compareRegimens(
 
 export function exceedanceDomain(values: number[]): [number, number] {
   if (!values.length) return [-0.01, 0.01];
-  let minimum = Math.min(0, ...values);
-  let maximum = Math.max(0, ...values);
+  const minimum = Math.min(...values);
+  let maximum = Math.max(...values);
   if (maximum - minimum < 0.01) {
-    minimum -= 0.01;
-    maximum += 0.01;
+    maximum = minimum + 0.01;
   }
   return [minimum, maximum];
 }
@@ -175,7 +236,7 @@ export function exceedanceAuc(values: number[], [minimum, maximum]: [number, num
 }
 
 function normalizedSurface(regimen: ComparisonRegimen, minimumEffect: number): Map<string, number> {
-  const rows = regimen.analysis.processed.filter((row) => row.concentrations.every((value) => value > 0));
+  const rows = regimen.analysis.processed.filter((row) => row.concentrations.every((value) => value > 0) && withinClinicalWindow(regimen.analysis, row));
   const mics = regimen.analysis.micValues;
   if (mics.length !== regimen.analysis.drugNames.length || mics.some((value) => !Number.isFinite(value) || value <= 0)) {
     throw new Error(`${regimen.label} does not have one positive MIC for each drug.`);

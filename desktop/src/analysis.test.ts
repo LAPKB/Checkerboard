@@ -1,30 +1,47 @@
 import { describe, expect, it } from "vitest";
 
-import { aggregateBliss, buildMapping, compareRegimens, exceedanceAuc, exceedanceDomain, inactiveDrugPairSummary, validateRoles } from "./analysis";
+import { aggregateBliss, buildMapping, compareRegimens, exceedanceAuc, exceedanceDomain, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, mostCommonLowerTie, stratificationIndexFor, validateRoles } from "./analysis";
 import type { AnalysisResult, ComparisonRegimen, ImportPreview } from "./types";
 
 const preview: ImportPreview = {
-  headers: ["A", "B", "Response"],
+  headers: ["Drug A", "Drug B", "Conc A", "Conc B", "Units A", "Units B", "Response"],
   rows: [],
   totalRows: 0,
-  totalColumns: 3,
-  suggestedRoles: ["drugA", "drugB", "response"],
-  suggestedDrugNames: ["Ampicillin", "Meropenem", "Response"],
+  totalColumns: 7,
+  suggestedRoles: ["drugNameA", "drugNameB", "drugA", "drugB", "unitsA", "unitsB", "response"],
+  suggestedDrugNames: ["DrugA", "DrugB", "Ampicillin", "Meropenem", "UnitsA", "UnitsB", "Response"],
+  regimens: [],
 };
 
 describe("column mapping", () => {
   it("requires each core role exactly once", () => {
-    expect(validateRoles(["drugA", "drugA", "response"])).toHaveLength(2);
+    expect(validateRoles(["drugNameA", "drugNameB", "drugA", "drugA", "unitsA", "unitsB", "response"])).toHaveLength(2);
   });
 
   it("builds drugs in stable A/B/C order", () => {
-    expect(buildMapping(preview, ["drugA", "drugB", "response"])).toEqual({
+    expect(buildMapping(preview, preview.suggestedRoles)).toEqual({
       drugs: [
-        { column: 0, name: "Ampicillin" },
-        { column: 1, name: "Meropenem" },
+        { column: 2, name: "Ampicillin" },
+        { column: 3, name: "Meropenem" },
       ],
-      responseColumn: 2,
+      responseColumn: 6,
     });
+  });
+});
+
+describe("p-value formatting", () => {
+  it("uses scientific notation only below 0.0001", () => {
+    expect(formatPValue("1e-3")).toBe("0.001");
+    expect(formatPValue("0.0001")).toBe("0.0001");
+    expect(formatPValue("0.000099")).toBe("9.900e-5");
+  });
+});
+
+describe("pooled MIC suggestion", () => {
+  it("selects the mode and resolves ties to the lower MIC", () => {
+    expect(mostCommonLowerTie([4, 2, 4, 2])).toBe(2);
+    expect(mostCommonLowerTie([1, 2, 2, 4])).toBe(2);
+    expect(mostCommonLowerTie([])).toBeNull();
   });
 });
 
@@ -48,6 +65,8 @@ function regimen(id: string, bliss: number[][], drugCount = 2): ComparisonRegime
       drugNames: Array.from({ length: drugCount }, (_, index) => `Drug ${index + 1}`),
       micValues: Array.from({ length: drugCount }, (_, index) => Math.min(...processed.map((row) => row.concentrations[index]))),
       micZeroTolerance: 5,
+      clinicallyRelevantConcentrations: [],
+      concentrationUnits: [],
       control: { replicateCount: 1, meanOd: 1 },
       processed,
       summary: { sumBliss: 0, meanBliss: 0, positiveSum: 0, negativeSum: 0, combinationCount: processed.length, pValue: null, interpretation: "additive" },
@@ -99,6 +118,13 @@ describe("dose-stratified regimen comparison", () => {
     expect(domain).toEqual([-20, 40]);
     expect(exceedanceAuc([-20, 20, 40], domain)).toBeCloseTo(100 / 3);
   });
+
+  it("starts AUC only where an eligible combination can fail to exceed the threshold", () => {
+    const domain = exceedanceDomain([10, 20, 30]);
+    expect(domain).toEqual([10, 30]);
+    expect(exceedanceAuc([10, 20, 30], domain)).toBe(10);
+    expect(exceedanceAuc([10, 10], exceedanceDomain([10, 10]))).toBe(0);
+  });
 });
 
 describe("three-drug summaries", () => {
@@ -112,8 +138,27 @@ describe("three-drug summaries", () => {
     expect(summary.ciLeft).toBeCloseTo(6 - 1.96 * Math.sqrt(2) / 2);
   });
 
+  it("outlines eligible pairwise cells when the stratifying drug is zero", () => {
+    const value = regimen("triple", [[1, 2, 4]], 3).analysis;
+    value.processed[0].concentrations[2] = 0;
+    value.clinicallyRelevantConcentrations = [null, null, 4];
+    expect(isClinicalWindowCell(value, value.processed[0], 1, 0)).toBe(true);
+  });
+
   it("does not invent an aggregate interval when cellwise SEMs are unavailable", () => {
     const value = regimen("pair", [[1, 1, 4], [2, 2, 8]]).analysis;
     expect(aggregateBliss(value.processed).ciLeft).toBeNull();
+  });
+});
+
+describe("sticky stratification", () => {
+  it("uses manual choices first and ordered shared drugs for remaining regimens", () => {
+    const first = regimen("first", [[1, 1, 1]], 3);
+    first.analysis.drugNames = ["A", "B", "C"];
+    const second = regimen("second", [[1, 1, 1]], 3);
+    second.analysis.drugNames = ["D", "B", "C"];
+    expect(stratificationIndexFor(first, {}, ["A", "B"])).toBe(0);
+    expect(stratificationIndexFor(second, {}, ["A", "B"])).toBe(1);
+    expect(stratificationIndexFor(second, { second: "C" }, ["A", "B"])).toBe(2);
   });
 });

@@ -72,13 +72,14 @@ pub(super) fn analyze(
         let original = match policy.response_type {
             ResponseType::Viability | ResponseType::Inhibition => row.od,
             ResponseType::ViabilityFraction => 100.0 * row.od,
+            ResponseType::InhibitionFraction => 100.0 * row.od,
             ResponseType::RawOd => 100.0 * row.od / control_mean,
         };
         let response = match policy.response_type {
             ResponseType::Viability | ResponseType::ViabilityFraction | ResponseType::RawOd => {
                 100.0 - original
             }
-            ResponseType::Inhibition => original,
+            ResponseType::Inhibition | ResponseType::InhibitionFraction => original,
         };
         let key = ConcentrationKey::new(&concentrations);
         let group = grouped.entry(key).or_insert_with(|| Group {
@@ -240,6 +241,8 @@ pub(super) fn analyze(
         drug_names: input.drug_names.clone(),
         mic_values: Vec::new(),
         mic_zero_tolerance: 0.0,
+        clinically_relevant_concentrations: Vec::new(),
+        concentration_units: Vec::new(),
         control: ControlStatistics {
             replicate_count: control_rows.len(),
             mean_od: control_mean,

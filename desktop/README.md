@@ -5,6 +5,10 @@ analysis profile is a native Rust implementation benchmarked against
 Bioconductor `synergyfinder` 3.20.0 rather than the historical Shiny
 implementation.
 
+For a detailed, R-developer-oriented explanation of the Rust, Tauri, React,
+npm, Cargo, and repository structure, see
+[`../docs/checkerboard-tauri-developer-guide.md`](../docs/checkerboard-tauri-developer-guide.md).
+
 The release application is self-contained. It calculates Bliss surfaces,
 replicate bootstraps, baseline corrections, confidence intervals, and p-values
 in compiled Rust; users do not need R, Bioconductor, or a Rust toolchain.

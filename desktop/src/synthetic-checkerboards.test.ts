@@ -35,6 +35,8 @@ function syntheticRegimen(drugCount: 2 | 3, interaction: InteractionClass): Comp
     drugNames: Array.from({ length: drugCount }, (_, index) => `Drug ${index + 1}`),
     micValues: Array(drugCount).fill(1),
     micZeroTolerance: 5,
+    clinicallyRelevantConcentrations: [],
+    concentrationUnits: [],
     control: { replicateCount: 1, meanOd: 100 },
     processed,
     summary: {

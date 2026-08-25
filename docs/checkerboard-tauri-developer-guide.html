@@ -1,0 +1,1436 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.25">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>checkerboard-tauri-developer-guide</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="checkerboard-tauri-developer-guide_files/libs/clipboard/clipboard.min.js"></script>
+<script src="checkerboard-tauri-developer-guide_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="checkerboard-tauri-developer-guide_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="checkerboard-tauri-developer-guide_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="checkerboard-tauri-developer-guide_files/libs/quarto-html/popper.min.js"></script>
+<script src="checkerboard-tauri-developer-guide_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="checkerboard-tauri-developer-guide_files/libs/quarto-html/anchor.min.js"></script>
+<link href="checkerboard-tauri-developer-guide_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="checkerboard-tauri-developer-guide_files/libs/quarto-html/quarto-syntax-highlighting-7b89279ff1a6dce999919e0e67d4d9ec.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="checkerboard-tauri-developer-guide_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="checkerboard-tauri-developer-guide_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="checkerboard-tauri-developer-guide_files/libs/bootstrap/bootstrap-d6a003b94517c951b2d65075d42fb01b.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="checkerboard-desktop-developer-guide" class="level1">
+<h1>Checkerboard desktop developer guide</h1>
+<p>This guide explains the structure of the Checkerboard repository for a developer who already understands R packages but is new to Rust, React, npm, and Tauri.</p>
+<p>The most important fact is that there are currently <strong>two applications in this repository</strong>:</p>
+<ol type="1">
+<li>The actively developed, self-contained Tauri desktop application is under <code>desktop/</code>.</li>
+<li>The root-level R/Shiny package is the older implementation and a development reference. It is not the production runtime for the desktop application.</li>
+</ol>
+<p>Unless a task explicitly concerns the R package, begin in <code>desktop/</code>.</p>
+<section id="mental-model" class="level2">
+<h2 class="anchored" data-anchor-id="mental-model">1. Mental model</h2>
+<p>The desktop application has three layers:</p>
+<pre class="text"><code>┌──────────────────────────────────────────────────────────────────┐
+│ React + TypeScript frontend                                     │
+│ desktop/src/                                                    │
+│                                                                  │
+│ Tabs, forms, tables, plots, state, and comparison presentation  │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ Tauri IPC: invoke("command", data)
+                               │ and progress events
+┌──────────────────────────────▼───────────────────────────────────┐
+│ Tauri Rust application boundary                                 │
+│ desktop/src-tauri/src/                                          │
+│                                                                  │
+│ File dialogs, import, request validation, commands, XLSX export │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ ordinary Rust function calls
+┌──────────────────────────────▼───────────────────────────────────┐
+│ Presentation-independent scientific core                        │
+│ desktop/src-tauri/crates/checkerboard-core/                     │
+│                                                                  │
+│ Bliss calculation, baseline correction, bootstrap, statistics  │
+└──────────────────────────────────────────────────────────────────┘</code></pre>
+<p>This separation is deliberate:</p>
+<ul>
+<li>React should decide what is shown and manage user interaction, but should not reimplement Bliss calculations.</li>
+<li>Tauri commands should be a thin, carefully validated boundary between untrusted UI/file input and Rust.</li>
+<li><code>checkerboard-core</code> should be usable and testable without a window, browser, Tauri, or R installation.</li>
+</ul>
+<p>An R analogy is:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Checkerboard component</th>
+<th>Rough R analogy</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>React components</td>
+<td>Shiny UI plus reactive presentation logic</td>
+</tr>
+<tr class="even">
+<td>TypeScript interfaces</td>
+<td>Documented S3/R6 object shapes, but checked before execution</td>
+</tr>
+<tr class="odd">
+<td>Tauri commands</td>
+<td>Shiny server endpoints or an API layer</td>
+</tr>
+<tr class="even">
+<td><code>checkerboard-core</code></td>
+<td>The package’s reusable functions under <code>R/</code></td>
+</tr>
+<tr class="odd">
+<td>Cargo crate</td>
+<td>An R package</td>
+</tr>
+<tr class="even">
+<td>Cargo workspace</td>
+<td>A repository containing related R packages</td>
+</tr>
+<tr class="odd">
+<td><code>Cargo.toml</code></td>
+<td><code>DESCRIPTION</code> plus compilation/dependency configuration</td>
+</tr>
+<tr class="even">
+<td><code>Cargo.lock</code></td>
+<td>A project-level <code>renv.lock</code></td>
+</tr>
+<tr class="odd">
+<td>Rust unit/integration tests</td>
+<td><code>testthat</code> tests</td>
+</tr>
+<tr class="even">
+<td>Vitest</td>
+<td><code>testthat</code> for the TypeScript layer</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="what-tauri-is-doing" class="level2">
+<h2 class="anchored" data-anchor-id="what-tauri-is-doing">2. What Tauri is doing</h2>
+<p>Tauri packages a web user interface inside an operating-system webview and runs a compiled Rust process behind it. The React code is therefore the visible interface, while Rust owns native and scientific operations.</p>
+<p>This is different from simply placing a website on a server:</p>
+<ul>
+<li>The app runs locally.</li>
+<li>Rust can read selected files, open native dialogs, write workbooks, and quit the process.</li>
+<li>React cannot call arbitrary Rust functions. A Rust function must be registered as a Tauri command, and the frontend calls it through Tauri’s inter-process communication layer.</li>
+<li>Tauri capabilities explicitly limit which native plugin operations the window may request.</li>
+<li>The release bundle contains compiled Rust and built frontend assets. End users do not need npm, Node.js, R, Bioconductor, or a Rust toolchain.</li>
+</ul>
+<p>For example, importing a file follows this path:</p>
+<pre class="text"><code>React button
+  → native file dialog plugin
+  → invoke("import_preview", request)
+  → commands.rs validates and coordinates the request
+  → services/importer.rs reads CSV or Excel data
+  → serialized ImportPreview returns to React
+  → App.tsx updates the visible mapping table</code></pre>
+<p>Analysis follows a similar path, except <code>commands.rs</code> constructs an <code>AssayInput</code> and calls <code>checkerboard-core</code> on a background task. Progress events return to React while the bootstrap runs.</p>
+</section>
+<section id="what-npm-is" class="level2">
+<h2 class="anchored" data-anchor-id="what-npm-is">3. What npm is</h2>
+<p><strong>npm</strong> is the Node Package Manager. In this project it has three jobs:</p>
+<ol type="1">
+<li>Install the JavaScript/TypeScript tools and libraries listed in <code>desktop/package.json</code>.</li>
+<li>Record their resolved versions in <code>desktop/package-lock.json</code>.</li>
+<li>Provide named commands, called scripts, for development, tests, and builds.</li>
+</ol>
+<p>It is closest to a combination of <code>install.packages()</code>, <code>renv</code>, and a small <code>Makefile</code>.</p>
+<section id="package.json-and-package-lock.json" class="level3">
+<h3 class="anchored" data-anchor-id="package.json-and-package-lock.json"><code>package.json</code> and <code>package-lock.json</code></h3>
+<p><code>package.json</code> is human-edited. It contains:</p>
+<ul>
+<li>Project identity and version.</li>
+<li><code>dependencies</code>, which are libraries used by application code, such as React, Plotly, and the Tauri JavaScript APIs.</li>
+<li><code>devDependencies</code>, which are development/build tools, such as TypeScript, Vite, Vitest, and the Tauri CLI.</li>
+<li><code>scripts</code>, which give stable names to command sequences.</li>
+</ul>
+<p><code>package-lock.json</code> is generated by npm and pins the full dependency graph, including transitive dependencies. Commit it. Do not hand-edit it. It makes a clean installation resolve the same package versions on another machine.</p>
+<p>The leading caret in a version such as <code>^19.1.0</code> allows compatible updates when resolving dependencies. The lock file records the exact version actually selected.</p>
+</section>
+<section id="npm-install-npm-ci-npm-run-and-npx" class="level3">
+<h3 class="anchored" data-anchor-id="npm-install-npm-ci-npm-run-and-npx"><code>npm install</code>, <code>npm ci</code>, <code>npm run</code>, and <code>npx</code></h3>
+<p>Run npm commands from <code>desktop/</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> install</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>npm install</code> resolves dependencies, updates the lock file when necessary, and creates <code>node_modules/</code>. For a clean reproducible installation when the lock file must remain unchanged, use:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> ci</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>npm run NAME</code> looks up <code>NAME</code> in the <code>scripts</code> section of <code>package.json</code>. It also temporarily places <code>node_modules/.bin</code> on <code>PATH</code>, so scripts use the project-pinned tool rather than an unrelated global installation.</p>
+<p>For example:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> test              <span class="co"># script: vitest run</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run test:rust     <span class="co"># script: cargo test ... --workspace</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run test:all      <span class="co"># frontend tests, then Rust tests</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run build         <span class="co"># all tests, TypeScript check, then Vite frontend build</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run tauri dev     <span class="co"># Tauri CLI development application</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run tauri build   <span class="co"># compile and package the release application</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>npx tsc --noEmit</code> runs the locally installed TypeScript compiler directly. <code>npx</code> is useful for invoking a package executable that does not need its own named npm script.</p>
+</section>
+<section id="npm-is-not-the-rust-package-manager" class="level3">
+<h3 class="anchored" data-anchor-id="npm-is-not-the-rust-package-manager">npm is not the Rust package manager</h3>
+<p>Rust uses <strong>Cargo</strong>, not npm:</p>
+<ul>
+<li>npm reads <code>package.json</code>; Cargo reads <code>Cargo.toml</code>.</li>
+<li>npm installs into <code>node_modules/</code>; Cargo downloads crates into its cache and builds into <code>target/</code>.</li>
+<li>npm uses <code>package-lock.json</code>; Cargo uses <code>Cargo.lock</code>.</li>
+<li><code>npm test</code> runs Vitest; <code>cargo test</code> compiles and runs Rust tests.</li>
+</ul>
+<p>The Tauri CLI connects the two build systems. <code>npm run tauri dev</code> starts Vite for the frontend and Cargo for the Rust host. <code>npm run tauri build</code> first builds the frontend according to <code>tauri.conf.json</code>, then compiles and bundles the native application.</p>
+</section>
+</section>
+<section id="active-desktop-files" class="level2">
+<h2 class="anchored" data-anchor-id="active-desktop-files">4. Active <code>desktop/</code> files</h2>
+<section id="frontend-configuration" class="level3">
+<h3 class="anchored" data-anchor-id="frontend-configuration">Frontend configuration</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Purpose and contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>desktop/package.json</code></td>
+<td>npm manifest. Defines React/Plotly/Tauri dependencies, TypeScript/Vite/Vitest build tools, version <code>0.7.0</code>, and the named npm scripts. <code>private: true</code> prevents accidentally publishing this application as a public npm library. <code>type: module</code> selects modern JavaScript ES modules.</td>
+</tr>
+<tr class="even">
+<td><code>desktop/package-lock.json</code></td>
+<td>npm-generated exact dependency graph. Comparable to <code>renv.lock</code>; commit it but do not manually edit it.</td>
+</tr>
+<tr class="odd">
+<td><code>desktop/index.html</code></td>
+<td>Minimal HTML shell loaded by Vite. It supplies <code>&lt;div id="root"&gt;</code>; <code>src/main.tsx</code> mounts React into that element. Most visible UI is not written here. The title and favicon entries are remnants of the original scaffold; the native window title comes from <code>tauri.conf.json</code>.</td>
+</tr>
+<tr class="even">
+<td><code>desktop/vite.config.ts</code></td>
+<td>Vite development/build configuration. Enables React transformation, fixes the development server at port 1420 for Tauri, configures hot-module replacement, and tells Vite not to watch Rust files.</td>
+</tr>
+<tr class="odd">
+<td><code>desktop/tsconfig.json</code></td>
+<td>TypeScript rules for frontend source. Enables strict checking, React JSX, browser APIs, ES2020 output assumptions, unused-variable checks, and <code>noEmit</code> because Vite performs the actual bundling.</td>
+</tr>
+<tr class="even">
+<td><code>desktop/tsconfig.node.json</code></td>
+<td>Separate TypeScript settings for Node-executed configuration code, currently <code>vite.config.ts</code>. Browser UI and build configuration run in different environments, hence the separate config.</td>
+</tr>
+<tr class="odd">
+<td><code>desktop/.gitignore</code></td>
+<td>Excludes generated JavaScript artifacts such as <code>node_modules/</code> and <code>dist/</code>, logs, editor state, and local-only files.</td>
+</tr>
+<tr class="even">
+<td><code>desktop/.vscode/extensions.json</code></td>
+<td>Recommends editor extensions useful for this project. It affects developer tooling, not the application.</td>
+</tr>
+<tr class="odd">
+<td><code>desktop/README.md</code></td>
+<td>Short project overview, boundaries, supported features, and common commands. The more detailed architectural explanation is in this guide.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="react-and-typescript-source-desktopsrc" class="level3">
+<h3 class="anchored" data-anchor-id="react-and-typescript-source-desktopsrc">React and TypeScript source: <code>desktop/src/</code></h3>
+<p><code>src</code> conventionally means hand-written source code. TypeScript files end in <code>.ts</code>; files containing JSX/React markup end in <code>.tsx</code>.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Purpose and contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>src/main.tsx</code></td>
+<td>Frontend entry point. Finds the HTML element named <code>root</code>, creates the React root, and renders <code>&lt;App /&gt;</code> under React strict mode. This plays a role similar to the top-level call that launches a Shiny UI.</td>
+</tr>
+<tr class="even">
+<td><code>src/App.tsx</code></td>
+<td>Main UI and application-state coordinator. It contains the Import → MIC → Analyze → Results → Compare workflow, Tauri command calls, progress listeners, regimen navigation, instructions dialog, result panels, heatmaps, comparison tables, and many small presentation components. It is intentionally responsible for state and display, not the native Bliss algorithm.</td>
+</tr>
+<tr class="odd">
+<td><code>src/App.css</code></td>
+<td>Global stylesheet for <code>App.tsx</code> and the main workspaces: navigation, forms, tables, dialogs, heatmaps, comparison UI, responsive constraints, and instructions-window previews. CSS class names such as <code>.comparison-card</code> are referenced by JSX through <code>className</code>.</td>
+</tr>
+<tr class="even">
+<td><code>src/BarPlot.tsx</code></td>
+<td>Plotly-based visualizations. It renders two-drug growth bars and three-drug stratified interaction bars, including colors and optional confidence-interval error bars. It is lazy-loaded from <code>App.tsx</code> so Plotly’s large bundle is not required for the first UI render.</td>
+</tr>
+<tr class="odd">
+<td><code>src/types.ts</code></td>
+<td>Shared frontend contracts: column roles, import requests/previews, analysis policies/results, processed combinations, MIC estimates, and comparison structures. These shapes must remain aligned with the Rust structures serialized through Tauri. This resembles keeping the definition and documentation of an R object consistent across all producers and consumers, except TypeScript checks it during development.</td>
+</tr>
+<tr class="even">
+<td><code>src/analysis.ts</code></td>
+<td>Pure frontend helpers. It validates column-role assignments, builds mappings, formats results, aggregates displayed Bliss values, handles clinical-window display logic and stratification choices, and calculates comparison/ranking presentation data. It should not become a second implementation of the native Bliss surface calculation.</td>
+</tr>
+<tr class="odd">
+<td><code>src/preferences.ts</code></td>
+<td>Loads and saves user-selected plot colors with the Tauri store plugin and defines default colors.</td>
+</tr>
+<tr class="even">
+<td><code>src/analysis.test.ts</code></td>
+<td>Vitest unit and regression tests for mapping helpers, formatting, clinical windows, comparison matching, exceedance AUC, sorting inputs, and related pure TypeScript logic. The <code>.test.ts</code> suffix lets Vitest discover it automatically.</td>
+</tr>
+<tr class="odd">
+<td><code>src/synthetic-checkerboards.test.ts</code></td>
+<td>Generated two- and three-drug frontend comparison regressions covering additive, synergistic, and antagonistic surfaces.</td>
+</tr>
+<tr class="even">
+<td><code>src/vite-env.d.ts</code></td>
+<td>Type declaration reference supplied by Vite. It teaches TypeScript about Vite-specific browser types; it produces no runtime code.</td>
+</tr>
+<tr class="odd">
+<td><code>src/assets/logo.png</code></td>
+<td>Logo imported by React and bundled by Vite. An imported asset receives a hashed filename in the production <code>dist/</code> directory.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="tauri-configuration-desktopsrc-tauri" class="level3">
+<h3 class="anchored" data-anchor-id="tauri-configuration-desktopsrc-tauri">Tauri configuration: <code>desktop/src-tauri/</code></h3>
+<p><code>src-tauri</code> is the standard Tauri directory name. Tauri tooling expects native source and configuration here, keeping it separate from the web frontend.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File or directory</th>
+<th>Purpose and contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>src-tauri/Cargo.toml</code></td>
+<td>Cargo manifest for the native application crate and root of the Cargo workspace. It defines package metadata, output library types, Tauri plugins, import/export libraries, serialization/error dependencies, and the local dependency on <code>checkerboard-core</code>.</td>
+</tr>
+<tr class="even">
+<td><code>src-tauri/Cargo.lock</code></td>
+<td>Cargo-generated exact Rust dependency graph. Commit it for an application. It is the Rust counterpart of <code>package-lock.json</code> or <code>renv.lock</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>src-tauri/build.rs</code></td>
+<td>Cargo build script. It calls <code>tauri_build::build()</code> so Tauri can generate and embed platform/configuration information while compiling. Cargo automatically recognizes the name <code>build.rs</code>.</td>
+</tr>
+<tr class="even">
+<td><code>src-tauri/tauri.conf.json</code></td>
+<td>Tauri application configuration: product name, application identifier, version, window and minimum size, content-security policy, frontend development URL, frontend build command/output, bundle targets, and desktop icons. This is packaging/runtime configuration rather than scientific code.</td>
+</tr>
+<tr class="odd">
+<td><code>src-tauri/capabilities/default.json</code></td>
+<td>Tauri 2 permission policy for the main window. It permits the core defaults plus open/save dialogs, persistent store access, and opener functionality. Adding a plugin dependency alone is not always enough; its capability may also need to be allowed here.</td>
+</tr>
+<tr class="even">
+<td><code>src-tauri/.gitignore</code></td>
+<td>Excludes Cargo’s compiled <code>target/</code> tree and Tauri-generated capability schemas under <code>gen/</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>src-tauri/icons/</code></td>
+<td>Platform-specific application icons used during packaging. <code>icon.icns</code> is for macOS, <code>icon.ico</code> for Windows, numbered square PNGs for Windows packaging, and the Android/iOS subdirectories contain mobile launcher/icon variants. They are generated variants of the same visual identity rather than separate code files.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="tauri-rust-source-desktopsrc-taurisrc" class="level3">
+<h3 class="anchored" data-anchor-id="tauri-rust-source-desktopsrc-taurisrc">Tauri Rust source: <code>desktop/src-tauri/src/</code></h3>
+<p>Rust source files end in <code>.rs</code>. A directory forms a module hierarchy. <code>mod commands;</code> in <code>lib.rs</code> tells Rust to compile <code>commands.rs</code>; <code>mod services;</code> leads to <code>services/mod.rs</code>, which declares its child modules.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Purpose and contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>src/main.rs</code></td>
+<td>Native binary entry point. It suppresses an extra Windows console in release builds and calls <code>checkerboard_desktop_lib::run()</code>. Keeping it tiny makes the app wiring reusable across desktop/mobile build forms.</td>
+</tr>
+<tr class="even">
+<td><code>src/lib.rs</code></td>
+<td>Tauri application wiring. Registers dialog/store/opener plugins and exposes the Rust functions that JavaScript may invoke: worksheet listing, preview import, MIC inference, table analysis, export, and quit. If a command is implemented but omitted from <code>generate_handler!</code>, the frontend cannot call it.</td>
+</tr>
+<tr class="odd">
+<td><code>src/commands.rs</code></td>
+<td>Tauri command boundary and orchestration. Defines serialized request/response structures, imports previews, discovers multiple regimens, suggests mappings and response types, validates units/responses, infers MICs, invokes the scientific core, reports bootstrap progress, exports results, and contains command-boundary tests. It translates file/UI concepts into <code>checkerboard-core</code> inputs.</td>
+</tr>
+<tr class="even">
+<td><code>src/error.rs</code></td>
+<td>Serializable application error type with a stable <code>code</code> and human-readable <code>message</code>. It converts I/O and core analysis errors into values React can display instead of allowing a Rust panic to cross the boundary.</td>
+</tr>
+<tr class="odd">
+<td><code>src/services/mod.rs</code></td>
+<td>Declares the <code>importer</code>, <code>synergyfinder</code>, and <code>workbook</code> service modules. <code>mod.rs</code> is the conventional file representing a directory module.</td>
+</tr>
+<tr class="even">
+<td><code>src/services/importer.rs</code></td>
+<td>Reads CSV, TXT, XLS, and XLSX files; lists workbook sheets; selects a requested row/column range; makes duplicate headings unique; and validates extensions/range requests. It handles file representation, not assay interpretation.</td>
+</tr>
+<tr class="odd">
+<td><code>src/services/workbook.rs</code></td>
+<td>Creates native XLSX exports with summary, policy, confidence interval, MIC, and processed-combination information. It also sanitizes worksheet names and tests the generated workbook.</td>
+</tr>
+<tr class="even">
+<td><code>src/services/synergyfinder.rs</code></td>
+<td>Development-only reference bridge used by parity tests when the pinned R/Bioconductor environment is available. Production analysis does not call this service.</td>
+</tr>
+<tr class="odd">
+<td><code>src/services/synergyfinder_bridge.R</code></td>
+<td>R script embedded into the test bridge with <code>include_str!</code>. It invokes Bioconductor <code>synergyfinder</code> as an optional oracle for native-versus-R regression tests. It is not shipped as an R runtime dependency and must never become the production analysis path.</td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<section id="the-independent-rust-scientific-crate" class="level2">
+<h2 class="anchored" data-anchor-id="the-independent-rust-scientific-crate">5. The independent Rust scientific crate</h2>
+<p><code>desktop/src-tauri/crates/checkerboard-core/</code> is a second Rust <strong>crate</strong> inside the same Cargo <strong>workspace</strong>.</p>
+<p>In Cargo terminology:</p>
+<ul>
+<li>A <strong>package</strong> is described by one <code>Cargo.toml</code>.</li>
+<li>A <strong>crate</strong> is a compiled Rust library or binary target.</li>
+<li>A <strong>workspace</strong> coordinates related packages, shares one lock file and <code>target/</code> directory, and lets <code>cargo test --workspace</code> test all members.</li>
+</ul>
+<p>The folder is named <code>checkerboard-core</code> because it contains the core domain logic, not because <code>core</code> is a special Rust keyword. The hyphenated Cargo package name is imported in Rust code as <code>checkerboard_core</code>, because Rust identifiers use underscores.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Purpose and contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>checkerboard-core/Cargo.toml</code></td>
+<td>Manifest for the scientific library. It deliberately has very few dependencies: Serde for serialization and <code>thiserror</code> for typed errors; CSV/JSON appear only as test dependencies. It does not depend on Tauri.</td>
+</tr>
+<tr class="even">
+<td><code>checkerboard-core/src/lib.rs</code></td>
+<td>Public scientific API and domain types: assay rows, mappings, policies, results, warnings, interpretations, validation errors, mapping/parsing, main analysis entry points, stratified summaries, interpretations, and unit/regression tests. Types or functions marked <code>pub</code> may be used by other crates. Private helpers remain implementation details.</td>
+</tr>
+<tr class="odd">
+<td><code>checkerboard-core/src/synergyfinder_native.rs</code></td>
+<td>Native SynergyFinder-compatible engine. It builds Bliss surfaces, fits single-agent log-logistic baselines, applies Part/All correction, performs seeded parametric bootstrap sampling, calculates confidence intervals and p values, and implements the compatible random-number generator/statistical helpers. <code>pub(super)</code> exposes its entry point only to its parent <code>lib.rs</code>, not to arbitrary consumers.</td>
+</tr>
+<tr class="even">
+<td><code>checkerboard-core/tests/synthetic_checkerboards.rs</code></td>
+<td>Cargo integration tests. Files under a crate-level <code>tests/</code> directory compile as external consumers of the public API, which verifies that the public crate interface can recover known two- and three-drug interaction classes.</td>
+</tr>
+</tbody>
+</table>
+<p>Why split out the core rather than putting everything in <code>commands.rs</code>?</p>
+<ul>
+<li>It prevents UI concerns from changing the scientific implementation.</li>
+<li>It can be tested without launching Tauri.</li>
+<li>It avoids a production dependency on R.</li>
+<li>A future CLI, server, or another GUI could call the same library.</li>
+<li>Cargo enforces the dependency direction: the Tauri crate depends on the core, while the core knows nothing about Tauri.</li>
+</ul>
+</section>
+<section id="important-rust-conventions-visible-here" class="level2">
+<h2 class="anchored" data-anchor-id="important-rust-conventions-visible-here">6. Important Rust conventions visible here</h2>
+<section id="main.rs-lib.rs-and-mod.rs" class="level3">
+<h3 class="anchored" data-anchor-id="main.rs-lib.rs-and-mod.rs"><code>main.rs</code>, <code>lib.rs</code>, and <code>mod.rs</code></h3>
+<p>Cargo recognizes conventional target names:</p>
+<ul>
+<li><code>src/main.rs</code> defines an executable (binary crate).</li>
+<li><code>src/lib.rs</code> defines a reusable library crate.</li>
+<li><code>mod.rs</code> represents a module directory and declares child files.</li>
+</ul>
+<p>The Tauri package has both a tiny binary and a library. Its <code>[lib]</code> configuration names the library <code>checkerboard_desktop_lib</code>; <code>main.rs</code> calls that library. <code>checkerboard-core</code> is library-only.</p>
+</section>
+<section id="visibility" class="level3">
+<h3 class="anchored" data-anchor-id="visibility">Visibility</h3>
+<p>Rust items are private unless marked otherwise:</p>
+<ul>
+<li><code>fn helper()</code> is private to its module.</li>
+<li><code>pub fn analyze()</code> is publicly callable.</li>
+<li><code>pub(super) fn analyze()</code> is visible only to the parent module.</li>
+</ul>
+<p>This gives more explicit boundaries than ordinary R functions, although the conceptual distinction resembles exported versus unexported functions in <code>NAMESPACE</code>.</p>
+</section>
+<section id="data-and-errors" class="level3">
+<h3 class="anchored" data-anchor-id="data-and-errors">Data and errors</h3>
+<ul>
+<li><code>struct</code> defines a named data shape, roughly like a strongly specified list or S3 record.</li>
+<li><code>enum</code> defines one of a fixed set of variants, such as <code>BaselineCorrection::{None, Part, All}</code>.</li>
+<li><code>Option&lt;T&gt;</code> means a value may be present (<code>Some</code>) or absent (<code>None</code>), rather than using <code>NULL</code> or <code>NA</code> ambiguously.</li>
+<li><code>Result&lt;T, E&gt;</code> means success returns <code>Ok(T)</code> and failure returns <code>Err(E)</code>. The <code>?</code> operator returns an error to the caller early.</li>
+<li><code>serde</code> converts Rust structures to/from the JSON-like data sent over Tauri IPC.</li>
+<li><code>#[serde(rename_all = "camelCase")]</code> lets idiomatic Rust <code>snake_case</code> fields appear as idiomatic TypeScript <code>camelCase</code> fields.</li>
+<li><code>thiserror</code> derives readable error messages for typed Rust errors.</li>
+</ul>
+</section>
+<section id="tests" class="level3">
+<h3 class="anchored" data-anchor-id="tests">Tests</h3>
+<p>Rust supports several test locations:</p>
+<ul>
+<li><code>#[cfg(test)] mod tests</code> inside a source file contains unit tests that may exercise private helpers.</li>
+<li><code>checkerboard-core/tests/*.rs</code> contains integration tests that see only the public crate interface.</li>
+<li><code>cargo test --workspace</code> tests both Cargo packages and all these test forms.</li>
+</ul>
+</section>
+</section>
+<section id="naming-and-folder-conventions" class="level2">
+<h2 class="anchored" data-anchor-id="naming-and-folder-conventions">7. Naming and folder conventions</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Pattern</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>src/</code></td>
+<td>Hand-written source for the current package/crate.</td>
+</tr>
+<tr class="even">
+<td><code>src-tauri/</code></td>
+<td>Conventional Tauri native application directory.</td>
+</tr>
+<tr class="odd">
+<td><code>crates/</code></td>
+<td>Repository-local Rust packages used by the parent workspace. Cargo does not require this name, but it is a common convention.</td>
+</tr>
+<tr class="even">
+<td><code>tests/</code> in a Rust crate</td>
+<td>Integration tests compiled separately from the library.</td>
+</tr>
+<tr class="odd">
+<td><code>*.test.ts</code></td>
+<td>Vitest-discovered TypeScript tests colocated with frontend code.</td>
+</tr>
+<tr class="even">
+<td><code>lib.rs</code></td>
+<td>Library root.</td>
+</tr>
+<tr class="odd">
+<td><code>main.rs</code></td>
+<td>Executable root.</td>
+</tr>
+<tr class="even">
+<td><code>mod.rs</code></td>
+<td>Module directory root/declarations.</td>
+</tr>
+<tr class="odd">
+<td><code>build.rs</code></td>
+<td>Cargo build-time script, recognized automatically.</td>
+</tr>
+<tr class="even">
+<td><code>Cargo.toml</code></td>
+<td>Human-edited Rust manifest. “TOML” is the configuration syntax.</td>
+</tr>
+<tr class="odd">
+<td><code>Cargo.lock</code></td>
+<td>Generated exact Rust dependency resolution.</td>
+</tr>
+<tr class="even">
+<td><code>package.json</code></td>
+<td>Human-edited npm manifest and scripts.</td>
+</tr>
+<tr class="odd">
+<td><code>package-lock.json</code></td>
+<td>Generated exact npm dependency resolution.</td>
+</tr>
+<tr class="even">
+<td><code>PascalCase</code></td>
+<td>React component names and TypeScript interfaces, for example <code>AnalysisResult</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>camelCase</code></td>
+<td>TypeScript variables, functions, and serialized IPC fields.</td>
+</tr>
+<tr class="even">
+<td><code>snake_case</code></td>
+<td>Rust functions, variables, modules, and source filenames.</td>
+</tr>
+<tr class="odd">
+<td><code>SCREAMING_SNAKE_CASE</code></td>
+<td>Rust constants.</td>
+</tr>
+<tr class="even">
+<td><code>kebab-case</code></td>
+<td>Package names such as <code>checkerboard-core</code>; imported by Rust as <code>checkerboard_core</code>.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="fixtures-and-regression-data" class="level2">
+<h2 class="anchored" data-anchor-id="fixtures-and-regression-data">8. Fixtures and regression data</h2>
+<p><code>fixtures/</code> contains pinned assay inputs used to protect scientific behavior. These are data, not application instructions.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>fixtures/README.md</code></td>
+<td>Documents the benchmark policy and each original fixture. Some descriptions cover retained legacy behavior; current product behavior is governed by the code and regression tests.</td>
+</tr>
+<tr class="even">
+<td><code>fixtures/valid/two_drug.csv</code></td>
+<td>Complete replicated two-drug checkerboard regression input.</td>
+</tr>
+<tr class="odd">
+<td><code>fixtures/valid/three_drug.csv</code></td>
+<td>Complete three-drug checkerboard regression input.</td>
+</tr>
+<tr class="even">
+<td><code>fixtures/valid/incomplete_grid.csv</code></td>
+<td>Intentionally incomplete but analyzable input, expected to warn.</td>
+</tr>
+<tr class="odd">
+<td><code>fixtures/valid/multiple_regimens.csv</code></td>
+<td>Multiple-regimen input used to test automatic regimen discovery and clinical-window filtering.</td>
+</tr>
+<tr class="even">
+<td><code>fixtures/invalid/missing_control.csv</code></td>
+<td>Expected failure: no all-zero control.</td>
+</tr>
+<tr class="odd">
+<td><code>fixtures/invalid/missing_single_agent.csv</code></td>
+<td>Expected failure: a combination lacks a required single-agent coordinate.</td>
+</tr>
+<tr class="even">
+<td><code>fixtures/invalid/nonnumeric.csv</code></td>
+<td>Expected failure: nonnumeric response.</td>
+</tr>
+<tr class="odd">
+<td><code>fixtures/reported/sample.xlsx</code></td>
+<td>Reported workbook retained as a regression case for spreadsheet import and unusual response values.</td>
+</tr>
+</tbody>
+</table>
+<p>When scientific behavior changes, add or update a pinned fixture/regression rather than relying only on manual UI testing.</p>
+</section>
+<section id="root-level-rshiny-package-and-supporting-files" class="level2">
+<h2 class="anchored" data-anchor-id="root-level-rshiny-package-and-supporting-files">9. Root-level R/Shiny package and supporting files</h2>
+<p>These files remain useful for historical behavior, development comparison, or the legacy app, but they are not the release desktop runtime.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File or directory</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>DESCRIPTION</code></td>
+<td>R package metadata and R dependencies. This is the closest R equivalent to a combination of <code>package.json</code> and <code>Cargo.toml</code>.</td>
+</tr>
+<tr class="even">
+<td><code>NAMESPACE</code></td>
+<td>R exports generated by roxygen2. It exports <code>bliss</code>, <code>export</code>, and <code>run_checkerboard_app</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>Checkerboard.Rproj</code></td>
+<td>RStudio project configuration.</td>
+</tr>
+<tr class="even">
+<td><code>R/bliss.R</code></td>
+<td>Legacy R Bliss implementation.</td>
+</tr>
+<tr class="odd">
+<td><code>R/export.R</code></td>
+<td>Legacy R export behavior.</td>
+</tr>
+<tr class="even">
+<td><code>R/shiny_app.R</code></td>
+<td>Legacy Shiny application implementation.</td>
+</tr>
+<tr class="odd">
+<td><code>R/logic.Rmd</code></td>
+<td>Historical literate analysis/development material.</td>
+</tr>
+<tr class="even">
+<td><code>R/.gitignore</code></td>
+<td>R-subdirectory ignore rules.</td>
+</tr>
+<tr class="odd">
+<td><code>app.R</code></td>
+<td>Legacy Shiny launch entry point.</td>
+</tr>
+<tr class="even">
+<td><code>man/*.Rd</code></td>
+<td>Generated R help pages for the exported R functions.</td>
+</tr>
+<tr class="odd">
+<td><code>inst/www/logo.png</code></td>
+<td>Logo installed with the R package for its Shiny/static assets. It is separate from the frontend-bundled desktop logo.</td>
+</tr>
+<tr class="even">
+<td><code>tests/testthat.R</code></td>
+<td>Standard <code>testthat</code> entry point for the R package.</td>
+</tr>
+<tr class="odd">
+<td><code>tests/testthat/test-bliss-display.R</code></td>
+<td>Legacy R display/Bliss tests.</td>
+</tr>
+<tr class="even">
+<td><code>tests/testthat/test-shiny-app.R</code></td>
+<td>Legacy Shiny tests.</td>
+</tr>
+<tr class="odd">
+<td><code>tests/test.r</code></td>
+<td>Ad hoc or historical development test script; it is not a Vitest or Cargo test.</td>
+</tr>
+<tr class="even">
+<td><code>tests/test3_combined.csv</code></td>
+<td>Uploaded multi-regimen test dataset used to reproduce import/analysis behavior.</td>
+</tr>
+<tr class="odd">
+<td><code>Builds/Checkerboard_0.1.tar.gz</code></td>
+<td>Previously built R source-package archive, not source code.</td>
+</tr>
+<tr class="even">
+<td><code>.Rbuildignore</code></td>
+<td>Prevents desktop, development, documentation, fixtures, and editor files from entering an R package tarball.</td>
+</tr>
+<tr class="odd">
+<td><code>.gitignore</code></td>
+<td>Root repository ignore rules, including RStudio state.</td>
+</tr>
+<tr class="even">
+<td><code>.DS_Store</code></td>
+<td>macOS Finder metadata; not application source and normally ignored.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="documentation-development-metadata-and-agent-guidance" class="level2">
+<h2 class="anchored" data-anchor-id="documentation-development-metadata-and-agent-guidance">10. Documentation, development metadata, and agent guidance</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File or directory</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>AGENTS.md</code></td>
+<td>Repository-specific engineering instructions for coding agents: active product boundary, architecture, scientific invariants, editing rules, and required validation. It is developer guidance, not runtime configuration.</td>
+</tr>
+<tr class="even">
+<td><code>docs/tauri-migration-plan.md</code></td>
+<td>Original migration plan from R/Shiny to Tauri. Useful historical design context.</td>
+</tr>
+<tr class="odd">
+<td><code>docs/tauri-migration-plan.html</code></td>
+<td>Rendered copy of the migration plan.</td>
+</tr>
+<tr class="even">
+<td><code>docs/tauri-migration-plan_files/</code></td>
+<td>Generated Bootstrap/Quarto JavaScript, CSS, fonts, and accessibility assets required by the rendered HTML plan. They are documentation dependencies, not desktop application dependencies.</td>
+</tr>
+<tr class="odd">
+<td><code>docs/checkerboard-tauri-developer-guide.md</code></td>
+<td>This guide.</td>
+</tr>
+<tr class="even">
+<td><code>dev/config_attachment.yaml</code></td>
+<td>Development/tool attachment metadata; not used by the production Tauri runtime.</td>
+</tr>
+<tr class="odd">
+<td><code>.vscode/settings.json</code></td>
+<td>Repository-local Visual Studio Code settings.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="generated-directories-you-will-see-locally" class="level2">
+<h2 class="anchored" data-anchor-id="generated-directories-you-will-see-locally">11. Generated directories you will see locally</h2>
+<p>These directories are important during development but should not be manually edited or committed:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Directory</th>
+<th>Created by</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>desktop/node_modules/</code></td>
+<td><code>npm install</code> or <code>npm ci</code></td>
+<td>Installed JavaScript packages and command-line tools. Delete and reinstall if dependency installation is corrupted.</td>
+</tr>
+<tr class="even">
+<td><code>desktop/dist/</code></td>
+<td><code>npm run build</code> / Vite</td>
+<td>Minified production HTML, CSS, JavaScript chunks, and hashed assets. Tauri embeds these files.</td>
+</tr>
+<tr class="odd">
+<td><code>desktop/src-tauri/target/</code></td>
+<td>Cargo</td>
+<td>Compiled Rust libraries, executables, incremental caches, test binaries, and release bundles. This can become large.</td>
+</tr>
+<tr class="even">
+<td><code>desktop/src-tauri/gen/</code></td>
+<td>Tauri tooling</td>
+<td>Generated schemas used for capability/configuration completion.</td>
+</tr>
+<tr class="odd">
+<td><code>.Rproj.user/</code></td>
+<td>RStudio</td>
+<td>Local editor/session metadata for the R project.</td>
+</tr>
+</tbody>
+</table>
+<p>The source of truth is the source/configuration plus lock files—not <code>dist/</code>, <code>target/</code>, or <code>node_modules/</code>.</p>
+</section>
+<section id="development-and-validation-workflows" class="level2">
+<h2 class="anchored" data-anchor-id="development-and-validation-workflows">12. Development and validation workflows</h2>
+<section id="first-setup" class="level3">
+<h3 class="anchored" data-anchor-id="first-setup">First setup</h3>
+<p>The development machine needs Node.js/npm and Rust/Cargo. End users do not.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> ci</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The Tauri platform prerequisites must also be installed for the operating system. On macOS, Tauri uses the system webview and Apple build tools.</p>
+</section>
+<section id="work-only-on-frontend-behavior" class="level3">
+<h3 class="anchored" data-anchor-id="work-only-on-frontend-behavior">Work only on frontend behavior</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run dev</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>This starts the UI in a normal browser through Vite. Tauri-only calls such as native dialogs may not work outside the Tauri host, but pure layout and many presentation changes can be inspected quickly.</p>
+</section>
+<section id="run-the-actual-desktop-application" class="level3">
+<h3 class="anchored" data-anchor-id="run-the-actual-desktop-application">Run the actual desktop application</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb8"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run tauri dev</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>This starts Vite, compiles the Rust debug application, opens the Tauri window, and reloads frontend edits. Rust edits trigger recompilation.</p>
+</section>
+<section id="test" class="level3">
+<h3 class="anchored" data-anchor-id="test">Test</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb9"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> test</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run test:rust</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run test:all</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Or run Rust tests directly from their package area:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb10"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop/src-tauri</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> test <span class="at">--workspace</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The native-versus-R tests use an installed <code>synergyfinder</code> only as an optional development oracle. Missing R must not prevent normal use of the application.</p>
+</section>
+<section id="type-check-and-build-frontend-assets" class="level3">
+<h3 class="anchored" data-anchor-id="type-check-and-build-frontend-assets">Type-check and build frontend assets</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb11"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npx</span> tsc <span class="at">--noEmit</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run build</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>In this repository, <code>npm run build</code> deliberately runs all frontend and Rust tests before compiling the frontend. It creates <code>desktop/dist/</code>; it does <strong>not by itself</strong> produce a DMG or installer.</p>
+</section>
+<section id="build-the-distributable-application" class="level3">
+<h3 class="anchored" data-anchor-id="build-the-distributable-application">Build the distributable application</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb12"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> desktop</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a><span class="ex">npm</span> run tauri build</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>This is the packaging command. It invokes the configured frontend build, compiles optimized Rust, and asks Tauri to create platform bundles. A successful <code>.app</code> bundle does not necessarily mean a DMG also succeeded; report packaging outputs separately.</p>
+</section>
+</section>
+<section id="where-a-change-should-go" class="level2">
+<h2 class="anchored" data-anchor-id="where-a-change-should-go">13. Where a change should go</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Desired change</th>
+<th>Primary location</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Tab, form, button, dialog, table, or UI state</td>
+<td><code>desktop/src/App.tsx</code> and <code>App.css</code></td>
+</tr>
+<tr class="even">
+<td>Plotly rendering</td>
+<td><code>desktop/src/BarPlot.tsx</code></td>
+</tr>
+<tr class="odd">
+<td>Shared frontend request/result shape</td>
+<td><code>desktop/src/types.ts</code>, plus matching Rust structures</td>
+</tr>
+<tr class="even">
+<td>Pure comparison/display helper</td>
+<td><code>desktop/src/analysis.ts</code> with a Vitest regression</td>
+</tr>
+<tr class="odd">
+<td>Persistent user display preference</td>
+<td><code>desktop/src/preferences.ts</code></td>
+</tr>
+<tr class="even">
+<td>CSV/Excel reading or range selection</td>
+<td><code>desktop/src-tauri/src/services/importer.rs</code></td>
+</tr>
+<tr class="odd">
+<td>Tauri request validation or multi-regimen orchestration</td>
+<td><code>desktop/src-tauri/src/commands.rs</code></td>
+</tr>
+<tr class="even">
+<td>Workbook export</td>
+<td><code>desktop/src-tauri/src/services/workbook.rs</code></td>
+</tr>
+<tr class="odd">
+<td>Bliss, bootstrap, baseline correction, statistics</td>
+<td><code>desktop/src-tauri/crates/checkerboard-core/</code> with a pinned Rust regression</td>
+</tr>
+<tr class="even">
+<td>Window, bundle, CSP, icons, product identifier</td>
+<td><code>desktop/src-tauri/tauri.conf.json</code> and related icon/capability files</td>
+</tr>
+<tr class="odd">
+<td>New native plugin permission</td>
+<td>Rust/JavaScript dependencies, <code>src/lib.rs</code>, and <code>capabilities/default.json</code> as applicable</td>
+</tr>
+</tbody>
+</table>
+<p>For a change that crosses the frontend/native boundary, update both sides together. A new field normally requires:</p>
+<ol type="1">
+<li>A TypeScript field in <code>src/types.ts</code>.</li>
+<li>A matching Serde-enabled Rust field in <code>commands.rs</code> or <code>checkerboard-core</code>.</li>
+<li>State and display changes in <code>App.tsx</code>.</li>
+<li>Tests on the side that owns the behavior, often both sides.</li>
+</ol>
+</section>
+<section id="a-practical-reading-order" class="level2">
+<h2 class="anchored" data-anchor-id="a-practical-reading-order">14. A practical reading order</h2>
+<p>For a first pass through the application, read files in this order:</p>
+<ol type="1">
+<li><code>desktop/package.json</code> — learn the available commands and major frontend dependencies.</li>
+<li><code>desktop/src-tauri/tauri.conf.json</code> — see how the web and native builds are joined.</li>
+<li><code>desktop/src/main.tsx</code> — see where React starts.</li>
+<li><code>desktop/src/types.ts</code> — learn the data moving through the app.</li>
+<li>The first portion of <code>desktop/src/App.tsx</code> — follow state and the import/analyze command calls.</li>
+<li><code>desktop/src-tauri/src/lib.rs</code> — see which Rust commands are exposed.</li>
+<li>The public command functions near the top of <code>desktop/src-tauri/src/commands.rs</code>.</li>
+<li><code>desktop/src-tauri/crates/checkerboard-core/src/lib.rs</code> — learn the scientific API and invariants.</li>
+<li><code>synergyfinder_native.rs</code> — study the detailed numerical implementation only after understanding the public API.</li>
+<li>The frontend and Rust tests — tests often provide the clearest executable examples of expected behavior.</li>
+</ol>
+<p>That reading path follows one request from the screen, across the Tauri boundary, into the scientific core, and back again without beginning in the most mathematically dense file.</p>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

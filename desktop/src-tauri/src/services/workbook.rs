@@ -91,7 +91,45 @@ pub fn export_results(
                     .drug_names
                     .iter()
                     .zip(&analysis.mic_values)
-                    .map(|(drug, mic)| format!("{drug} MIC={mic}"))
+                    .enumerate()
+                    .map(|(index, (drug, mic))| {
+                        let unit = analysis.concentration_units.get(index).filter(|unit| !unit.is_empty()).map(|unit| format!(" {unit}")).unwrap_or_default();
+                        format!("{drug} MIC={mic}{unit}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+        .map_err(xlsx_error)?;
+    worksheet
+        .write_string(
+            4,
+            0,
+            format!(
+                "Clinically relevant concentrations (analysis window 1/4× to 4×): {}",
+                analysis
+                    .drug_names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, drug)| {
+                        match analysis
+                            .clinically_relevant_concentrations
+                            .get(index)
+                            .copied()
+                            .flatten()
+                        {
+                            Some(value) => {
+                                let unit = analysis
+                                    .concentration_units
+                                    .get(index)
+                                    .filter(|unit| !unit.is_empty())
+                                    .map(|unit| format!(" {unit}"))
+                                    .unwrap_or_default();
+                                format!("{drug}={value}{unit}")
+                            }
+                            None => format!("{drug}=unrestricted"),
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
@@ -109,7 +147,7 @@ pub fn export_results(
         })?;
         for (column, heading) in [
             stratified.stratify_drug.as_str(),
-            "Mean Bliss Synergy",
+            "Mean Bliss Interaction",
             "Interpretation",
         ]
         .iter()
@@ -140,7 +178,7 @@ pub fn export_results(
         row += 3;
     } else {
         for (column, heading) in [
-            "Mean Bliss Synergy",
+            "Mean Bliss Interaction",
             "P Value",
             "Combination Locations",
             "Interpretation",
@@ -166,7 +204,18 @@ pub fn export_results(
         row += 3;
     }
 
-    let mut headers = analysis.drug_names.clone();
+    let mut headers = analysis
+        .drug_names
+        .iter()
+        .enumerate()
+        .map(|(index, drug)| {
+            analysis
+                .concentration_units
+                .get(index)
+                .filter(|unit| !unit.is_empty())
+                .map_or_else(|| drug.clone(), |unit| format!("{drug} ({unit})"))
+        })
+        .collect::<Vec<_>>();
     headers.extend(
         analysis
             .drug_names
@@ -187,7 +236,7 @@ pub fn export_results(
     );
     headers.extend([
         "Bliss Expected".into(),
-        "Bliss Synergy (percentage points)".into(),
+        "Mean Bliss Interaction (percentage points)".into(),
         "Bliss Bootstrap SEM".into(),
         "Bliss 95% CI Left".into(),
         "Bliss 95% CI Right".into(),

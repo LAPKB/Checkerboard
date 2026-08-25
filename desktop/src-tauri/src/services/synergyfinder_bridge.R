@@ -30,6 +30,9 @@ if (identical(response_type, "rawOd")) {
 } else if (identical(response_type, "viabilityFraction")) {
   input$response <- 100 * input$response
   reshape_type <- "viability"
+} else if (identical(response_type, "inhibitionFraction")) {
+  input$response <- 100 * input$response
+  reshape_type <- "inhibition"
 } else {
   reshape_type <- response_type
 }

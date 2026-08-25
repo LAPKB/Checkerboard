@@ -1,7 +1,12 @@
-export type ColumnRole = "ignore" | "drugA" | "drugB" | "drugC" | "response";
+export type ColumnRole =
+  | "ignore"
+  | "drugNameA" | "drugNameB" | "drugNameC"
+  | "drugA" | "drugB" | "drugC"
+  | "unitsA" | "unitsB" | "unitsC"
+  | "response";
 
 export type AnalysisMode = "synergyFinderPlus" | "legacyOd";
-export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "rawOd";
+export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "inhibitionFraction";
 export type BaselineCorrection = "none" | "part" | "all";
 
 export interface ImportRequest {
@@ -20,6 +25,17 @@ export interface ImportPreview {
   totalColumns: number;
   suggestedRoles: ColumnRole[];
   suggestedDrugNames: string[];
+  regimens: RegimenPreview[];
+}
+
+export interface RegimenPreview {
+  id: string;
+  label: string;
+  drugNames: string[];
+  concentrationUnits: string[];
+  suggestedResponseType: ResponseType;
+  rows: string[][];
+  totalRows: number;
 }
 
 export interface MappedDrug {
@@ -78,6 +94,8 @@ export interface AnalysisResult {
   drugNames: string[];
   micValues: number[];
   micZeroTolerance: number;
+  clinicallyRelevantConcentrations: (number | null)[];
+  concentrationUnits: string[];
   control: { replicateCount: number; meanOd: number };
   processed: ProcessedCombination[];
   summary: AnalysisSummary;
@@ -98,6 +116,7 @@ export interface ComparisonSource {
   roles: ColumnRole[];
   worksheets: string[];
   micEstimates: MicEstimate[];
+  regimenId?: string | null;
 }
 
 export interface ComparisonSettings {

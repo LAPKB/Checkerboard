@@ -76,6 +76,7 @@ pub enum ResponseType {
     Viability,
     ViabilityFraction,
     Inhibition,
+    InhibitionFraction,
     RawOd,
 }
 
@@ -95,6 +96,10 @@ pub struct AnalysisResult {
     pub mic_values: Vec<f64>,
     #[serde(default)]
     pub mic_zero_tolerance: f64,
+    #[serde(default)]
+    pub clinically_relevant_concentrations: Vec<Option<f64>>,
+    #[serde(default)]
+    pub concentration_units: Vec<String>,
     pub control: ControlStatistics,
     pub processed: Vec<ProcessedCombination>,
     pub summary: AnalysisSummary,
@@ -442,6 +447,8 @@ pub fn analyze_with_progress(
         drug_names: input.drug_names.clone(),
         mic_values: Vec::new(),
         mic_zero_tolerance: 0.0,
+        clinically_relevant_concentrations: Vec::new(),
+        concentration_units: Vec::new(),
         control: ControlStatistics {
             replicate_count: control_values.len(),
             mean_od: control_mean,
@@ -462,7 +469,15 @@ pub fn summarize_by(result: &AnalysisResult, drug_index: usize) -> Option<Strati
 
     for row in &result.processed {
         if result.policy.mode == AnalysisMode::SynergyFinderPlus
-            && !row.concentrations.iter().all(|value| *value > 0.0)
+            && (!row.concentrations.iter().all(|value| *value > 0.0)
+                || !row.concentrations.iter().enumerate().all(|(index, dose)| {
+                    result
+                        .clinically_relevant_concentrations
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .is_none_or(|target| *dose >= target / 4.0 && *dose <= target * 4.0)
+                }))
         {
             continue;
         }
@@ -562,6 +577,7 @@ fn analyze_synergyfinder_central(
             ResponseType::Viability => 100.0 - row.od,
             ResponseType::ViabilityFraction => 100.0 * (1.0 - row.od),
             ResponseType::Inhibition => row.od,
+            ResponseType::InhibitionFraction => 100.0 * row.od,
             ResponseType::RawOd => 100.0 * (1.0 - row.od / control_mean),
         };
         let normalized: Vec<f64> = row
@@ -695,6 +711,8 @@ fn analyze_synergyfinder_central(
         drug_names: input.drug_names.clone(),
         mic_values: Vec::new(),
         mic_zero_tolerance: 0.0,
+        clinically_relevant_concentrations: Vec::new(),
+        concentration_units: Vec::new(),
         control: ControlStatistics {
             replicate_count: control_rows.len(),
             mean_od: control_mean,
@@ -1046,6 +1064,37 @@ mod tests {
         };
         let policy = AnalysisPolicy {
             response_type: ResponseType::ViabilityFraction,
+            ..AnalysisPolicy::default()
+        };
+        let result = analyze(&input, policy).unwrap();
+        assert!((result.summary.mean_bliss - 16.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fractional_inhibition_is_converted_to_percentage_units() {
+        let input = AssayInput {
+            drug_names: vec!["A".into(), "B".into()],
+            rows: vec![
+                AssayRow {
+                    concentrations: vec![0.0, 0.0],
+                    od: 0.0,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 0.0],
+                    od: 0.2,
+                },
+                AssayRow {
+                    concentrations: vec![0.0, 1.0],
+                    od: 0.3,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 1.0],
+                    od: 0.6,
+                },
+            ],
+        };
+        let policy = AnalysisPolicy {
+            response_type: ResponseType::InhibitionFraction,
             ..AnalysisPolicy::default()
         };
         let result = analyze(&input, policy).unwrap();
