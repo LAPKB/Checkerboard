@@ -377,7 +377,7 @@ fn safe_sheet_name(name: &str) -> String {
         .take(31)
         .collect();
     if cleaned.is_empty() {
-        "Checkerboard".into()
+        "Checkmate".into()
     } else {
         cleaned
     }

@@ -27,3 +27,9 @@ impl From<checkerboard_core::AnalysisError> for AppError {
         Self::new("analysisError", error.to_string())
     }
 }
+
+impl From<checkerboard_core::drusano_greco::DrusanoDataError> for AppError {
+    fn from(error: checkerboard_core::drusano_greco::DrusanoDataError) -> Self {
+        Self::new("drusanoDataError", error.to_string())
+    }
+}

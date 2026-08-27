@@ -1,3 +1,4 @@
+pub mod drusano_greco;
 pub mod importer;
 #[cfg(test)]
 pub mod synergyfinder;

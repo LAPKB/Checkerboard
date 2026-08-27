@@ -6,8 +6,104 @@ export type ColumnRole =
   | "response";
 
 export type AnalysisMode = "synergyFinderPlus" | "legacyOd";
-export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "inhibitionFraction";
+export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "inhibitionFraction" | "rawOd";
 export type BaselineCorrection = "none" | "part" | "all";
+export type AnalysisType = "bliss" | "drusanoGreco";
+export type InputType = "absorbance" | "fluorescence" | "cfu";
+export type ResponseDirection = "viability" | "inhibition";
+
+export interface InputSettings {
+  inputType: InputType | "";
+  blankAdjustment: boolean;
+  blankValue: number | null;
+  relativeToGrowthControl: boolean;
+  responseDirection: ResponseDirection;
+}
+
+export interface DrusanoModelSettings {
+  responseCensorLimit: number | null;
+  errorCoefficients: [number | null, number | null, number | null, number | null];
+  lambda: number | null;
+  maxCycles: number | null;
+}
+
+export interface DrusanoCensorLimitSuggestion {
+  responseCensorLimit: number;
+  normalizedEffectLimit: number;
+  belowOrEqualCount: number;
+  responseCount: number;
+  densityRatio: number;
+}
+
+export interface DrusanoDataSet {
+  drugNames: string[];
+  headers: string[];
+  rows: string[][];
+  wells: {
+    subjectId: string;
+    rawResponse: number;
+    normalizedEffect: number;
+    normalizedDoses: number[];
+    censored: boolean;
+  }[];
+  subjectCount: number;
+  controlCount: number;
+  excludedBoundaryCount: number;
+  excludedEffectBelowZeroCount: number;
+  excludedEffectAboveOneCount: number;
+  censoredCount: number;
+  responseCensorLimit: number | null;
+  normalizedEffectCensorLimit: number | null;
+  blankValue: number;
+  controlMean: number;
+  micValues: number[];
+  warnings: string[];
+}
+
+export interface DrusanoFitResult {
+  data: DrusanoDataSet;
+  assayError: {
+    coefficients: [number, number, number, number];
+    initialLambda: number;
+    fittedLambda: number;
+  };
+  modelSource: string;
+  parameterNames: string[];
+  supportPoints: { values: number[]; probability: number }[];
+  parameterSummaries: { name: string; mean: number; standardDeviation: number }[];
+  predictions: { subjectId: string; observedEffect: number; predictedEffect: number; censored: boolean }[];
+  regression: { observations: number; slope: number; intercept: number; rSquared: number; rootMeanSquaredError: number } | null;
+  unpredictedCount: number;
+  converged: boolean;
+  cycles: number;
+  runCycles: number;
+  maxCycles: number;
+  continuedFromCycles: number;
+  objectiveFunction: number;
+}
+
+export interface DrusanoRegimenSimulationResult {
+  drugNames: string[];
+  concentrations: number[];
+  micValues: number[];
+  normalizedDoses: number[];
+  simulationCount: number;
+  supportPointCount: number;
+  seed: number;
+  rejectedDraws: number;
+  effects: number[];
+  summary: {
+    mean: number;
+    standardDeviation: number;
+    minimum: number;
+    percentile2_5: number;
+    percentile25: number;
+    median: number;
+    percentile75: number;
+    percentile97_5: number;
+    maximum: number;
+  };
+}
 
 export interface ImportRequest {
   path: string;

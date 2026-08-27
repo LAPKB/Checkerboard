@@ -1,6 +1,6 @@
-# Checkerboard desktop
+# Checkmate desktop
 
-This directory contains the Tauri 2 Checkerboard application. Its primary
+This directory contains the Tauri 2 Checkmate application. Its Bliss
 analysis profile is a native Rust implementation benchmarked against
 Bioconductor `synergyfinder` 3.20.0 rather than the historical Shiny
 implementation.
@@ -19,6 +19,21 @@ The R package remains an optional development oracle for parity tests.
 - CSV, TXT, XLS, and XLSX range import in Rust.
 - Worksheet discovery for Excel files.
 - Column-role suggestions and explicit mapping.
+- Project-level selection between Bliss and the staged Drusano–Greco workflow.
+- Explicit absorbance, fluorescence, or CFU input policy.
+- Drusano–Greco blank/growth-control response normalization, MIC-normalized doses,
+  and a user-editable absorbance censor limit with a lower-tail frequency-break suggestion.
+- Separate PMcore NPAG fits for each two-drug regimen, with one eligible well per
+  subject and displayed support-point distributions for EC50₁, EC50₂, h₁, h₂, and α₁₂.
+- User-editable NPAG cycle limits (100 by default) and warm continuation from a
+  nonconverged run's terminal support grid and fitted lambda.
+- Constant free-concentration regimen simulation with MIC scaling and 1,000
+  reproducible split-mixture draws from the NPAG support-point distribution.
+- Absorbance responses at or below the selected censor limit retained with
+  Pmetrics/PMcore `CENS = 1` likelihoods; user-editable prediction-based,
+  absorbance-scale assay-error polynomial coefficients and initial lambda; plus
+  observed-versus-predicted effect plots
+  and regression statistics.
 - Tauri-independent two- and three-drug Bliss analysis.
 - Validation for controls, numeric input, concentrations, OD, and required
   single-agent observations.
@@ -60,8 +75,10 @@ replace every proposed MIC before analysis. Comparisons match cells at equal
 `log2(concentration / MIC)` coordinates; zero-concentration control and
 single-agent cells are excluded.
 
-Embedding static plot images in exported workbooks, installer signing, and
-desktop end-to-end automation remain later migration phases.
+The Drusano–Greco model fits the algebraic right-hand side of Equation 2 directly;
+it does not use the bacterial growth ODE or `get_e2()`. Subsequent regimen
+simulation/results stages, embedding static plot images in exported workbooks,
+installer signing, and desktop end-to-end automation remain later migration phases.
 
 ## Commands
 

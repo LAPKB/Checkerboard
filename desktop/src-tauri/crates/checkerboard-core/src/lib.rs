@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod drusano_greco;
 mod synergyfinder_native;
 
 const ZERO_TOLERANCE: f64 = 1e-12;

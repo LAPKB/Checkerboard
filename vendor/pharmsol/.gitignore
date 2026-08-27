@@ -1,0 +1,11 @@
+/target
+cargo.lock
+Cargo.lock
+/.vscode
+/.idea
+*.pkm
+/paper_files
+paper.html
+/joss/paper_files
+/tests/browser-e2e/node_modules/
+docs/

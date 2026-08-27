@@ -1,0 +1,83 @@
+name: Build
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PHARMSOL_LOCAL_EXA: "1"
+  # Incremental compilation only bloats the cache in CI (each build is a fresh
+  # checkout), so disable it to shrink target/ and speed up cold builds.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    runs-on: "${{ matrix.os }}"
+    name: "${{ matrix.name }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-latest / stable
+            os: ubuntu-latest
+            native_aot_smoke_target: ""
+          - name: macos-14 / stable
+            os: macos-14
+            native_aot_smoke_target: x86_64-apple-darwin
+          - name: windows-latest / stable
+            os: windows-latest
+            native_aot_smoke_target: ""
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Native AoT smoke target
+        if: ${{ matrix.native_aot_smoke_target != '' }}
+        run: rustup target add ${{ matrix.native_aot_smoke_target }}
+
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache is only written from the default branch so the shared 10 GB
+          # budget stays lean and stable; PRs still restore from it. rust-cache
+          # caches only dependency artifacts (not the workspace crates), keys on
+          # the rustc version, and falls back to the previous Cargo.lock, so a
+          # routine version bump no longer forces a full cold rebuild.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # Compile-only check for the no-default-features build (nothing else
+      # exercises this configuration). `cargo check` skips codegen, so it is
+      # much faster than the previous `cargo build` while still catching
+      # compile errors.
+      - name: Check (no default features)
+        run: cargo check --no-default-features
+
+      # `cargo test` builds every configuration it runs (the non-test library is
+      # compiled for doc tests too), so the standalone `cargo build` steps that
+      # used to precede these were pure duplicate compilation and were removed.
+      - name: Run tests (default features)
+        run: cargo test
+
+      - name: Run tests (all features)
+        env:
+          PHARMSOL_NATIVE_AOT_SMOKE_TARGET: ${{ matrix.native_aot_smoke_target }}
+        run: cargo test --all-features
+
+      - name: Run doc tests
+        run: cargo test --doc --all-features

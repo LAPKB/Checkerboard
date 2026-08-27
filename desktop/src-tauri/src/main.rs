@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    checkerboard_desktop_lib::run()
+    checkmate_desktop_lib::run()
 }

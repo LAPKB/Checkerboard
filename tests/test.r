@@ -76,6 +76,8 @@ res3a$drug_pairs$Bliss_synergy
 # columns will be Drug A, Drug B, Drug C, Conc A, Conc B, Conc C, Unit A, Unit B, Unit C, Response
 # drug names will be obtained from the columns imported as Drug.Concentration. Concentration units for DETA will always be mM and for other drugs will be ug/mL.
 files <- list.files("/Users/mneely/Library/CloudStorage/OneDrive-CHILDRENSHOSPITALLOSANGELES/Documents/LAPK/Pmetrics/Gibson/src/checkerboards/3-Drug/", pattern = "3D_Tidy_.*\\.xlsx", full.names = TRUE)
+files <- list.files("/Users/mneely/Library/CloudStorage/OneDrive-CHILDRENSHOSPITALLOSANGELES/Documents/LAPK/Pmetrics/Gibson/src/checkerboards/2-Drug/", pattern = "*_2D_TIDY\\.xlsx", full.names = TRUE)
+
 comb <- dplyr::bind_rows(lapply(files, function(f) {
   dat <- openxlsx::read.xlsx(f, sheet = 1)
   drugs <- colnames(dat)[grepl("Concentration", colnames(dat))]
@@ -95,3 +97,6 @@ comb <- dplyr::bind_rows(lapply(files, function(f) {
   return(dat)
 }))
 readr::write_csv(comb, "tests/test3_combined.csv")
+readr::write_csv(comb |> select(-DrugC, -UnitC), "tests/test2_combined.csv")
+
+

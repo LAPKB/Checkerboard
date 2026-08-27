@@ -1,13 +1,23 @@
 use checkerboard_core::{
     AnalysisPolicy, AnalysisResult, ColumnMapping, ResponseType, analyze_with_progress,
     assay_from_rows,
+    drusano_greco::{
+        DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings, build_equation_dataset,
+        suggest_response_censor_limit,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 
 use crate::{
     error::AppError,
-    services::importer::{self, ImportRequest},
+    services::{
+        drusano_greco::{
+            self, DrusanoAssayErrorSettings, DrusanoFitContinuation, DrusanoFitResult,
+            DrusanoRegimenSimulationRequest, DrusanoRegimenSimulationResult,
+        },
+        importer::{self, ImportRequest},
+    },
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +77,36 @@ pub struct InferMicsRequest {
     pub regimen_drug_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareDrusanoDataRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub settings: DrusanoDataSettings,
+    #[serde(default)]
+    pub assay_error: DrusanoAssayErrorSettings,
+    #[serde(default)]
+    pub regimen_drug_names: Vec<String>,
+    #[serde(default = "default_drusano_max_cycles")]
+    pub max_cycles: usize,
+    #[serde(default)]
+    pub continuation: Option<DrusanoFitContinuation>,
+}
+
+fn default_drusano_max_cycles() -> usize {
+    drusano_greco::DEFAULT_MAX_CYCLES
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestDrusanoCensorLimitRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub blank_value: f64,
+    #[serde(default)]
+    pub regimen_drug_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MicEstimate {
@@ -89,6 +129,13 @@ pub struct ExportResultsRequest {
 pub struct AnalysisProgress {
     completed_iterations: usize,
     total_iterations: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrusanoFitProgress {
+    pub cycle: usize,
+    pub objective_function: f64,
 }
 
 #[tauri::command]
@@ -232,6 +279,70 @@ pub fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppErro
             })
         })
         .collect()
+}
+
+#[tauri::command]
+pub fn prepare_drusano_data(
+    request: PrepareDrusanoDataRequest,
+) -> Result<DrusanoDataSet, AppError> {
+    prepare_drusano_data_inner(request)
+}
+
+#[tauri::command]
+pub fn suggest_drusano_censor_limit(
+    request: SuggestDrusanoCensorLimitRequest,
+) -> Result<Option<DrusanoCensorLimitSuggestion>, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    Ok(suggest_response_censor_limit(&assay, request.blank_value)?)
+}
+
+fn prepare_drusano_data_inner(
+    request: PrepareDrusanoDataRequest,
+) -> Result<DrusanoDataSet, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    Ok(build_equation_dataset(&assay, &request.settings)?)
+}
+
+#[tauri::command]
+pub async fn fit_drusano_greco(
+    request: PrepareDrusanoDataRequest,
+    on_progress: Channel<DrusanoFitProgress>,
+) -> Result<DrusanoFitResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let assay_error = request.assay_error.clone();
+        let max_cycles = request.max_cycles;
+        let continuation = request.continuation.clone();
+        let data = prepare_drusano_data_inner(request)?;
+        drusano_greco::fit_npag_with_options(
+            data,
+            assay_error,
+            max_cycles,
+            continuation,
+            |cycle, objective_function| {
+                let _ = on_progress.send(DrusanoFitProgress {
+                    cycle,
+                    objective_function,
+                });
+            },
+        )
+        .map_err(|error| AppError::new("drusanoFitError", error.to_string()))
+    })
+    .await
+    .map_err(|error| AppError::new("drusanoWorkerError", error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn simulate_drusano_regimen(
+    request: DrusanoRegimenSimulationRequest,
+) -> Result<DrusanoRegimenSimulationResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || drusano_greco::simulate_regimen(request))
+        .await
+        .map_err(|error| AppError::new("drusanoSimulationWorkerError", error.to_string()))?
+        .map_err(|error| AppError::new("drusanoSimulationError", error.to_string()))
 }
 
 #[tauri::command]

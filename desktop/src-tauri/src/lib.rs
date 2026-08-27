@@ -12,10 +12,14 @@ pub fn run() {
             commands::list_worksheets,
             commands::import_preview,
             commands::infer_mics,
+            commands::prepare_drusano_data,
+            commands::suggest_drusano_censor_limit,
+            commands::fit_drusano_greco,
+            commands::simulate_drusano_regimen,
             commands::analyze_table,
             commands::export_results,
             commands::quit_application,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Checkerboard");
+        .expect("error while running Checkmate");
 }

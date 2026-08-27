@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Checkerboard Bliss",
-  "version": "0.7.0",
-  "identifier": "org.lapk.checkerboard",
+  "productName": "Checkmate",
+  "version": "0.8.0",
+  "identifier": "org.lapkb.checkmate",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Checkerboard Bliss",
+        "title": "Checkmate",
         "width": 1600,
         "height": 1000,
         "minWidth": 1200,
