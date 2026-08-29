@@ -8,7 +8,7 @@ export type ColumnRole =
 export type AnalysisMode = "synergyFinderPlus" | "legacyOd";
 export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "inhibitionFraction" | "rawOd";
 export type BaselineCorrection = "none" | "part" | "all";
-export type AnalysisType = "bliss" | "drusanoGreco";
+export type AnalysisType = "bliss" | "drusanoGreco" | "musyc";
 export type InputType = "absorbance" | "fluorescence" | "cfu";
 export type ResponseDirection = "viability" | "inhibition";
 
@@ -25,6 +25,8 @@ export interface DrusanoModelSettings {
   errorCoefficients: [number | null, number | null, number | null, number | null];
   lambda: number | null;
   maxCycles: number | null;
+  bootstrapIterations: number | null;
+  bootstrapSeed: number | null;
 }
 
 export interface DrusanoCensorLimitSuggestion {
@@ -40,13 +42,13 @@ export interface DrusanoDataSet {
   headers: string[];
   rows: string[][];
   wells: {
-    subjectId: string;
+    wellId: string;
     rawResponse: number;
     normalizedEffect: number;
     normalizedDoses: number[];
     censored: boolean;
   }[];
-  subjectCount: number;
+  eligibleWellCount: number;
   controlCount: number;
   excludedBoundaryCount: number;
   excludedEffectBelowZeroCount: number;
@@ -56,7 +58,7 @@ export interface DrusanoDataSet {
   normalizedEffectCensorLimit: number | null;
   blankValue: number;
   controlMean: number;
-  micValues: number[];
+  maxConcentrations: number[];
   warnings: string[];
 }
 
@@ -70,8 +72,18 @@ export interface DrusanoFitResult {
   modelSource: string;
   parameterNames: string[];
   supportPoints: { values: number[]; probability: number }[];
-  parameterSummaries: { name: string; mean: number; standardDeviation: number }[];
-  predictions: { subjectId: string; observedEffect: number; predictedEffect: number; censored: boolean }[];
+  parameterSummaries: { name: string; mean: number; standardDeviation: number; percentile2_5: number; median: number; percentile97_5: number; percentile25?: number; percentile975?: number }[];
+  referenceSupportPoint: { values: number[]; probability: number };
+  predictions: {
+    wellId: string;
+    observedEffect: number;
+    predictedEffect: number;
+    observedResponse: number;
+    predictedResponse: number;
+    responseResidual: number | null;
+    normalizedDoses: number[];
+    censored: boolean;
+  }[];
   regression: { observations: number; slope: number; intercept: number; rSquared: number; rootMeanSquaredError: number } | null;
   unpredictedCount: number;
   converged: boolean;
@@ -80,12 +92,15 @@ export interface DrusanoFitResult {
   maxCycles: number;
   continuedFromCycles: number;
   objectiveFunction: number;
+  bootstrapIterations: number;
+  bootstrapSeed: number;
+  bootstrapConvergedCount: number;
 }
 
 export interface DrusanoRegimenSimulationResult {
   drugNames: string[];
   concentrations: number[];
-  micValues: number[];
+  maxConcentrations: number[];
   normalizedDoses: number[];
   simulationCount: number;
   supportPointCount: number;
@@ -103,6 +118,60 @@ export interface DrusanoRegimenSimulationResult {
     percentile97_5: number;
     maximum: number;
   };
+}
+
+export interface DrusanoSimulationEntry {
+  id: string;
+  label: string;
+  simulation: DrusanoRegimenSimulationResult;
+}
+
+export interface DrusanoSimulationComparison {
+  rankings: Array<DrusanoSimulationEntry & { rank: number }>;
+}
+
+export interface MusycModelSettings {
+  responseCensorLimit: number | null;
+  maxIterations: number | null;
+  bootstrapIterations: number | null;
+  bootstrapSeed: number | null;
+}
+
+export interface MusycDistributionSummary {
+  mean: number;
+  standardDeviation: number;
+  percentile2_5: number;
+  median: number;
+  percentile97_5: number;
+}
+
+export interface MusycFitResult {
+  data: DrusanoDataSet;
+  modelSource: string;
+  parameters: { name: string; value: number; fixed: boolean }[];
+  parameterSummaries: Array<MusycDistributionSummary & { name: string }>;
+  efficacyBeta: number;
+  efficacyBetaSummary: MusycDistributionSummary | null;
+  combinationEfficacy: number;
+  combinationEfficacySummary: MusycDistributionSummary | null;
+  objectiveFunction: number;
+  iterations: number;
+  converged: boolean;
+  predictions: {
+    wellId: string;
+    observedEffect: number;
+    predictedEffect: number;
+    observedResponse: number;
+    predictedResponse: number;
+    normalizedDoses: number[];
+    censored: boolean;
+  }[];
+  regression: { observations: number; slope: number; intercept: number; rSquared: number; rootMeanSquaredError: number } | null;
+  residualStandardDeviation: number;
+  bootstrapIterations: number;
+  bootstrapSeed: number;
+  bootstrapConvergedCount: number;
+  warnings: string[];
 }
 
 export interface ImportRequest {

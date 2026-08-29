@@ -19,16 +19,25 @@ The R package remains an optional development oracle for parity tests.
 - CSV, TXT, XLS, and XLSX range import in Rust.
 - Worksheet discovery for Excel files.
 - Column-role suggestions and explicit mapping.
-- Project-level selection between Bliss and the staged Drusano–Greco workflow.
+- Algorithm-level selection among Bliss, Drusano–Greco, and MuSyC workflows.
+- A compact Drusano–Greco navigation path of Import → Fit → Simulate → Compare; MIC and
+  separate Results tabs remain specific to the Bliss workflow.
 - Explicit absorbance, fluorescence, or CFU input policy.
-- Drusano–Greco blank/growth-control response normalization, MIC-normalized doses,
+- Drusano–Greco blank/growth-control response normalization, maximum-tested-concentration-normalized doses,
   and a user-editable absorbance censor limit with a lower-tail frequency-break suggestion.
-- Separate PMcore NPAG fits for each two-drug regimen, with one eligible well per
-  subject and displayed support-point distributions for EC50₁, EC50₂, h₁, h₂, and α₁₂.
+- Separate PMcore NPAG fits for each two-drug regimen, with all eligible wells
+  combined into one checkerboard subject and displayed reference estimates plus
+  fixed-grid parametric-bootstrap distributions for EC50₁, EC50₂, h₁, h₂, and α₁₂.
 - User-editable NPAG cycle limits (100 by default) and warm continuation from a
   nonconverged run's terminal support grid and fitted lambda.
-- Constant free-concentration regimen simulation with MIC scaling and 1,000
-  reproducible split-mixture draws from the NPAG support-point distribution.
+- Constant free-concentration regimen simulation with tested-maximum scaling and 1,000
+  reproducible draws from the unclustered empirical bootstrap distribution.
+- Two-drug MuSyC fitting with fixed-dose-grid parametric bootstrap confidence
+  intervals, live reference/bootstrap progress, and Compare-tab ranking by
+  bootstrap median beta or absolute combination efficacy E3.
+- Versioned `.ckm` project snapshots using maximum DEFLATE compression. Save and
+  Load restore imported state, settings, fits, bootstrap summaries, and
+  simulations without rerunning the analyses or requiring the source file.
 - Absorbance responses at or below the selected censor limit retained with
   Pmetrics/PMcore `CENS = 1` likelihoods; user-editable prediction-based,
   absorbance-scale assay-error polynomial coefficients and initial lambda; plus

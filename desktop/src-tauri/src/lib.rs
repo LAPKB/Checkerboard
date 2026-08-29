@@ -1,6 +1,6 @@
 mod commands;
 mod error;
-mod services;
+pub mod services;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,9 +15,12 @@ pub fn run() {
             commands::prepare_drusano_data,
             commands::suggest_drusano_censor_limit,
             commands::fit_drusano_greco,
+            commands::fit_musyc,
             commands::simulate_drusano_regimen,
             commands::analyze_table,
             commands::export_results,
+            commands::save_project_snapshot,
+            commands::load_project_snapshot,
             commands::quit_application,
         ])
         .run(tauri::generate_context!())

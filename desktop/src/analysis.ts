@@ -5,6 +5,9 @@ import type {
   ComparisonSettings,
   ColumnMapping,
   ColumnRole,
+  DrusanoFitResult,
+  DrusanoSimulationComparison,
+  DrusanoSimulationEntry,
   ImportPreview,
   ProcessedCombination,
 } from "./types";
@@ -13,19 +16,81 @@ const comparisonTolerance = 1e-12;
 
 const orderedDrugRoles: ColumnRole[] = ["drugA", "drugB", "drugC"];
 
+export type DrusanoDiagnosticScale = "effect" | "absorbance";
+
+export function compareDrusanoSimulations(entries: DrusanoSimulationEntry[]): DrusanoSimulationComparison {
+  const usable = entries.filter((entry) => entry.simulation.effects.length > 0
+    && entry.simulation.effects.every(Number.isFinite));
+  const rankings = usable
+    .slice()
+    .sort((left, right) => right.simulation.summary.median - left.simulation.summary.median
+      || left.label.localeCompare(right.label))
+    .map((entry, index) => ({ ...entry, rank: index + 1 }));
+  return { rankings };
+}
+
+export interface DrusanoDiagnosticPoint {
+  source: DrusanoFitResult["predictions"][number];
+  observed: number;
+  predicted: number;
+  residual: number | null;
+}
+
+export function drusanoDiagnosticPoint(
+  point: DrusanoFitResult["predictions"][number],
+  scale: DrusanoDiagnosticScale,
+  responseCensorLimit?: number | null,
+): DrusanoDiagnosticPoint {
+  const observed = scale === "effect"
+    ? point.observedEffect
+    : point.censored && responseCensorLimit != null
+      ? responseCensorLimit
+      : point.observedResponse;
+  const predicted = scale === "effect" ? point.predictedEffect : point.predictedResponse;
+  return {
+    source: point,
+    observed,
+    predicted,
+    residual: point.censored ? null : observed - predicted,
+  };
+}
+
+export function drusanoDiagnosticRegression(points: DrusanoDiagnosticPoint[]) {
+  const included = points.filter((point) => !point.source.censored
+    && Number.isFinite(point.observed) && Number.isFinite(point.predicted));
+  if (included.length < 2) return null;
+  const count = included.length;
+  const meanObserved = included.reduce((sum, point) => sum + point.observed, 0) / count;
+  const meanPredicted = included.reduce((sum, point) => sum + point.predicted, 0) / count;
+  const predictedSumSquares = included.reduce((sum, point) => sum + (point.predicted - meanPredicted) ** 2, 0);
+  if (predictedSumSquares <= Number.EPSILON) return null;
+  const covariance = included.reduce((sum, point) => sum
+    + (point.observed - meanObserved) * (point.predicted - meanPredicted), 0);
+  const observedSumSquares = included.reduce((sum, point) => sum + (point.observed - meanObserved) ** 2, 0);
+  const slope = covariance / predictedSumSquares;
+  const intercept = meanObserved - slope * meanPredicted;
+  const rSquared = observedSumSquares <= Number.EPSILON
+    ? 0
+    : Math.min(1, Math.max(0, covariance ** 2 / (observedSumSquares * predictedSumSquares)));
+  const rootMeanSquaredError = Math.sqrt(included.reduce((sum, point) => sum
+    + (point.predicted - point.observed) ** 2, 0) / count);
+  return { observations: count, slope, intercept, rSquared, rootMeanSquaredError };
+}
+
 export function validateRoles(roles: ColumnRole[]): string[] {
   const errors: string[] = [];
-  for (const role of ["drugNameA", "drugNameB", "drugA", "drugB", "unitsA", "unitsB", "response"] as ColumnRole[]) {
+  for (const role of ["drugA", "drugB", "response"] as ColumnRole[]) {
     if (roles.filter((value) => value === role).length !== 1) {
       errors.push(`${roleLabel(role)} must be assigned exactly once.`);
     }
   }
-  const optionalC = (["drugNameC", "drugC", "unitsC"] as ColumnRole[]).map((role) => roles.filter((value) => value === role).length);
-  if (optionalC.some((count) => count > 1)) {
-    errors.push("Drug C, Conc C, and Units C can each be assigned at most once.");
+  for (const role of ["drugNameA", "drugNameB", "drugNameC", "unitsA", "unitsB", "unitsC", "drugC"] as ColumnRole[]) {
+    if (roles.filter((value) => value === role).length > 1) {
+      errors.push(`${roleLabel(role)} can be assigned at most once.`);
+    }
   }
-  if (optionalC.some((count) => count === 1) && !optionalC.every((count) => count === 1)) {
-    errors.push("Drug C, Conc C, and Units C must be assigned together.");
+  if ((roles.includes("drugNameC") || roles.includes("unitsC")) && !roles.includes("drugC")) {
+    errors.push("Drug C or Units C requires a Conc C assignment.");
   }
   return errors;
 }

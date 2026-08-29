@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { aggregateBliss, buildMapping, compareRegimens, exceedanceAuc, exceedanceDomain, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, mostCommonLowerTie, stratificationIndexFor, validateRoles } from "./analysis";
-import type { AnalysisResult, ComparisonRegimen, ImportPreview } from "./types";
+import { aggregateBliss, buildMapping, compareDrusanoSimulations, compareRegimens, drusanoDiagnosticPoint, drusanoDiagnosticRegression, exceedanceAuc, exceedanceDomain, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, mostCommonLowerTie, stratificationIndexFor, validateRoles } from "./analysis";
+import type { AnalysisResult, ComparisonRegimen, DrusanoFitResult, ImportPreview } from "./types";
 
 const preview: ImportPreview = {
   headers: ["Drug A", "Drug B", "Conc A", "Conc B", "Units A", "Units B", "Response"],
@@ -26,6 +26,84 @@ describe("column mapping", () => {
       ],
       responseColumn: 6,
     });
+  });
+
+  it("accepts drug names and units inferred from concentration headers", () => {
+    const encodedHeaderPreview: ImportPreview = {
+      ...preview,
+      headers: ["Amikacin (mg/L)", "Clofazimine µM", "Response"],
+      suggestedRoles: ["drugA", "drugB", "response"],
+      suggestedDrugNames: ["Amikacin", "Clofazimine", "Response"],
+      totalColumns: 3,
+    };
+    expect(validateRoles(encodedHeaderPreview.suggestedRoles)).toEqual([]);
+    expect(buildMapping(encodedHeaderPreview, encodedHeaderPreview.suggestedRoles)).toEqual({
+      drugs: [
+        { column: 0, name: "Amikacin" },
+        { column: 1, name: "Clofazimine" },
+      ],
+      responseColumn: 2,
+    });
+  });
+});
+
+describe("Drusano diagnostic scales", () => {
+  const prediction = (wellId: string, predictedEffect: number, observedEffect: number, censored = false): DrusanoFitResult["predictions"][number] => ({
+    wellId,
+    predictedEffect,
+    observedEffect,
+    predictedResponse: 1 - predictedEffect,
+    observedResponse: 1 - observedEffect,
+    responseResidual: censored ? null : predictedEffect - observedEffect,
+    normalizedDoses: [0.5, 0.5],
+    censored,
+  });
+
+  it("switches values and residual direction between effect and absorbance", () => {
+    const point = prediction("1", 0.2, 0.3);
+    const effect = drusanoDiagnosticPoint(point, "effect");
+    const absorbance = drusanoDiagnosticPoint(point, "absorbance");
+    expect(effect).toMatchObject({ observed: 0.3, predicted: 0.2 });
+    expect(effect.residual).toBeCloseTo(0.1);
+    expect(absorbance).toMatchObject({ observed: 0.7, predicted: 0.8 });
+    expect(absorbance.residual).toBeCloseTo(-0.1);
+    const censored = prediction("c", 0.8, 0.95, true);
+    expect(drusanoDiagnosticPoint(censored, "effect", 0.1).residual).toBeNull();
+    expect(drusanoDiagnosticPoint(censored, "absorbance", 0.1).observed).toBe(0.1);
+  });
+
+  it("recalculates regression statistics on the selected physical scale", () => {
+    const predictions = [prediction("1", 0.1, 0.3), prediction("2", 0.2, 0.5), prediction("3", 0.3, 0.7)];
+    const effect = drusanoDiagnosticRegression(predictions.map((point) => drusanoDiagnosticPoint(point, "effect")))!;
+    const absorbance = drusanoDiagnosticRegression(predictions.map((point) => drusanoDiagnosticPoint(point, "absorbance")))!;
+    expect(effect.slope).toBeCloseTo(2);
+    expect(effect.intercept).toBeCloseTo(0.1);
+    expect(absorbance.slope).toBeCloseTo(2);
+    expect(absorbance.intercept).toBeCloseTo(-1.1);
+    expect(effect.rSquared).toBeCloseTo(1);
+    expect(absorbance.rSquared).toBeCloseTo(1);
+  });
+});
+
+describe("Drusano simulation comparison", () => {
+  const simulation = (effects: number[]) => ({
+    drugNames: ["A", "B"], concentrations: [1, 1], maxConcentrations: [1, 1], normalizedDoses: [1, 1],
+    simulationCount: effects.length, supportPointCount: effects.length, seed: 17, rejectedDraws: 0, effects,
+    summary: {
+      mean: effects.reduce((sum, value) => sum + value, 0) / effects.length,
+      standardDeviation: 0, minimum: Math.min(...effects), percentile2_5: Math.min(...effects), percentile25: effects[0],
+      median: [...effects].sort((a, b) => a - b)[Math.floor(effects.length / 2)], percentile75: effects[effects.length - 1],
+      percentile97_5: Math.max(...effects), maximum: Math.max(...effects),
+    },
+  });
+
+  it("ranks by descending median efficacy", () => {
+    const result = compareDrusanoSimulations([
+      { id: "low", label: "Low", simulation: simulation([0.1, 0.2, 0.3, 0.4]) },
+      { id: "high", label: "High", simulation: simulation([0.6, 0.7, 0.8, 0.9]) },
+      { id: "middle", label: "Middle", simulation: simulation([0.3, 0.4, 0.5, 0.6]) },
+    ]);
+    expect(result.rankings.map((entry) => entry.id)).toEqual(["high", "middle", "low"]);
   });
 });
 

@@ -17,6 +17,8 @@ use crate::{
             DrusanoRegimenSimulationRequest, DrusanoRegimenSimulationResult,
         },
         importer::{self, ImportRequest},
+        musyc::{self, MusycFitResult},
+        snapshot,
     },
 };
 
@@ -91,10 +93,22 @@ pub struct PrepareDrusanoDataRequest {
     pub max_cycles: usize,
     #[serde(default)]
     pub continuation: Option<DrusanoFitContinuation>,
+    #[serde(default = "default_drusano_bootstrap_iterations")]
+    pub bootstrap_iterations: usize,
+    #[serde(default = "default_drusano_bootstrap_seed")]
+    pub bootstrap_seed: u64,
 }
 
 fn default_drusano_max_cycles() -> usize {
     drusano_greco::DEFAULT_MAX_CYCLES
+}
+
+fn default_drusano_bootstrap_iterations() -> usize {
+    500
+}
+
+fn default_drusano_bootstrap_seed() -> u64 {
+    123
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,6 +120,29 @@ pub struct SuggestDrusanoCensorLimitRequest {
     #[serde(default)]
     pub regimen_drug_names: Vec<String>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FitMusycRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub settings: DrusanoDataSettings,
+    #[serde(default)]
+    pub regimen_drug_names: Vec<String>,
+    #[serde(default = "default_musyc_max_iterations")]
+    pub max_iterations: usize,
+    #[serde(default = "default_musyc_bootstrap_iterations")]
+    pub bootstrap_iterations: usize,
+    #[serde(default = "default_musyc_bootstrap_seed")]
+    pub bootstrap_seed: u64,
+}
+
+fn default_musyc_max_iterations() -> usize {
+    5_000
+}
+
+fn default_musyc_bootstrap_iterations() -> usize { 500 }
+fn default_musyc_bootstrap_seed() -> u64 { 123 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,8 +171,21 @@ pub struct AnalysisProgress {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DrusanoFitProgress {
+    pub phase: String,
     pub cycle: usize,
     pub objective_function: f64,
+    pub completed_bootstraps: usize,
+    pub total_bootstraps: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusycFitProgress {
+    pub phase: String,
+    pub iteration: usize,
+    pub objective_function: f64,
+    pub completed_bootstraps: usize,
+    pub total_bootstraps: usize,
 }
 
 #[tauri::command]
@@ -146,18 +196,21 @@ pub fn list_worksheets(path: String) -> Result<Vec<String>, AppError> {
 #[tauri::command]
 pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError> {
     let table = importer::read_table(&request)?;
-    validate_input_headers(&table.headers)?;
     let total_rows = table.rows.len();
     let total_columns = table.headers.len();
     let suggested_roles = suggest_roles(&table.headers);
-    let mut suggested_drug_names: Vec<String> = table
+    let mut suggested_drug_names = table
         .headers
         .iter()
         .enumerate()
         .map(|(index, header)| {
-            infer_drug_name(header, &format!("Drug{}", (b'A' + index as u8) as char))
+            parse_concentration_header(header)
+                .map(|parsed| parsed.drug_name)
+                .unwrap_or_else(|| {
+                    infer_drug_name(header, &format!("Drug{}", (b'A' + index as u8) as char))
+                })
         })
-        .collect();
+        .collect::<Vec<_>>();
     for (index, header) in table.headers.iter().enumerate() {
         let normalized = normalize_header(header);
         let suffix = normalized.strip_prefix("conc");
@@ -189,11 +242,12 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
         })
         .collect::<Vec<_>>();
     let response_column = suggested_roles.iter().position(|role| role == "response");
-    let regimens = describe_regimens(&table, &drug_columns, response_column);
+    let mut regimens = describe_regimens(&table, &drug_columns, response_column);
     if regimens.is_empty() {
-        return Err(AppError::new(
-            "noRegimens",
-            "No rows contain nonblank Drug A and Drug B names.",
+        regimens.push(generic_regimen_preview(
+            &table,
+            &drug_columns,
+            response_column,
         ));
     }
     Ok(ImportPreview {
@@ -316,16 +370,23 @@ pub async fn fit_drusano_greco(
         let assay_error = request.assay_error.clone();
         let max_cycles = request.max_cycles;
         let continuation = request.continuation.clone();
+        let bootstrap_iterations = request.bootstrap_iterations;
+        let bootstrap_seed = request.bootstrap_seed;
         let data = prepare_drusano_data_inner(request)?;
         drusano_greco::fit_npag_with_options(
             data,
             assay_error,
             max_cycles,
             continuation,
-            |cycle, objective_function| {
+            bootstrap_iterations,
+            bootstrap_seed,
+            |phase, cycle, objective_function, completed_bootstraps, total_bootstraps| {
                 let _ = on_progress.send(DrusanoFitProgress {
+                    phase: phase.into(),
                     cycle,
                     objective_function,
+                    completed_bootstraps,
+                    total_bootstraps,
                 });
             },
         )
@@ -343,6 +404,50 @@ pub async fn simulate_drusano_regimen(
         .await
         .map_err(|error| AppError::new("drusanoSimulationWorkerError", error.to_string()))?
         .map_err(|error| AppError::new("drusanoSimulationError", error.to_string()))
+}
+
+#[tauri::command]
+pub async fn fit_musyc(
+    request: FitMusycRequest,
+    on_progress: Channel<MusycFitProgress>,
+) -> Result<MusycFitResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let table = importer::read_table(&request.import)?;
+        let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+        let assay = assay_from_rows(&rows, &request.mapping)?;
+        let data = build_equation_dataset(&assay, &request.settings)?;
+        musyc::fit_with_bootstrap(
+            data,
+            request.max_iterations,
+            request.bootstrap_iterations,
+            request.bootstrap_seed,
+            |phase, iteration, objective_function, completed_bootstraps, total_bootstraps| {
+                let _ = on_progress.send(MusycFitProgress {
+                    phase: phase.into(), iteration, objective_function,
+                    completed_bootstraps, total_bootstraps,
+                });
+            },
+        )
+            .map_err(|error| AppError::new("musycFitError", error.to_string()))
+    })
+    .await
+    .map_err(|error| AppError::new("musycWorkerError", error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn save_project_snapshot(path: String, snapshot_json: String) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || snapshot::save(&path, &snapshot_json))
+        .await
+        .map_err(|error| AppError::new("projectSaveWorkerError", error.to_string()))?
+        .map_err(|error| AppError::new("projectSaveError", error.to_string()))
+}
+
+#[tauri::command]
+pub async fn load_project_snapshot(path: String) -> Result<String, AppError> {
+    tauri::async_runtime::spawn_blocking(move || snapshot::load(&path))
+        .await
+        .map_err(|error| AppError::new("projectLoadWorkerError", error.to_string()))?
+        .map_err(|error| AppError::new("projectLoadError", error.to_string()))
 }
 
 #[tauri::command]
@@ -479,7 +584,12 @@ fn select_regimen_rows(
     if regimen_drug_names.is_empty() {
         return Ok(table.rows.clone());
     }
-    let name_columns = regimen_name_columns(&table.headers)?;
+    let Ok(name_columns) = regimen_name_columns(&table.headers) else {
+        // A file without confidently inferred drug-name columns is presented as
+        // one regimen. Column mapping still determines concentrations and the
+        // response; no rows should be rejected merely because headers differ.
+        return Ok(table.rows.clone());
+    };
     let selected = table
         .rows
         .iter()
@@ -507,7 +617,11 @@ fn describe_regimens(
     response_column: Option<usize>,
 ) -> Vec<RegimenPreview> {
     let Ok(name_columns) = regimen_name_columns(&table.headers) else {
-        return Vec::new();
+        return vec![generic_regimen_preview(
+            table,
+            drug_columns,
+            response_column,
+        )];
     };
     let unit_columns = [0, 1, 2].map(|index| find_units_column(&table.headers, index));
     let mut combinations = Vec::<Vec<String>>::new();
@@ -537,9 +651,17 @@ fn describe_regimens(
                                 .filter_map(|row| row.get(column))
                                 .map(|value| value.trim())
                                 .find(|value| !value.is_empty())
+                                .map(str::to_string)
                         })
-                        .unwrap_or("")
-                        .to_string()
+                        .or_else(|| {
+                            drug_columns
+                                .get(drug_index)
+                                .and_then(|column| {
+                                    parse_concentration_header(&table.headers[*column])
+                                })
+                                .map(|parsed| parsed.unit)
+                        })
+                        .unwrap_or_default()
                 })
                 .collect::<Vec<_>>();
             let active_drug_columns = &drug_columns[..drug_names.len().min(drug_columns.len())];
@@ -561,15 +683,57 @@ fn describe_regimens(
         .collect()
 }
 
+fn generic_regimen_preview(
+    table: &importer::ImportedTable,
+    drug_columns: &[usize],
+    response_column: Option<usize>,
+) -> RegimenPreview {
+    let drug_count = drug_columns.len().clamp(2, 3);
+    let drug_names = (0..drug_count)
+        .map(|index| {
+            drug_columns
+                .get(index)
+                .map(|column| {
+                    infer_drug_name(&table.headers[*column], &format!("Drug {}", index + 1))
+                })
+                .unwrap_or_else(|| format!("Drug {}", index + 1))
+        })
+        .collect::<Vec<_>>();
+    let concentration_units = (0..drug_count)
+        .map(|index| {
+            drug_columns
+                .get(index)
+                .and_then(|column| parse_concentration_header(&table.headers[*column]))
+                .map(|parsed| parsed.unit)
+                .unwrap_or_default()
+        })
+        .collect();
+    let row_refs = table.rows.iter().collect::<Vec<_>>();
+    RegimenPreview {
+        id: "1".into(),
+        label: format!("1 — {}", drug_names.join(" + ")),
+        concentration_units,
+        suggested_response_type: infer_response_type(&row_refs, drug_columns, response_column),
+        drug_names,
+        rows: table.rows.iter().take(100).cloned().collect(),
+        total_rows: table.rows.len(),
+    }
+}
+
 fn regimen_name_columns(headers: &[String]) -> Result<Vec<Option<usize>>, AppError> {
-    let drug_a = find_named_column(headers, "druga")
+    let roles = suggest_roles(headers);
+    let drug_a = roles
+        .iter()
+        .position(|role| role == "drugNameA")
         .ok_or_else(|| AppError::new("missingDrugNameColumn", "A Drug A column is required."))?;
-    let drug_b = find_named_column(headers, "drugb")
+    let drug_b = roles
+        .iter()
+        .position(|role| role == "drugNameB")
         .ok_or_else(|| AppError::new("missingDrugNameColumn", "A Drug B column is required."))?;
     Ok(vec![
         Some(drug_a),
         Some(drug_b),
-        find_named_column(headers, "drugc"),
+        roles.iter().position(|role| role == "drugNameC"),
     ])
 }
 
@@ -591,47 +755,11 @@ fn row_drug_names(row: &[String], columns: &[Option<usize>]) -> Option<Vec<Strin
     Some(names)
 }
 
-fn find_named_column(headers: &[String], normalized: &str) -> Option<usize> {
-    headers
-        .iter()
-        .position(|header| normalize_header(header) == normalized)
-}
-
 fn find_units_column(headers: &[String], index: usize) -> Option<usize> {
-    let suffix = (b'a' + index as u8) as char;
-    find_named_column(headers, &format!("units{suffix}"))
-        .or_else(|| find_named_column(headers, &format!("unit{suffix}")))
-}
-
-fn validate_input_headers(headers: &[String]) -> Result<(), AppError> {
-    let missing = ["druga", "drugb", "conca", "concb", "response"]
-        .into_iter()
-        .filter(|name| find_named_column(headers, name).is_none())
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(AppError::new(
-            "missingRequiredColumns",
-            "The import must contain Drug A, Drug B, Conc A, Conc B, Units A, Units B, and Response columns.",
-        ));
-    }
-    if find_units_column(headers, 0).is_none() || find_units_column(headers, 1).is_none() {
-        return Err(AppError::new(
-            "missingRequiredColumns",
-            "The import must contain Units A and Units B columns (singular Unit A/Unit B are also accepted).",
-        ));
-    }
-    let optional_c = [
-        find_named_column(headers, "drugc").is_some(),
-        find_named_column(headers, "concc").is_some(),
-        find_units_column(headers, 2).is_some(),
-    ];
-    if optional_c.iter().any(|present| *present) && !optional_c.iter().all(|present| *present) {
-        return Err(AppError::new(
-            "incompleteDrugCColumns",
-            "Drug C, Conc C, and Units C must either all be present or all be omitted.",
-        ));
-    }
-    Ok(())
+    let role = format!("units{}", (b'A' + index as u8) as char);
+    suggest_roles(headers)
+        .iter()
+        .position(|candidate| candidate == &role)
 }
 
 fn infer_response_type(
@@ -768,38 +896,60 @@ pub fn quit_application(app: tauri::AppHandle) {
 
 fn default_role(header: &str, _index: usize) -> String {
     let normalized = normalize_header(header);
-    if normalized == "druga" {
+    if matches!(normalized.as_str(), "druga" | "drug1" | "drugname1") {
         "drugNameA".into()
-    } else if normalized == "drugb" {
+    } else if matches!(normalized.as_str(), "drugb" | "drug2" | "drugname2") {
         "drugNameB".into()
-    } else if normalized == "drugc" {
+    } else if matches!(normalized.as_str(), "drugc" | "drug3" | "drugname3") {
         "drugNameC".into()
-    } else if matches!(normalized.as_str(), "unita" | "unitsa") {
+    } else if matches!(
+        normalized.as_str(),
+        "unita" | "unitsa" | "unitdrug1" | "unitsdrug1" | "drug1unit" | "drug1units"
+    ) {
         "unitsA".into()
-    } else if matches!(normalized.as_str(), "unitb" | "unitsb") {
+    } else if matches!(
+        normalized.as_str(),
+        "unitb" | "unitsb" | "unitdrug2" | "unitsdrug2" | "drug2unit" | "drug2units"
+    ) {
         "unitsB".into()
-    } else if matches!(normalized.as_str(), "unitc" | "unitsc") {
+    } else if matches!(
+        normalized.as_str(),
+        "unitc" | "unitsc" | "unitdrug3" | "unitsdrug3" | "drug3unit" | "drug3units"
+    ) {
         "unitsC".into()
     } else if normalized == "conca"
         || normalized == "conc1"
+        || normalized == "concdrug1"
+        || normalized == "drug1conc"
         || normalized.contains("drugaconcentration")
     {
         "drugA".into()
     } else if normalized.contains("concb")
         || normalized == "conc2"
+        || normalized == "concdrug2"
+        || normalized == "drug2conc"
         || normalized.contains("drugbconcentration")
     {
         "drugB".into()
     } else if normalized.contains("concc")
         || normalized == "conc3"
+        || normalized == "concdrug3"
+        || normalized == "drug3conc"
         || normalized.contains("drugcconcentration")
     {
         "drugC".into()
-    } else if normalized.contains("relative")
-        || normalized.contains("od")
-        || normalized.contains("response")
-        || normalized.contains("effect")
-    {
+    } else if matches!(
+        normalized.as_str(),
+        "response"
+            | "od"
+            | "od600"
+            | "relativeod"
+            | "relativeod600"
+            | "absorbance"
+            | "viability"
+            | "inhibition"
+            | "effect"
+    ) {
         "response".into()
     } else {
         "ignore".into()
@@ -826,7 +976,9 @@ fn suggest_roles(headers: &[String]) -> Vec<String> {
     for (index, header) in headers.iter().enumerate() {
         let normalized = header.to_lowercase();
         if roles[index] == "ignore"
-            && (normalized.contains("concentration") || normalized.contains("conc"))
+            && (normalized.contains("concentration")
+                || normalized.contains("conc")
+                || parse_concentration_header(header).is_some())
         {
             if let Some(drug_index) = used_drugs.iter().position(|used| !used) {
                 roles[index] = format!("drug{}", (b'A' + drug_index as u8) as char);
@@ -835,23 +987,103 @@ fn suggest_roles(headers: &[String]) -> Vec<String> {
         }
     }
 
-    if used_drugs.iter().filter(|used| **used).count() < 2 {
-        for role in &mut roles {
-            if role == "ignore" {
-                if let Some(drug_index) = used_drugs.iter().position(|used| !used) {
-                    *role = format!("drug{}", (b'A' + drug_index as u8) as char);
-                    used_drugs[drug_index] = true;
-                }
-            }
-            if used_drugs.iter().filter(|used| **used).count() >= 2 {
+    roles
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedConcentrationHeader {
+    drug_name: String,
+    unit: String,
+}
+
+fn parse_concentration_header(header: &str) -> Option<ParsedConcentrationHeader> {
+    let trimmed = header.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(without_close) = trimmed.strip_suffix(')')
+        && let Some(open_index) = without_close.rfind('(')
+    {
+        let drug_name = clean_concentration_drug_name(&without_close[..open_index]);
+        let unit = without_close[open_index + 1..].trim();
+        if !drug_name.is_empty() && is_concentration_unit(unit) {
+            return Some(ParsedConcentrationHeader {
+                drug_name,
+                unit: unit.to_string(),
+            });
+        }
+    }
+
+    for (split_index, character) in trimmed.char_indices() {
+        if !character.is_whitespace() {
+            continue;
+        }
+        let drug_name = clean_concentration_drug_name(&trimmed[..split_index]);
+        let unit = trimmed[split_index..].trim();
+        if !drug_name.is_empty() && is_concentration_unit(unit) {
+            return Some(ParsedConcentrationHeader {
+                drug_name,
+                unit: unit.to_string(),
+            });
+        }
+    }
+    None
+}
+
+fn clean_concentration_drug_name(value: &str) -> String {
+    let mut cleaned = value.trim().trim_end_matches(['-', '_', ':']).trim();
+    let lowercase = cleaned.to_lowercase();
+    for suffix in ["concentration", "conc"] {
+        if lowercase.ends_with(suffix) {
+            let prefix_length = cleaned.len() - suffix.len();
+            if prefix_length == 0
+                || cleaned[..prefix_length]
+                    .chars()
+                    .last()
+                    .is_some_and(|character| {
+                        character.is_whitespace() || matches!(character, '-' | '_' | ':')
+                    })
+            {
+                cleaned = cleaned[..prefix_length]
+                    .trim()
+                    .trim_end_matches(['-', '_', ':'])
+                    .trim();
                 break;
             }
         }
     }
-    roles
+    cleaned.to_string()
+}
+
+fn is_concentration_unit(unit: &str) -> bool {
+    let normalized = unit
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .map(|character| match character {
+            'µ' | 'μ' => 'u',
+            other => other,
+        })
+        .collect::<String>();
+    let standalone = [
+        "g", "mg", "mcg", "ug", "ng", "ml", "l", "ul", "m", "mm", "um", "nm",
+    ];
+    if standalone.contains(&normalized.as_str()) {
+        return true;
+    }
+    let Some((numerator, denominator)) = normalized.split_once('/') else {
+        return false;
+    };
+    !denominator.contains('/')
+        && ["g", "mg", "mcg", "ug", "ng"].contains(&numerator)
+        && ["ml", "l", "ul"].contains(&denominator)
 }
 
 fn infer_drug_name(header: &str, fallback: &str) -> String {
+    if let Some(parsed) = parse_concentration_header(header) {
+        return parsed.drug_name;
+    }
     let mut cleaned = header.to_string();
     for pattern in [
         "Concentration",
@@ -896,9 +1128,12 @@ mod tests {
         assert_eq!(default_role("DrugA.Concentration", 0), "drugA");
         assert_eq!(default_role("Relative OD", 3), "response");
         assert_eq!(default_role("Notes", 6), "ignore");
-        assert_eq!(default_role("Drug1", 1), "ignore");
         assert_eq!(default_role("Conc1", 3), "drugA");
         assert_eq!(default_role("Conc2", 4), "drugB");
+        assert_eq!(default_role("Drug1", 0), "drugNameA");
+        assert_eq!(default_role("ConcDrug1", 2), "drugA");
+        assert_eq!(default_role("UnitDrug2", 5), "unitsB");
+        assert_eq!(default_role("LatentEffect", 7), "ignore");
     }
 
     #[test]
@@ -913,6 +1148,188 @@ mod tests {
             suggest_roles(&headers),
             vec!["ignore", "drugA", "drugB", "response"]
         );
+    }
+
+    #[test]
+    fn concentration_headers_supply_drug_names_units_and_roles() {
+        let table = importer::ImportedTable {
+            headers: vec![
+                "Amikacin (mg/L)".into(),
+                "Clofazimine µM".into(),
+                "Response".into(),
+                "Plate note".into(),
+            ],
+            rows: vec![vec!["1".into(), "2".into(), "0.5".into(), "keep".into()]],
+        };
+        let roles = suggest_roles(&table.headers);
+        assert_eq!(roles, ["drugA", "drugB", "response", "ignore"]);
+        let regimens = describe_regimens(&table, &[0, 1], Some(2));
+        assert_eq!(regimens.len(), 1);
+        assert_eq!(regimens[0].drug_names, ["Amikacin", "Clofazimine"]);
+        assert_eq!(regimens[0].concentration_units, ["mg/L", "µM"]);
+        assert_eq!(
+            parse_concentration_header("Amikacin concentration mg / L"),
+            Some(ParsedConcentrationHeader {
+                drug_name: "Amikacin".into(),
+                unit: "mg / L".into(),
+            })
+        );
+        assert_eq!(
+            parse_concentration_header("Amikacin concentration (mg/L)"),
+            Some(ParsedConcentrationHeader {
+                drug_name: "Amikacin".into(),
+                unit: "mg/L".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn documented_concentration_unit_combinations_are_recognized_case_insensitively() {
+        for numerator in ["g", "mg", "mcg", "µg", "ng"] {
+            for denominator in ["mL", "L", "µL"] {
+                assert!(is_concentration_unit(&format!("{numerator}/{denominator}")));
+            }
+        }
+        for unit in [
+            "g", "mg", "mcg", "µg", "ng", "mL", "L", "µL", "M", "mM", "µM", "nM", "MG/ML",
+            "MCG/UL", "μg/μL",
+        ] {
+            assert!(
+                is_concentration_unit(unit),
+                "unit {unit} was not recognized"
+            );
+        }
+        for unit in ["kg/L", "mg/dL", "percent", "hours"] {
+            assert!(!is_concentration_unit(unit), "unit {unit} was accepted");
+        }
+    }
+
+    #[test]
+    fn uncertain_headers_remain_ignored_and_still_receive_a_preview() {
+        let table = importer::ImportedTable {
+            headers: vec!["Sample".into(), "Measurement X".into(), "Comment".into()],
+            rows: vec![vec!["one".into(), "0.5".into(), "review".into()]],
+        };
+        let roles = suggest_roles(&table.headers);
+        assert_eq!(roles, ["ignore", "ignore", "ignore"]);
+        let regimens = describe_regimens(&table, &[], None);
+        assert_eq!(regimens.len(), 1);
+        assert_eq!(regimens[0].drug_names, ["Drug 1", "Drug 2"]);
+        assert_eq!(regimens[0].rows, table.rows);
+    }
+
+    #[test]
+    fn censored_drusano_simulations_open_and_map_through_command_boundary() {
+        let fixtures = [
+            ("drusano_greco_alpha_negative.csv", 5),
+            ("drusano_greco_alpha_zero.csv", 12),
+            ("drusano_greco_alpha_positive.csv", 16),
+        ];
+        for (filename, censored_count) in fixtures {
+            let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("tests")
+                .join(filename)
+                .canonicalize()
+                .unwrap();
+            let import = ImportRequest {
+                path: fixture.to_string_lossy().into_owned(),
+                worksheet: None,
+                start_row: 1,
+                start_column: 1,
+                row_limit: 0,
+                column_limit: 0,
+            };
+            let preview = import_preview(import.clone()).expect("fixture should open");
+            assert_eq!(
+                &preview.suggested_roles[..7],
+                [
+                    "drugNameA",
+                    "drugNameB",
+                    "drugA",
+                    "drugB",
+                    "unitsA",
+                    "unitsB",
+                    "response",
+                ]
+            );
+            assert!(
+                preview.suggested_roles[7..]
+                    .iter()
+                    .all(|role| role == "ignore")
+            );
+            assert_eq!(preview.regimens.len(), 1);
+            assert_eq!(preview.regimens[0].drug_names, ["Drug 1", "Drug 2"]);
+            assert_eq!(preview.regimens[0].concentration_units, ["mg/L", "mg/L"]);
+
+            let data = prepare_drusano_data_inner(PrepareDrusanoDataRequest {
+                import,
+                mapping: ColumnMapping {
+                    drugs: vec![
+                        checkerboard_core::MappedDrug {
+                            column: 2,
+                            name: "Drug 1".into(),
+                        },
+                        checkerboard_core::MappedDrug {
+                            column: 3,
+                            name: "Drug 2".into(),
+                        },
+                    ],
+                    response_column: 6,
+                },
+                settings: DrusanoDataSettings {
+                    blank_value: 0.0,
+                    response_censor_limit: Some(0.1),
+                },
+                assay_error: DrusanoAssayErrorSettings::default(),
+                regimen_drug_names: preview.regimens[0].drug_names.clone(),
+                max_cycles: default_drusano_max_cycles(),
+                continuation: None,
+                bootstrap_iterations: 1,
+                bootstrap_seed: 123,
+            })
+            .expect("mapped fixture should prepare for fitting");
+            assert_eq!(data.censored_count, censored_count);
+            assert_eq!(data.max_concentrations, [8.0, 8.0]);
+        }
+    }
+
+    #[test]
+    fn bliss_calibrated_drusano_simulations_open_with_encoded_headers() {
+        for filename in [
+            "drusano_greco_bliss_minus12.csv",
+            "drusano_greco_bliss_plus0_5.csv",
+            "drusano_greco_bliss_plus10.csv",
+        ] {
+            let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("tests")
+                .join(filename)
+                .canonicalize()
+                .unwrap();
+            let preview = import_preview(ImportRequest {
+                path: fixture.to_string_lossy().into_owned(),
+                worksheet: None,
+                start_row: 1,
+                start_column: 1,
+                row_limit: 0,
+                column_limit: 0,
+            })
+            .expect("Bliss-calibrated fixture should open");
+            assert_eq!(
+                &preview.suggested_roles[..3],
+                ["drugA", "drugB", "response"]
+            );
+            assert!(
+                preview.suggested_roles[3..]
+                    .iter()
+                    .all(|role| role == "ignore")
+            );
+            assert_eq!(preview.regimens.len(), 1);
+            assert_eq!(preview.regimens[0].drug_names, ["Drug 1", "Drug 2"]);
+            assert_eq!(preview.regimens[0].concentration_units, ["mg/L", "mg/L"]);
+            assert_eq!(preview.regimens[0].total_rows, 64);
+        }
     }
 
     #[test]

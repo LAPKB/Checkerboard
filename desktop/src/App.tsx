@@ -3,7 +3,9 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { aggregateBliss, buildMapping, compareRegimens, exceedanceDomain, formatNumber, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, mostCommonLowerTie, roleLabel, stratificationIndexFor, validateRoles, withinClinicalWindow } from "./analysis";
-import { DrusanoAnalyzeWorkspace, DrusanoPendingWorkspace, DrusanoRegimenWorkspace, InputTypeControls, ProjectWorkspace } from "./DrusanoGreco";
+import { DrusanoComparisonWorkspace, DrusanoFitWorkspace, DrusanoRegimenWorkspace, InputTypeControls, ProjectWorkspace } from "./DrusanoGreco";
+import { MusycComparisonWorkspace, MusycFitWorkspace } from "./Musyc";
+import { RegimenNavigator } from "./RegimenNavigator";
 import logo from "./assets/logo.png";
 import {
   defaultPlotColors,
@@ -27,9 +29,10 @@ import type {
   DrusanoFitResult,
   DrusanoModelSettings,
   DrusanoRegimenSimulationResult,
+  MusycFitResult,
+  MusycModelSettings,
   MicEstimate,
   ProcessedCombination,
-  RegimenPreview,
   RegimenRanking,
   ResponseType,
 } from "./types";
@@ -38,9 +41,50 @@ import "./App.css";
 type Page = "project" | "import" | "mic" | "analyze" | "regimen" | "results" | "compare";
 type ResultTab = "summary" | "heatmap" | "bar" | "processed";
 type AnalysisProgress = { completedIterations: number; totalIterations: number; regimenLabel?: string };
-type DrusanoFitProgress = { cycle: number; objectiveFunction: number; regimenLabel?: string };
+type DrusanoFitProgress = { phase: "reference" | "bootstrap"; cycle: number; objectiveFunction: number; completedBootstraps: number; totalBootstraps: number; regimenLabel?: string };
+type MusycFitProgress = { phase: "reference" | "bootstrap"; iteration: number; objectiveFunction: number; completedBootstraps: number; totalBootstraps: number; regimenLabel?: string };
 type RankingSortKey = "regimen" | "auc" | "win" | "locations" | "breadth0" | "breadth1" | "antagonism";
 type SortDirection = "asc" | "desc";
+
+interface ProjectSnapshot {
+  schemaVersion: 1;
+  savedAt: string;
+  page: Page;
+  analysisType: AnalysisType;
+  inputSettings: InputSettings;
+  drusanoFits: Array<{ id: string; label: string; fit: DrusanoFitResult }>;
+  drusanoSimulations: Record<string, DrusanoRegimenSimulationResult>;
+  drusanoSimulationConcentrations: Record<string, Array<number | null>>;
+  drusanoModelSettings: DrusanoModelSettings;
+  drusanoCensorSuggestion: DrusanoCensorLimitSuggestion | null;
+  musycFits: Array<{ id: string; label: string; fit: MusycFitResult }>;
+  musycModelSettings: MusycModelSettings;
+  tab: ResultTab;
+  importRequest: ImportRequest;
+  worksheets: string[];
+  preview: ImportPreview | null;
+  roles: ColumnRole[];
+  analysis: AnalysisResult | null;
+  stratifyIndex: number;
+  stratificationOverrides: Record<string, string>;
+  sharedStratificationDrugs: string[];
+  baselineCorrection: BaselineCorrection;
+  bootstrapIterations: number;
+  randomSeed: number;
+  showConfidenceIntervals: boolean;
+  micZeroTolerance: number;
+  drugMicValues: Record<string, number | null>;
+  drugMicSuggestions: Record<string, number | null>;
+  micEstimatesByRegimen: Record<string, MicEstimate[]>;
+  drugClinicalValues: Record<string, number | null>;
+  responseTypes: Record<string, ResponseType>;
+  selectedImportRegimenId: string | null;
+  analysisRegimens: ComparisonRegimen[];
+  colors: PlotColors;
+  comparisonRegimens: ComparisonRegimen[];
+  comparisonIncludedIds: string[];
+  comparisonSettings: ComparisonSettings;
+}
 
 const BarPlot = lazy(() => import("./BarPlot"));
 const appBuild = "0.8.0";
@@ -72,9 +116,18 @@ const initialInputSettings: InputSettings = {
 
 const initialDrusanoModelSettings: DrusanoModelSettings = {
   responseCensorLimit: null,
-  errorCoefficients: [0.05, 0.05, 0, 0],
-  lambda: 0,
+  errorCoefficients: [0.02, 0, 0.1, 0],
+  lambda: 0.01,
   maxCycles: 100,
+  bootstrapIterations: 500,
+  bootstrapSeed: 123,
+};
+
+const initialMusycModelSettings: MusycModelSettings = {
+  responseCensorLimit: null,
+  maxIterations: 5000,
+  bootstrapIterations: 500,
+  bootstrapSeed: 123,
 };
 
 function App() {
@@ -83,11 +136,15 @@ function App() {
   const [inputSettings, setInputSettings] = useState<InputSettings>(initialInputSettings);
   const [drusanoFits, setDrusanoFits] = useState<{ id: string; label: string; fit: DrusanoFitResult }[]>([]);
   const [drusanoSimulations, setDrusanoSimulations] = useState<Record<string, DrusanoRegimenSimulationResult>>({});
+  const [drusanoSimulationConcentrations, setDrusanoSimulationConcentrations] = useState<Record<string, Array<number | null>>>({});
   const [drusanoProgress, setDrusanoProgress] = useState<DrusanoFitProgress | null>(null);
   const [drusanoModelSettings, setDrusanoModelSettings] = useState<DrusanoModelSettings>(initialDrusanoModelSettings);
   const [drusanoCensorSuggestion, setDrusanoCensorSuggestion] = useState<DrusanoCensorLimitSuggestion | null>(null);
   const [drusanoSuggestionBusy, setDrusanoSuggestionBusy] = useState(false);
   const [drusanoSuggestionError, setDrusanoSuggestionError] = useState<string | null>(null);
+  const [musycFits, setMusycFits] = useState<{ id: string; label: string; fit: MusycFitResult }[]>([]);
+  const [musycProgress, setMusycProgress] = useState<MusycFitProgress | null>(null);
+  const [musycModelSettings, setMusycModelSettings] = useState<MusycModelSettings>(initialMusycModelSettings);
   const [tab, setTab] = useState<ResultTab>("summary");
   const [importRequest, setImportRequest] = useState(initialImport);
   const [worksheets, setWorksheets] = useState<string[]>([]);
@@ -121,6 +178,8 @@ function App() {
   const [comparisonSettings, setComparisonSettings] = useState(initialComparisonSettings);
   const [currentBootstrapRegimen, setCurrentBootstrapRegimen] = useState<string | null>(null);
   const [showInstructions, setShowInstructions] = useState(false);
+  const [restoredSnapshot, setRestoredSnapshot] = useState(false);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
 
   useEffect(() => {
     loadPlotColors().then(setColors).catch(() => undefined);
@@ -159,6 +218,13 @@ function App() {
   });
   const resultsReady = analysisType === "bliss" && micComplete && analysisRegimens.length > 0;
   const showCompare = analysisType === "bliss" && comparisonRegimens.length > 1;
+  const drusanoComparisonEntries = useMemo(() => drusanoFits.flatMap((entry) => {
+    const simulation = drusanoSimulations[entry.id];
+    const entered = drusanoSimulationConcentrations[entry.id];
+    return simulation && entered && simulation.concentrations.every((value, index) => value === entered[index])
+      ? [{ id: entry.id, label: entry.label, simulation }]
+      : [];
+  }), [drusanoFits, drusanoSimulations, drusanoSimulationConcentrations]);
   const drusanoSettingsComplete = inputSettings.blankValue != null
     && Number.isFinite(inputSettings.blankValue)
     && (inputSettings.inputType !== "absorbance" || (drusanoModelSettings.responseCensorLimit != null && Number.isFinite(drusanoModelSettings.responseCensorLimit)))
@@ -169,25 +235,51 @@ function App() {
     && drusanoModelSettings.maxCycles != null
     && Number.isInteger(drusanoModelSettings.maxCycles)
     && drusanoModelSettings.maxCycles >= 1
-    && drusanoModelSettings.maxCycles <= 10_000;
+    && drusanoModelSettings.maxCycles <= 10_000
+    && drusanoModelSettings.bootstrapIterations != null
+    && Number.isInteger(drusanoModelSettings.bootstrapIterations)
+    && drusanoModelSettings.bootstrapIterations >= 1
+    && drusanoModelSettings.bootstrapIterations <= 10_000
+    && drusanoModelSettings.bootstrapSeed != null
+    && Number.isInteger(drusanoModelSettings.bootstrapSeed)
+    && drusanoModelSettings.bootstrapSeed >= 0;
+  const musycSettingsComplete = inputSettings.blankValue != null
+    && Number.isFinite(inputSettings.blankValue)
+    && (inputSettings.inputType !== "absorbance" || (musycModelSettings.responseCensorLimit != null && Number.isFinite(musycModelSettings.responseCensorLimit)))
+    && musycModelSettings.maxIterations != null
+    && Number.isInteger(musycModelSettings.maxIterations)
+    && musycModelSettings.maxIterations >= 100
+    && musycModelSettings.maxIterations <= 50_000
+    && musycModelSettings.bootstrapIterations != null
+    && Number.isInteger(musycModelSettings.bootstrapIterations)
+    && musycModelSettings.bootstrapIterations >= 1
+    && musycModelSettings.bootstrapIterations <= 10_000
+    && musycModelSettings.bootstrapSeed != null
+    && Number.isInteger(musycModelSettings.bootstrapSeed)
+    && musycModelSettings.bootstrapSeed >= 0;
 
   useEffect(() => {
     if (page === "project") return;
     if (page !== "import" && !importReady) setPage("import");
-    else if (["analyze", "results", "compare", "regimen"].includes(page) && !micComplete) setPage("mic");
+    else if (analysisType === "bliss" && ["analyze", "results", "compare", "regimen"].includes(page) && !micComplete) setPage("mic");
+    else if (analysisType !== "bliss" && (page === "mic" || page === "results")) setPage("analyze");
     else if (analysisType === "bliss" && page === "results" && !resultsReady) setPage("analyze");
     else if (analysisType === "bliss" && page === "compare" && !showCompare) setPage(resultsReady ? "results" : "analyze");
     else if (analysisType === "bliss" && page === "regimen") setPage(micComplete ? "analyze" : "mic");
     else if (analysisType === "drusanoGreco" && page === "regimen" && drusanoFits.length === 0) setPage("analyze");
-  }, [page, analysisType, importReady, micComplete, resultsReady, showCompare, drusanoFits.length]);
+    else if (analysisType === "drusanoGreco" && page === "compare" && drusanoComparisonEntries.length < 2) setPage(drusanoFits.length ? "regimen" : "analyze");
+    else if (analysisType === "musyc" && page === "regimen") setPage("analyze");
+    else if (analysisType === "musyc" && page === "compare" && musycFits.length < 2) setPage("analyze");
+  }, [page, analysisType, importReady, micComplete, resultsReady, showCompare, drusanoFits.length, drusanoComparisonEntries.length, musycFits.length]);
 
   useEffect(() => {
+    if (restoredSnapshot) return;
     if (!preview || mappingErrors.length > 0) {
       setDrugMicSuggestions({});
       setMicEstimatesByRegimen({});
       return;
     }
-    if (analysisType === "drusanoGreco") {
+    if (analysisType !== "bliss") {
       setDrugMicSuggestions({});
       setMicEstimatesByRegimen({});
       setMicBusy(false);
@@ -227,10 +319,11 @@ function App() {
       if (!cancelled) setMicError(errorMessage(reason));
     }).finally(() => { if (!cancelled) setMicBusy(false); });
     return () => { cancelled = true; };
-  }, [analysisType, preview, roles, importRequest, micZeroTolerance, responseTypes, uploadedDrugs]);
+  }, [analysisType, preview, roles, importRequest, micZeroTolerance, responseTypes, uploadedDrugs, restoredSnapshot]);
 
   useEffect(() => {
-    if (analysisType !== "drusanoGreco" || inputSettings.inputType !== "absorbance"
+    if (restoredSnapshot) return;
+    if (analysisType === "bliss" || inputSettings.inputType !== "absorbance"
       || inputSettings.blankValue == null || !Number.isFinite(inputSettings.blankValue)
       || !preview || !selectedImportRegimen) {
       setDrusanoCensorSuggestion(null);
@@ -250,19 +343,16 @@ function App() {
       regimenDrugNames: selectedImportRegimen.drugNames,
     } }).then((suggestion) => {
       if (cancelled) return;
-      setDrusanoCensorSuggestion(suggestion);
-      if (suggestion) {
-        setDrusanoModelSettings((current) => current.responseCensorLimit == null
-          ? { ...current, responseCensorLimit: suggestion.responseCensorLimit }
-          : current);
-      }
+        setDrusanoCensorSuggestion(suggestion);
+        if (suggestion && analysisType === "drusanoGreco") setDrusanoModelSettings((current) => current.responseCensorLimit == null ? { ...current, responseCensorLimit: suggestion.responseCensorLimit } : current);
+        if (suggestion && analysisType === "musyc") setMusycModelSettings((current) => current.responseCensorLimit == null ? { ...current, responseCensorLimit: suggestion.responseCensorLimit } : current);
     }).catch((reason) => {
       if (!cancelled) setDrusanoSuggestionError(errorMessage(reason));
     }).finally(() => {
       if (!cancelled) setDrusanoSuggestionBusy(false);
     });
     return () => { cancelled = true; };
-  }, [analysisType, inputSettings.inputType, inputSettings.blankValue, preview, selectedImportRegimen, roles, importRequest]);
+  }, [analysisType, inputSettings.inputType, inputSettings.blankValue, preview, selectedImportRegimen, roles, importRequest, restoredSnapshot]);
 
   async function chooseFile() {
     const selected = await open({
@@ -276,6 +366,7 @@ function App() {
       ],
     });
     if (!selected) return;
+    setRestoredSnapshot(false);
     const path = String(selected);
     const next = { ...initialImport, path };
     setImportRequest(next);
@@ -283,8 +374,11 @@ function App() {
     setAnalysis(null);
     setAnalysisRegimens([]);
     setDrusanoFits([]);
+    setMusycFits([]);
     setDrusanoSimulations({});
+    setDrusanoSimulationConcentrations({});
     setDrusanoModelSettings((current) => ({ ...current, responseCensorLimit: null }));
+    setMusycModelSettings((current) => ({ ...current, responseCensorLimit: null }));
     setDrusanoCensorSuggestion(null);
     setDrugMicValues({});
     setDrugMicSuggestions({});
@@ -308,6 +402,7 @@ function App() {
 
   async function loadPreview(request = importRequest) {
     if (!request.path) return;
+    setRestoredSnapshot(false);
     setBusy(true);
     setError(null);
     try {
@@ -328,8 +423,11 @@ function App() {
       setAnalysis(null);
       setAnalysisRegimens([]);
       setDrusanoFits([]);
+      setMusycFits([]);
       setDrusanoSimulations({});
+      setDrusanoSimulationConcentrations({});
       setDrusanoModelSettings((current) => ({ ...current, responseCensorLimit: null }));
+      setMusycModelSettings((current) => ({ ...current, responseCensorLimit: null }));
       setDrusanoCensorSuggestion(null);
     } catch (reason) {
       setPreview(null);
@@ -406,6 +504,7 @@ function App() {
   }
 
   function updateRange(field: keyof ImportRequest, value: number | string | null) {
+    setRestoredSnapshot(false);
     setImportRequest((current) => ({ ...current, [field]: value }));
   }
 
@@ -430,18 +529,78 @@ function App() {
   }
 
   function updateInputSettings(next: InputSettings) {
+    setRestoredSnapshot(false);
     setInputSettings(next);
     setDrusanoFits([]);
     setDrusanoSimulations({});
+    setMusycFits([]);
     if (!preview || !next.inputType) return;
     const selectedType = responseTypeForInput(next);
     if (!selectedType) return;
     setResponseTypes(Object.fromEntries(preview.regimens.map((regimen) => [regimen.id, selectedType])));
   }
 
+  function updateMusycModelSettings(next: MusycModelSettings) {
+    const fitChange = next.responseCensorLimit !== musycModelSettings.responseCensorLimit
+      || next.bootstrapIterations !== musycModelSettings.bootstrapIterations
+      || next.bootstrapSeed !== musycModelSettings.bootstrapSeed;
+    setMusycModelSettings(next);
+    if (fitChange) setMusycFits([]);
+  }
+
+  async function runMusycFit() {
+    if (!preview || !importReady || !musycSettingsComplete) {
+      setError("Complete the import, blank response, censor limit, and MuSyC optimizer settings before fitting.");
+      return;
+    }
+    setBusy(true);
+    setMusycProgress({ phase: "reference", iteration: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: musycModelSettings.bootstrapIterations ?? 0, regimenLabel: preview.regimens[0]?.label });
+    setError(null);
+    setBatchWarning(null);
+    try {
+      const completed: { id: string; label: string; fit: MusycFitResult }[] = [];
+      const failures: string[] = [];
+      for (const regimen of preview.regimens) {
+        const mapping = buildMapping(preview, roles, regimen.drugNames);
+        if (!mapping) { failures.push(`${regimen.label}: invalid column mapping`); continue; }
+        try {
+          setMusycProgress({ phase: "reference", iteration: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: musycModelSettings.bootstrapIterations ?? 0, regimenLabel: regimen.label });
+          const onProgress = new Channel<MusycFitProgress>();
+          onProgress.onmessage = (progress) => setMusycProgress({ ...progress, regimenLabel: regimen.label });
+          const fitted = await invoke<MusycFitResult>("fit_musyc", { request: {
+            import: importRequest,
+            mapping,
+            regimenDrugNames: regimen.drugNames,
+            settings: {
+              blankValue: inputSettings.blankValue,
+              responseCensorLimit: inputSettings.inputType === "absorbance" ? musycModelSettings.responseCensorLimit : null,
+            },
+            maxIterations: musycModelSettings.maxIterations,
+            bootstrapIterations: musycModelSettings.bootstrapIterations,
+            bootstrapSeed: musycModelSettings.bootstrapSeed,
+          }, onProgress });
+          completed.push({ id: regimen.id, label: regimen.label, fit: fitted });
+        } catch (reason) {
+          failures.push(`${regimen.label}: ${errorMessage(reason)}`);
+        }
+      }
+      if (!completed.length) throw new Error(`No regimens could be fitted. ${failures.join(" ")}`);
+      setMusycFits(completed);
+      if (failures.length) setBatchWarning(`${completed.length} regimen${completed.length === 1 ? " was" : "s were"} fitted. Skipped ${failures.length}: ${failures.join(" ")}`);
+    } catch (reason) {
+      setMusycFits([]);
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+      setMusycProgress(null);
+    }
+  }
+
   function updateDrusanoModelSettings(next: DrusanoModelSettings) {
     const runtimeOnlyChange = next.responseCensorLimit === drusanoModelSettings.responseCensorLimit
       && next.lambda === drusanoModelSettings.lambda
+      && next.bootstrapIterations === drusanoModelSettings.bootstrapIterations
+      && next.bootstrapSeed === drusanoModelSettings.bootstrapSeed
       && next.errorCoefficients.every((value, index) => value === drusanoModelSettings.errorCoefficients[index]);
     setDrusanoModelSettings(next);
     if (!runtimeOnlyChange) {
@@ -451,27 +610,22 @@ function App() {
   }
 
   async function runDrusanoFit() {
-    if (!preview || !importReady || !micComplete || !drusanoSettingsComplete) {
-      setError("Complete the import, blank response, censor limit, assay error model, and MIC assignments before fitting the model.");
+    if (!preview || !importReady || !drusanoSettingsComplete) {
+      setError("Complete the import, blank response, censor limit, and assay error model before fitting the model.");
       return;
     }
     setBusy(true);
     setError(null);
     setBatchWarning(null);
-    setDrusanoProgress({ cycle: 0, objectiveFunction: Number.NaN, regimenLabel: preview.regimens[0]?.label });
+    setDrusanoProgress({ phase: "reference", cycle: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: drusanoModelSettings.bootstrapIterations ?? 0, regimenLabel: preview.regimens[0]?.label });
     try {
       const completed: { id: string; label: string; fit: DrusanoFitResult }[] = [];
       const failures: string[] = [];
       for (const regimen of preview.regimens) {
         const mapping = buildMapping(preview, roles, regimen.drugNames);
         if (!mapping) { failures.push(`${regimen.label}: invalid column mapping`); continue; }
-        const regimenMics = regimen.drugNames.map((name) => drugMicValues[name]);
-        if (regimenMics.some((value) => value == null || !Number.isFinite(value) || value <= 0)) {
-          failures.push(`${regimen.label}: one or more MIC assignments are incomplete`);
-          continue;
-        }
         try {
-          setDrusanoProgress({ cycle: 0, objectiveFunction: Number.NaN, regimenLabel: regimen.label });
+          setDrusanoProgress({ phase: "reference", cycle: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: drusanoModelSettings.bootstrapIterations ?? 0, regimenLabel: regimen.label });
           const onProgress = new Channel<DrusanoFitProgress>();
           onProgress.onmessage = (progress) => setDrusanoProgress({ ...progress, regimenLabel: regimen.label });
           const fit = await invoke<DrusanoFitResult>("fit_drusano_greco", { request: {
@@ -481,13 +635,14 @@ function App() {
             settings: {
               blankValue: inputSettings.blankValue,
               responseCensorLimit: inputSettings.inputType === "absorbance" ? drusanoModelSettings.responseCensorLimit : null,
-              micValues: regimenMics as number[],
             },
             assayError: {
               coefficients: drusanoModelSettings.errorCoefficients as [number, number, number, number],
               lambda: drusanoModelSettings.lambda,
             },
             maxCycles: drusanoModelSettings.maxCycles,
+            bootstrapIterations: drusanoModelSettings.bootstrapIterations,
+            bootstrapSeed: drusanoModelSettings.bootstrapSeed,
           }, onProgress });
           completed.push({ id: regimen.id, label: regimen.label, fit });
         } catch (reason) {
@@ -515,12 +670,9 @@ function App() {
     if (!previous || !regimen || previous.fit.converged || previous.fit.runCycles < previous.fit.maxCycles) return;
     const mapping = buildMapping(preview, roles, regimen.drugNames);
     if (!mapping) return;
-    const regimenMics = regimen.drugNames.map((name) => drugMicValues[name]);
-    if (regimenMics.some((value) => value == null || !Number.isFinite(value) || value <= 0)) return;
-
     setBusy(true);
     setError(null);
-    setDrusanoProgress({ cycle: previous.fit.cycles, objectiveFunction: previous.fit.objectiveFunction, regimenLabel: regimen.label });
+    setDrusanoProgress({ phase: "reference", cycle: previous.fit.cycles, objectiveFunction: previous.fit.objectiveFunction, completedBootstraps: 0, totalBootstraps: drusanoModelSettings.bootstrapIterations ?? 0, regimenLabel: regimen.label });
     try {
       const onProgress = new Channel<DrusanoFitProgress>();
       onProgress.onmessage = (progress) => setDrusanoProgress({ ...progress, regimenLabel: regimen.label });
@@ -531,15 +683,16 @@ function App() {
         settings: {
           blankValue: inputSettings.blankValue,
           responseCensorLimit: inputSettings.inputType === "absorbance" ? drusanoModelSettings.responseCensorLimit : null,
-          micValues: regimenMics as number[],
         },
         assayError: {
           coefficients: previous.fit.assayError.coefficients,
           lambda: previous.fit.assayError.fittedLambda,
         },
         maxCycles: drusanoModelSettings.maxCycles,
+        bootstrapIterations: drusanoModelSettings.bootstrapIterations,
+        bootstrapSeed: drusanoModelSettings.bootstrapSeed,
         continuation: {
-          supportPoints: previous.fit.supportPoints,
+          supportPoints: [previous.fit.referenceSupportPoint],
           fittedLambda: previous.fit.assayError.fittedLambda,
           completedCycles: previous.fit.cycles,
         },
@@ -563,7 +716,7 @@ function App() {
         drugNames: entry.fit.data.drugNames,
         parameterNames: entry.fit.parameterNames,
         supportPoints: entry.fit.supportPoints,
-        micValues: entry.fit.data.micValues,
+        maxConcentrations: entry.fit.data.maxConcentrations,
         concentrations,
         simulationCount: 1000,
         seed: 17,
@@ -594,6 +747,100 @@ function App() {
     }
   }
 
+  async function saveProjectSnapshot() {
+    const path = await saveDialog({
+      title: "Save Checkmate results",
+      defaultPath: "checkmate-results.ckm",
+      filters: [{ name: "Checkmate snapshot", extensions: ["ckm"] }],
+    });
+    if (!path) return;
+    const snapshot: ProjectSnapshot = {
+      schemaVersion: 1,
+      savedAt: new Date().toISOString(),
+      page, analysisType, inputSettings,
+      drusanoFits, drusanoSimulations, drusanoSimulationConcentrations,
+      drusanoModelSettings, drusanoCensorSuggestion,
+      musycFits, musycModelSettings,
+      tab, importRequest, worksheets, preview, roles, analysis,
+      stratifyIndex, stratificationOverrides, sharedStratificationDrugs,
+      baselineCorrection, bootstrapIterations, randomSeed, showConfidenceIntervals,
+      micZeroTolerance, drugMicValues, drugMicSuggestions, micEstimatesByRegimen,
+      drugClinicalValues, responseTypes, selectedImportRegimenId, analysisRegimens,
+      colors, comparisonRegimens, comparisonIncludedIds, comparisonSettings,
+    };
+    setError(null);
+    setProjectNotice(null);
+    try {
+      await invoke("save_project_snapshot", { path: String(path), snapshotJson: JSON.stringify(snapshot) });
+      setProjectNotice(`Saved compressed results to ${String(path)}.`);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  }
+
+  async function loadProjectSnapshot() {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: "Load Checkmate results",
+      filters: [{ name: "Checkmate snapshot", extensions: ["ckm"] }],
+    });
+    if (!selected) return;
+    setError(null);
+    setProjectNotice(null);
+    try {
+      const snapshot = JSON.parse(await invoke<string>("load_project_snapshot", { path: String(selected) })) as ProjectSnapshot;
+      if (snapshot.schemaVersion !== 1 || !snapshot.analysisType || !Array.isArray(snapshot.roles)
+        || !Array.isArray(snapshot.drusanoFits) || !Array.isArray(snapshot.musycFits)) {
+        throw new Error("This file is not a supported Checkmate results snapshot.");
+      }
+      setRestoredSnapshot(true);
+      setAnalysisType(snapshot.analysisType);
+      setInputSettings(snapshot.inputSettings);
+      setDrusanoFits(snapshot.drusanoFits);
+      setDrusanoSimulations(snapshot.drusanoSimulations);
+      setDrusanoSimulationConcentrations(snapshot.drusanoSimulationConcentrations);
+      setDrusanoModelSettings(snapshot.drusanoModelSettings);
+      setDrusanoCensorSuggestion(snapshot.drusanoCensorSuggestion);
+      setMusycFits(snapshot.musycFits);
+      setMusycModelSettings(snapshot.musycModelSettings);
+      setTab(snapshot.tab);
+      setImportRequest(snapshot.importRequest);
+      setWorksheets(snapshot.worksheets);
+      setPreview(snapshot.preview);
+      setRoles(snapshot.roles);
+      setAnalysis(snapshot.analysis);
+      setStratifyIndex(snapshot.stratifyIndex);
+      setStratificationOverrides(snapshot.stratificationOverrides);
+      setSharedStratificationDrugs(snapshot.sharedStratificationDrugs);
+      setBaselineCorrection(snapshot.baselineCorrection);
+      setBootstrapIterations(snapshot.bootstrapIterations);
+      setRandomSeed(snapshot.randomSeed);
+      setShowConfidenceIntervals(snapshot.showConfidenceIntervals);
+      setMicZeroTolerance(snapshot.micZeroTolerance);
+      setDrugMicValues(snapshot.drugMicValues);
+      setDrugMicSuggestions(snapshot.drugMicSuggestions);
+      setMicEstimatesByRegimen(snapshot.micEstimatesByRegimen);
+      setDrugClinicalValues(snapshot.drugClinicalValues);
+      setResponseTypes(snapshot.responseTypes);
+      setSelectedImportRegimenId(snapshot.selectedImportRegimenId);
+      setAnalysisRegimens(snapshot.analysisRegimens);
+      setColors(snapshot.colors);
+      setComparisonRegimens(snapshot.comparisonRegimens);
+      setComparisonIncludedIds(snapshot.comparisonIncludedIds);
+      setComparisonSettings(snapshot.comparisonSettings);
+      setBusy(false);
+      setAnalysisProgress(null);
+      setDrusanoProgress(null);
+      setMusycProgress(null);
+      setBatchWarning(null);
+      setPage(snapshot.page);
+      setProjectNotice(`Loaded saved results from ${String(selected)}.`);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  }
+
   async function quitApplication() {
     try {
       await invoke("quit_application");
@@ -610,37 +857,41 @@ function App() {
           <span>Checkmate <small>v{appBuild}</small></span>
         </div>
         <nav aria-label="Primary navigation">
-          <button className={page === "project" ? "nav-active" : ""} onClick={() => setPage("project")}>Project</button>
+          <button className={page === "project" ? "nav-active" : ""} onClick={() => setPage("project")}>Algorithm</button>
           <button className={page === "import" ? "nav-active" : ""} onClick={() => setPage("import")}>
             Import
           </button>
-          <button
+          {analysisType === "bliss" && <button
             className={page === "mic" ? "nav-active" : page === "import" && importReady ? "nav-ready" : ""}
             disabled={!importReady}
             onClick={() => setPage("mic")}
           >
             MIC
-          </button>
+          </button>}
           <button
             className={page === "analyze" ? "nav-active" : ""}
-            disabled={!micComplete}
+            disabled={analysisType === "bliss" ? !micComplete : !importReady}
             onClick={() => setPage("analyze")}
           >
-            Analyze
+            {analysisType === "bliss" ? "Analyze" : "Fit"}
           </button>
-          {analysisType === "drusanoGreco" && <button className={page === "regimen" ? "nav-active" : ""} disabled={drusanoFits.length === 0} onClick={() => setPage("regimen")}>Regimen</button>}
-          <button className={page === "results" ? "nav-active" : ""} disabled={!resultsReady} onClick={() => setPage("results")}>Results</button>
+          {analysisType === "drusanoGreco" && <button className={page === "regimen" ? "nav-active" : ""} disabled={drusanoFits.length === 0} onClick={() => setPage("regimen")}>Simulate</button>}
+          {analysisType === "bliss" && <button className={page === "results" ? "nav-active" : ""} disabled={!resultsReady} onClick={() => setPage("results")}>Results</button>}
           {analysisType === "drusanoGreco"
-            ? <button className={page === "compare" ? "nav-active" : ""} disabled onClick={() => setPage("compare")}>Compare</button>
-            : showCompare && <button className={page === "compare" ? "nav-active" : ""} onClick={() => setPage("compare")}>Compare ({comparisonRegimens.length})</button>}
+            ? <button className={page === "compare" ? "nav-active" : ""} disabled={drusanoComparisonEntries.length < 2} onClick={() => setPage("compare")}>Compare{drusanoComparisonEntries.length >= 2 ? ` (${drusanoComparisonEntries.length})` : ""}</button>
+            : analysisType === "musyc"
+              ? <button className={page === "compare" ? "nav-active" : ""} disabled={musycFits.length < 2} onClick={() => setPage("compare")}>Compare{musycFits.length >= 2 ? ` (${musycFits.length})` : ""}</button>
+              : showCompare && <button className={page === "compare" ? "nav-active" : ""} onClick={() => setPage("compare")}>Compare ({comparisonRegimens.length})</button>}
         </nav>
         <div className="header-actions">
+          <button className="instructions-button" disabled={busy} onClick={saveProjectSnapshot}>Save</button>
+          <button className="instructions-button" disabled={busy} onClick={loadProjectSnapshot}>Load</button>
           <button className="instructions-button" onClick={() => setShowInstructions(true)}>Instructions</button>
           <button className="quit-button" onClick={quitApplication}>Quit</button>
         </div>
       </header>
 
-      {showInstructions && <InstructionsModal close={() => setShowInstructions(false)} />}
+      {showInstructions && <InstructionsModal analysisType={analysisType} close={() => setShowInstructions(false)} />}
 
       {error && (
         <div className="global-error" role="alert">
@@ -652,6 +903,12 @@ function App() {
         <div className="global-warning" role="status">
           <strong>Completed with skipped regimens.</strong> {batchWarning}
           <button aria-label="Dismiss warning" onClick={() => setBatchWarning(null)}>×</button>
+        </div>
+      )}
+      {projectNotice && (
+        <div className="global-notice" role="status">
+          {projectNotice}
+          <button aria-label="Dismiss notice" onClick={() => setProjectNotice(null)}>×</button>
         </div>
       )}
 
@@ -699,7 +956,7 @@ function App() {
             <div className="card-heading">
               <div>
                 <h1>Selected range and column assignments</h1>
-                <p>Assign drug name, concentration, units, and response roles once. The Drug C / Conc C / Units C set is optional.</p>
+                <p>Assign concentration and response roles. Drug names and units may come from separate columns or be inferred from headers such as “Amikacin (mg/L)”; every suggestion can be overridden.</p>
               </div>
               {preview && <span className="count-badge">{selectedImportRegimen?.totalRows ?? preview.totalRows} rows × {preview.totalColumns} columns</span>}
             </div>
@@ -728,6 +985,7 @@ function App() {
                               onChange={(event) => {
                                 const next = [...roles];
                                 next[index] = event.target.value as ColumnRole;
+                                setRestoredSnapshot(false);
                                 setRoles(next);
                               }}
                             >
@@ -757,7 +1015,7 @@ function App() {
                   </table>
                 </div>
                 <div className={mappingErrors.length || !inputSettings.inputType ? "mapping-status warning" : "mapping-status ready"}>
-                  {mappingErrors.length ? mappingErrors.join(" ") : !inputSettings.inputType ? "Choose the input response type to complete import." : "Import and mapping are complete. Continue to the MIC tab."}
+                  {mappingErrors.length ? mappingErrors.join(" ") : !inputSettings.inputType ? "Choose the input response type to complete import." : analysisType !== "bliss" ? "Import and mapping are complete. Continue to the Fit tab." : "Import and mapping are complete. Continue to the MIC tab."}
                 </div>
               </>
             )}
@@ -765,25 +1023,20 @@ function App() {
         </main>
       ) : page === "mic" ? (
         <MicWorkspace
-          analysisType={analysisType}
           drugs={uploadedDrugs}
           values={drugMicValues}
           suggestions={drugMicSuggestions}
           setValue={(drug, value) => {
             setDrugMicValues((current) => ({ ...current, [drug]: value }));
-            if (analysisType === "drusanoGreco") {
-              setDrusanoFits([]);
-              setDrusanoSimulations({});
-            }
           }}
           zeroTolerance={micZeroTolerance}
-          setZeroTolerance={setMicZeroTolerance}
+          setZeroTolerance={(value) => { setRestoredSnapshot(false); setMicZeroTolerance(value); }}
           busy={micBusy}
           error={micError}
           complete={micComplete}
         />
       ) : page === "analyze" ? (
-        analysisType === "drusanoGreco" ? <DrusanoAnalyzeWorkspace
+        analysisType === "drusanoGreco" ? <DrusanoFitWorkspace
           fits={drusanoFits}
           busy={busy}
           progress={drusanoProgress}
@@ -796,6 +1049,20 @@ function App() {
           suggestionBusy={drusanoSuggestionBusy}
           suggestionError={drusanoSuggestionError}
           settingsComplete={drusanoSettingsComplete}
+          regimens={preview?.regimens ?? []}
+        /> : analysisType === "musyc" ? <MusycFitWorkspace
+          fits={musycFits}
+          busy={busy}
+          progress={musycProgress}
+          fit={runMusycFit}
+          inputType={inputSettings.inputType}
+          settings={musycModelSettings}
+          setSettings={updateMusycModelSettings}
+          suggestion={drusanoCensorSuggestion}
+          suggestionBusy={drusanoSuggestionBusy}
+          suggestionError={drusanoSuggestionError}
+          settingsComplete={musycSettingsComplete}
+          regimens={preview?.regimens ?? []}
         /> : <AnalyzeSetupWorkspace
           drugs={uploadedDrugs}
           clinicalValues={drugClinicalValues}
@@ -816,10 +1083,12 @@ function App() {
           fits={drusanoFits}
           regimens={preview?.regimens ?? []}
           simulations={drusanoSimulations}
+          concentrationValues={drusanoSimulationConcentrations}
+          setConcentrationValues={(id, values) => setDrusanoSimulationConcentrations((current) => ({ ...current, [id]: values }))}
           simulate={runDrusanoRegimenSimulation}
         />
       ) : page === "results" ? (
-        analysisType === "drusanoGreco" ? <DrusanoPendingWorkspace stage="results" /> : <AnalysisWorkspace
+        <AnalysisWorkspace
           analysis={analysis!}
           tab={tab}
           setTab={setTab}
@@ -836,7 +1105,8 @@ function App() {
           returnToAnalyze={() => setPage("analyze")}
         />
       ) : (
-        analysisType === "drusanoGreco" ? <DrusanoPendingWorkspace stage="compare" /> : <ComparisonWorkspace
+        analysisType === "drusanoGreco" ? <DrusanoComparisonWorkspace entries={drusanoComparisonEntries} />
+          : analysisType === "musyc" ? <MusycComparisonWorkspace fits={musycFits} /> : <ComparisonWorkspace
           regimens={comparisonRegimens}
           includedIds={comparisonIncludedIds}
           setIncludedIds={setComparisonIncludedIds}
@@ -849,12 +1119,17 @@ function App() {
   );
 }
 
-function InstructionsModal({ close }: { close: () => void }) {
+function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType; close: () => void }) {
+  const workflowSteps = analysisType === "drusanoGreco"
+    ? [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "Fit", "Fit Equation 2 and review diagnostics"], ["4", "Simulate", "Simulate constant concentrations"], ["5", "Compare", "Rank simulated efficacy"]]
+    : analysisType === "musyc"
+      ? [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "Fit", "Fit and bootstrap MuSyC"], ["4", "Compare", "Rank bootstrap efficacy"]]
+    : [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "MIC", "Review suggested MICs"], ["4", "Analyze", "Choose policy and calculate"], ["5", "Results", "Inspect tables and plots"], ["6", "Compare", "Rank multiple regimens"]];
   return (
     <div className="instructions-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
       <section className="instructions-modal" role="dialog" aria-modal="true" aria-labelledby="instructions-title">
         <header className="instructions-header">
-          <div><h1 id="instructions-title">Checkmate instructions</h1><p>Prepare and analyze checkerboard assays with Bliss or Drusano–Greco methods.</p></div>
+          <div><h1 id="instructions-title">Checkmate instructions</h1><p>Prepare and analyze checkerboard assays with Bliss, Drusano–Greco, or MuSyC.</p></div>
           <button className="instructions-close-icon" aria-label="Close instructions" autoFocus onClick={close}>×</button>
         </header>
         <div className="instructions-layout">
@@ -863,11 +1138,12 @@ function InstructionsModal({ close }: { close: () => void }) {
             <a href="#instructions-workflow">Workflow</a>
             <a href="#instructions-data">Data format</a>
             <a href="#instructions-import">Import</a>
-            <a href="#instructions-mic">MIC</a>
-            <a href="#instructions-analyze">Analyze</a>
-            <a href="#instructions-drusano">Drusano–Greco</a>
-            <a href="#instructions-results">Results</a>
-            <a href="#instructions-compare">Compare</a>
+            {analysisType === "bliss" ? <>
+              <a href="#instructions-mic">MIC</a>
+              <a href="#instructions-analyze">Analyze</a>
+              <a href="#instructions-results">Results</a>
+              <a href="#instructions-compare">Compare</a>
+            </> : analysisType === "musyc" ? <a href="#instructions-musyc">MuSyC fit</a> : <a href="#instructions-drusano">Fit, simulate, and compare</a>}
             <a href="#instructions-troubleshooting">Troubleshooting</a>
             <p>Press Esc or use either Close button to exit.</p>
           </nav>
@@ -876,9 +1152,10 @@ function InstructionsModal({ close }: { close: () => void }) {
               <h2>Workflow at a glance</h2>
               <p>Complete the tabs from left to right. A tab becomes available only after the preceding information is valid.</p>
               <div className="instruction-workflow-preview" aria-label="Application workflow preview">
-                {[["1", "Project", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "MIC", "Review suggested MICs"], ["4", "Analyze", "Choose policy and calculate"], ["5", "Results", "Inspect tables and plots"], ["6", "Compare", "Rank multiple regimens"]].map(([number, title, detail]) => <div key={number}><i>{number}</i><strong>{title}</strong><span>{detail}</span></div>)}
+                {workflowSteps.map(([number, title, detail]) => <div key={number}><i>{number}</i><strong>{title}</strong><span>{detail}</span></div>)}
               </div>
-              <p className="instruction-note">Compare is shown only when at least two analyzed regimens are available.</p>
+              <p className="instruction-note">Compare is available when at least two eligible regimen results are available; for Drusano–Greco, that means two current simulations.</p>
+              <p className="instruction-note"><strong>Save and Load:</strong> Save writes a compact binary <code>.ckm</code> snapshot containing the imported state, settings, fitted results, bootstrap summaries, and simulations. Load restores that state without rerunning fits or simulations and does not require the original data file.</p>
             </section>
 
             <section id="instructions-data">
@@ -887,10 +1164,10 @@ function InstructionsModal({ close }: { close: () => void }) {
               <div className="result-table-wrap"><table className="result-table instruction-data-table">
                 <thead><tr><th>Column</th><th>Status</th><th>Contents</th></tr></thead>
                 <tbody>
-                  <tr><td>Drug A, Drug B</td><td>Required</td><td>Drug names repeated on every row.</td></tr>
+                  <tr><td>Drug A, Drug B</td><td>Optional metadata</td><td>Drug names repeated on every row, or inferred from concentration headers such as “Amikacin (mg/L)”.</td></tr>
                   <tr><td>Conc A, Conc B</td><td>Required</td><td>Numeric concentrations; use 0 for untreated or absent drug.</td></tr>
-                  <tr><td>Units A, Units B</td><td>Required</td><td>Concentration units, consistent within each regimen. Singular Unit A/B is accepted.</td></tr>
-                  <tr><td>Drug C, Conc C, Units C</td><td>Optional set</td><td>For three-drug assays. Include all three columns together or omit all three.</td></tr>
+                  <tr><td>Units A, Units B</td><td>Optional metadata</td><td>Separate unit columns, or units inferred from concentration headers; keep units consistent within each regimen.</td></tr>
+                  <tr><td>Drug C, Conc C, Units C</td><td>Optional</td><td>For three-drug assays. Conc C is required when Drug C or Units C is assigned.</td></tr>
                   <tr><td>Response</td><td>Required</td><td>Absorbance, fluorescence, CFU, or percent/fractional viability or inhibition, matching the selected input policy.</td></tr>
                 </tbody>
               </table></div>
@@ -908,11 +1185,11 @@ function InstructionsModal({ close }: { close: () => void }) {
                   <ol>
                     <li>Select <strong>Choose data file…</strong>. For workbooks, choose the worksheet.</li>
                     <li>Adjust the starting row/column or limits if needed. <strong>All</strong> reads every remaining row or column.</li>
-                    <li>Confirm assignments for Drug A/B/C, Conc A/B/C, Units A/B/C, and Response.</li>
+                    <li>Confirm Conc A/B/C and Response assignments. Drug names and units may be mapped from separate columns or inferred from concentration headers.</li>
                     <li>For multiple regimens, use the previous/next controls or regimen menu to inspect each preview.</li>
                     <li>Choose the input type and, for optical data, its preprocessing and response direction.</li>
                   </ol>
-                  <p>The MIC tab activates only when the import and mapping are valid for every regimen.</p>
+                  <p>{analysisType !== "bliss" ? "The Fit tab activates when the import and mapping are valid for every regimen." : "The MIC tab activates only when the import and mapping are valid for every regimen."}</p>
                 </div>
                 <div className="instruction-ui-preview mapping-preview" aria-label="Import mapping interface preview">
                   <div className="preview-title">Selected range and column assignments</div>
@@ -926,7 +1203,7 @@ function InstructionsModal({ close }: { close: () => void }) {
 
             <section id="instructions-mic">
               <h2>3. Assign MICs</h2>
-              <p>All unique uploaded drugs appear in one table. For Bliss, suggested values pool single-agent MIC estimates from every regimen containing that drug; the most common estimate is used and ties select the lower MIC. Drusano–Greco requires manually assigned measured MICs.</p>
+              <p>This Bliss-only tab lists all unique uploaded drugs. Suggested values pool single-agent MIC estimates from every regimen containing that drug; the most common estimate is used and ties select the lower MIC. Drusano–Greco and MuSyC derive their concentration scales from the tested maxima and do not use this tab.</p>
               <ul>
                 <li>Enter one finite positive MIC for every drug. Suggested values may be overwritten.</li>
                 <li><strong>MIC zero tolerance</strong> defines how close a single-agent response must be to zero viability for automatic inference.</li>
@@ -985,19 +1262,32 @@ function InstructionsModal({ close }: { close: () => void }) {
               </div>
             </section>
 
+            <section id="instructions-musyc">
+              <h2>3. MuSyC surface fit</h2>
+              <p>MuSyC fits a four-state, two-drug equilibrium surface to normalized inhibition. The untreated state E₀ is fixed at 0 by growth-control normalization; E₁ and E₂ are the monotherapy efficacies, and E₃ is the asymptotic combination-state efficacy.</p>
+              <ul>
+                <li>C₁ and C₂ are monotherapy EC50 values. They are fitted as fractions of the maximum tested concentrations and reported in the imported concentration units.</li>
+                <li>α₁₂ is the fold change in drug 2 potency induced by drug 1; α₂₁ is the converse. Values above 1 indicate potency synergy and values below 1 indicate potency antagonism.</li>
+                <li>γ₁₂ and γ₂₁ are directional fold changes in Hill cooperativity. A value of 1 means no cooperativity interaction.</li>
+                <li>On Checkmate's increasing-inhibition scale, <code>β = (E3 − max(E1,E2)) / max(E1,E2)</code>. Positive β denotes efficacy synergy. Compare can rank multiple fitted regimens by bootstrap median β or E₃ so relative synergy and absolute combination efficacy can be considered together.</li>
+                <li>For absorbance data, wells at or below L are retained with a one-sided constraint, observed <code>E ≥ E_L</code>.</li>
+                <li>After the reference surface fit, a fixed-dose-grid parametric bootstrap generates synthetic normalized effects using the residual SD from uncensored wells, reapplies the absorbance censor boundary, and refits each synthetic dataset. Fit reports percentile confidence intervals; Compare ranks regimens by bootstrap median β or E₃.</li>
+              </ul>
+            </section>
+
             <section id="instructions-drusano">
-              <h2>Drusano–Greco Equation 2 fit</h2>
-              <p>This workflow currently supports two-drug checkerboards. Enter measured MICs manually and supply the assay blank on the same scale as the imported response. Enter a blank greater than 0 only when the imported responses have not already been blank-adjusted; otherwise enter 0.</p>
+              <h2>3. Drusano–Greco Equation 2 fit</h2>
+              <p>This workflow currently supports two-drug checkerboards. Supply the assay blank on the same scale as the imported response. Enter a blank greater than 0 only when the imported responses have not already been blank-adjusted; otherwise enter 0.</p>
               <ul>
                 <li>The mean of all untreated wells is the growth control. Effect is calculated as <code>E = 1 − (observation − blank) / (mean growth control − blank)</code>.</li>
-                <li>Each concentration is divided by its drug’s MIC. Every eligible drug-exposed well, including replicate wells, becomes a separate NPAG subject.</li>
-                <li>Growth controls define normalization and are not fit subjects. For absorbance, responses at or below the user-selected censor limit are retained as below-limit observations with <code>CENS = 1</code>. The Analyze tab suggests a limit from a sharp lower-tail frequency drop; review it against assay and instrument controls.</li>
+                <li>Each concentration is divided by that drug’s maximum tested concentration in the imported regimen. All eligible drug-exposed wells, including monotherapy and combination wells, contribute to one joint seven-parameter reference fit.</li>
+                <li>Growth controls define normalization and are not fit subjects. For absorbance, responses at or below the user-selected censor limit are retained as below-limit observations with <code>CENS = 1</code>. The Fit tab suggests a limit from a sharp lower-tail frequency drop; review it against assay and instrument controls.</li>
                 <li>The transformed censor boundary must satisfy <code>0 ≤ E_L &lt; 1</code>. Equation 2 remains singular at an effect of exactly 0 or 1, so drug-exposed subjects on those boundaries are excluded with an explicit directional count rather than clipped.</li>
                 <li>The additive assay-error model uses <code>α(f) = C0 + C1f + C2f² + C3f³</code> and <code>σ = sqrt(α(f)² + λ²)</code>, evaluated on each well's predicted response. For absorbance, the polynomial coefficients, lambda, observations, and censor limit are therefore all on the absorbance scale.</li>
-                <li>PMcore fits distributions for EC50₁, EC50₂, h₁, h₂, and α₁₂ from a numerical Equation 2 effect solve. Effects remain dimensionless, concentrations remain scaled to MIC, and predicted effects are converted back to the response scale for likelihood calculation.</li>
-                <li>The NPAG cycle limit defaults to 100. A fit that reaches the limit without converging can be warm-continued from its terminal support grid and fitted lambda for the selected number of additional cycles.</li>
+                <li>PMcore jointly fits EC50₁, EC50₂, h₁,₀, h₂,₀, B₁, B₂, and α₁₂ through the numerical Equation 2 effect solve. The dose-dependent Hill coefficient is <code>hᵢ(dᵢ) = hᵢ,₀ exp(Bᵢ tanh(log(dᵢ / EC50ᵢ)))</code>, with <code>−2 ≤ Bᵢ ≤ 2</code>; <code>Bᵢ = 0</code> recovers the constant-Hill model. Internal concentrations and EC50s are fractions of the tested maximum. The Fit summary multiplies EC50 results back into the corresponding imported concentration units.</li>
+                <li>The NPAG cycle limit defaults to 100. The fixed-grid parametric bootstrap defaults to 500 joint seven-parameter refits with seed 123; both values are editable. Synthetic absorbances are generated from the fitted prediction-based error model and recensored at L.</li>
               </ul>
-              <p>The bacterial growth differential equation, <code>get_e2()</code>, and Nelder–Mead root search are not used. After fitting, Regimen simulates 1,000 effects at user-entered constant free concentrations using the NPAG split-mixture distribution.</p>
+              <p>The bacterial growth differential equation, <code>get_e2()</code>, and Nelder–Mead root search are not used. After fitting, Simulate draws 1,000 effects at user-entered constant free concentrations by sampling the unclustered bootstrap parameter vectors directly. With at least two completed simulations, Compare provides a descriptive ranking by median E; hypothesis tests are omitted because Monte Carlo draws are not independent biological replicates.</p>
             </section>
 
             <section id="instructions-results">
@@ -1071,8 +1361,7 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-function MicWorkspace({ analysisType, drugs, values, suggestions, setValue, zeroTolerance, setZeroTolerance, busy, error, complete }: {
-  analysisType: AnalysisType;
+function MicWorkspace({ drugs, values, suggestions, setValue, zeroTolerance, setZeroTolerance, busy, error, complete }: {
   drugs: { name: string; unit: string }[];
   values: Record<string, number | null>;
   suggestions: Record<string, number | null>;
@@ -1084,11 +1373,11 @@ function MicWorkspace({ analysisType, drugs, values, suggestions, setValue, zero
   complete: boolean;
 }) {
   return <main className="single-workspace"><section className="content-card stage-card">
-    <div className="card-heading"><div><h1>MIC assignments</h1><p>{analysisType === "drusanoGreco" ? "Enter one measured MIC for each drug. Concentrations in Equation 2 are expressed as fractions or multiples of these values." : "Suggested MICs pool every regimen containing the drug. The most frequent inferred MIC is selected; ties use the lower value."}</p></div><span className="count-badge">{drugs.length} drugs</span></div>
+    <div className="card-heading"><div><h1>MIC assignments</h1><p>Suggested MICs pool every regimen containing the drug. The most frequent inferred MIC is selected; ties use the lower value.</p></div><span className="count-badge">{drugs.length} drugs</span></div>
     <div className="stage-content">
-      {analysisType === "bliss" && <label className="compact-setting">MIC zero tolerance (viability percentage points)<input type="number" min={0} step="any" value={zeroTolerance} onChange={(event) => setZeroTolerance(Math.max(0, Number(event.target.value) || 0))} /></label>}
-      <div className="result-table-wrap"><table className="result-table shared-drug-table"><thead><tr><th>Drug</th><th>Units</th>{analysisType === "bliss" && <th>Suggested MIC</th>}<th>Assigned MIC</th></tr></thead><tbody>
-        {drugs.map((drug) => <tr key={drug.name}><td><strong>{drug.name}</strong></td><td>{drug.unit || "—"}</td>{analysisType === "bliss" && <td>{suggestions[drug.name] == null ? "—" : suggestions[drug.name]}</td>}<td><input aria-label={`MIC for ${drug.name}`} type="number" min="0" step="any" value={values[drug.name] ?? ""} onChange={(event) => { const value = Number(event.target.value); setValue(drug.name, event.target.value === "" || !Number.isFinite(value) ? null : value); }} /></td></tr>)}
+      <label className="compact-setting">MIC zero tolerance (viability percentage points)<input type="number" min={0} step="any" value={zeroTolerance} onChange={(event) => setZeroTolerance(Math.max(0, Number(event.target.value) || 0))} /></label>
+      <div className="result-table-wrap"><table className="result-table shared-drug-table"><thead><tr><th>Drug</th><th>Units</th><th>Suggested MIC</th><th>Assigned MIC</th></tr></thead><tbody>
+        {drugs.map((drug) => <tr key={drug.name}><td><strong>{drug.name}</strong></td><td>{drug.unit || "—"}</td><td>{suggestions[drug.name] == null ? "—" : suggestions[drug.name]}</td><td><input aria-label={`MIC for ${drug.name}`} type="number" min="0" step="any" value={values[drug.name] ?? ""} onChange={(event) => { const value = Number(event.target.value); setValue(drug.name, event.target.value === "" || !Number.isFinite(value) ? null : value); }} /></td></tr>)}
       </tbody></table></div>
       {busy && <p className="help-text">Inferring MICs across all regimens…</p>}
       {error && <p className="side-warning">{error}</p>}
@@ -1605,25 +1894,6 @@ function groupedSummaries(analysis: AnalysisResult, index: number) {
 
 function formatCi(summary: { ciLeft: number | null; ciRight: number | null }) {
   return summary.ciLeft == null || summary.ciRight == null ? "—" : `${formatNumber(summary.ciLeft)} to ${formatNumber(summary.ciRight)}`;
-}
-
-function RegimenNavigator({ regimens, selectedId, onSelect, compact = false }: {
-  regimens: Array<Pick<RegimenPreview, "id" | "label">>;
-  selectedId: string;
-  onSelect: (id: string) => void;
-  compact?: boolean;
-}) {
-  const index = Math.max(0, regimens.findIndex((regimen) => regimen.id === selectedId));
-  const choose = (next: number) => onSelect(regimens[(next + regimens.length) % regimens.length].id);
-  return (
-    <div className={`regimen-navigator${compact ? " compact" : ""}`}>
-      <button type="button" aria-label="Previous regimen" onClick={() => choose(index - 1)}>‹</button>
-      <select aria-label="Regimen" value={selectedId} onChange={(event) => onSelect(event.target.value)}>
-        {regimens.map((regimen) => <option key={regimen.id} value={regimen.id}>{regimen.label}</option>)}
-      </select>
-      <button type="button" aria-label="Next regimen" onClick={() => choose(index + 1)}>›</button>
-    </div>
-  );
 }
 
 function verifyAnalysisResult(result: AnalysisResult, policy: AnalysisPolicy, micValues: (number | null)[], micTolerance: number, clinical: (number | null)[], units: string[]) {

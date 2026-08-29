@@ -8,7 +8,6 @@ use crate::AssayInput;
 pub struct DrusanoDataSettings {
     pub blank_value: f64,
     pub response_censor_limit: Option<f64>,
-    pub mic_values: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -24,7 +23,7 @@ pub struct DrusanoCensorLimitSuggestion {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DrusanoWell {
-    pub subject_id: String,
+    pub well_id: String,
     pub raw_response: f64,
     pub normalized_effect: f64,
     pub normalized_doses: Vec<f64>,
@@ -38,7 +37,7 @@ pub struct DrusanoDataSet {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub wells: Vec<DrusanoWell>,
-    pub subject_count: usize,
+    pub eligible_well_count: usize,
     pub control_count: usize,
     pub excluded_boundary_count: usize,
     pub excluded_effect_below_zero_count: usize,
@@ -48,7 +47,7 @@ pub struct DrusanoDataSet {
     pub normalized_effect_censor_limit: Option<f64>,
     pub blank_value: f64,
     pub control_mean: f64,
-    pub mic_values: Vec<f64>,
+    pub max_concentrations: Vec<f64>,
     pub warnings: Vec<String>,
 }
 
@@ -56,8 +55,8 @@ pub struct DrusanoDataSet {
 pub enum DrusanoDataError {
     #[error("The current Drusano-Greco model requires exactly two drugs; found {0}.")]
     InvalidDrugCount(usize),
-    #[error("Enter one finite, positive MIC for each drug.")]
-    InvalidMicValues,
+    #[error("Each drug must have a finite, positive maximum tested concentration.")]
+    InvalidMaximumConcentrations,
     #[error("The blank response must be finite.")]
     InvalidBlank,
     #[error("The response censor limit must be finite when supplied.")]
@@ -85,14 +84,6 @@ pub fn build_equation_dataset(
     if assay.drug_names.len() != 2 {
         return Err(DrusanoDataError::InvalidDrugCount(assay.drug_names.len()));
     }
-    if settings.mic_values.len() != 2
-        || settings
-            .mic_values
-            .iter()
-            .any(|value| !value.is_finite() || *value <= 0.0)
-    {
-        return Err(DrusanoDataError::InvalidMicValues);
-    }
     if !settings.blank_value.is_finite() {
         return Err(DrusanoDataError::InvalidBlank);
     }
@@ -106,6 +97,21 @@ pub fn build_equation_dataset(
         if !row.od.is_finite() {
             return Err(DrusanoDataError::InvalidResponse(index + 2));
         }
+    }
+    let max_concentrations = (0..2)
+        .map(|drug| {
+            assay
+                .rows
+                .iter()
+                .map(|row| row.concentrations[drug])
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
+        .collect::<Vec<_>>();
+    if max_concentrations
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(DrusanoDataError::InvalidMaximumConcentrations);
     }
 
     let controls = assay
@@ -162,14 +168,14 @@ pub fn build_equation_dataset(
             censored_count += 1;
         }
         wells.push(DrusanoWell {
-            subject_id: (index + 1).to_string(),
+            well_id: (index + 1).to_string(),
             raw_response: row.od,
             normalized_effect: effect,
             normalized_doses: row
                 .concentrations
                 .iter()
-                .zip(&settings.mic_values)
-                .map(|(dose, mic)| dose / mic)
+                .zip(&max_concentrations)
+                .map(|(dose, maximum)| dose / maximum)
                 .collect(),
             censored,
         });
@@ -184,8 +190,8 @@ pub fn build_equation_dataset(
         "OUT",
         "OUTEQ",
         "CENS",
-        "D1_MIC",
-        "D2_MIC",
+        "D1_MAX",
+        "D2_MAX",
         "EFFECT",
         "RAW_RESPONSE",
     ]
@@ -196,7 +202,7 @@ pub fn build_equation_dataset(
         .iter()
         .map(|well| {
             vec![
-                well.subject_id.clone(),
+                well.well_id.clone(),
                 "0".into(),
                 if well.censored {
                     settings
@@ -235,7 +241,7 @@ pub fn build_equation_dataset(
         drug_names: assay.drug_names.clone(),
         headers,
         rows,
-        subject_count: wells.len(),
+        eligible_well_count: wells.len(),
         control_count: controls.len(),
         excluded_boundary_count,
         excluded_effect_below_zero_count,
@@ -245,7 +251,7 @@ pub fn build_equation_dataset(
         normalized_effect_censor_limit,
         blank_value: settings.blank_value,
         control_mean,
-        mic_values: settings.mic_values.clone(),
+        max_concentrations,
         wells,
         warnings,
     })
@@ -359,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_effect_and_doses_while_retaining_replicates_as_subjects() {
+    fn normalizes_effect_and_doses_to_tested_maxima_while_retaining_replicate_wells() {
         let data = build_equation_dataset(
             &assay(vec![
                 AssayRow {
@@ -378,16 +384,16 @@ mod tests {
             &DrusanoDataSettings {
                 blank_value: 0.1,
                 response_censor_limit: None,
-                mic_values: vec![2.0, 4.0],
             },
         )
         .unwrap();
         assert_eq!(data.control_count, 1);
-        assert_eq!(data.subject_count, 2);
-        assert_eq!(data.wells[0].normalized_doses, vec![0.5, 0.5]);
+        assert_eq!(data.eligible_well_count, 2);
+        assert_eq!(data.max_concentrations, vec![1.0, 2.0]);
+        assert_eq!(data.wells[0].normalized_doses, vec![1.0, 1.0]);
         assert!((data.wells[0].normalized_effect - 0.5).abs() < 1e-12);
         assert!((data.wells[1].normalized_effect - 0.75).abs() < 1e-12);
-        assert_ne!(data.wells[0].subject_id, data.wells[1].subject_id);
+        assert_ne!(data.wells[0].well_id, data.wells[1].well_id);
         assert_eq!(data.rows[0][2], "0.6");
         assert_eq!(data.rows[0][3], "predicted_absorbance");
     }
@@ -412,11 +418,10 @@ mod tests {
             &DrusanoDataSettings {
                 blank_value: 0.0,
                 response_censor_limit: None,
-                mic_values: vec![1.0, 1.0],
             },
         )
         .unwrap();
-        assert_eq!(data.subject_count, 1);
+        assert_eq!(data.eligible_well_count, 1);
         assert_eq!(data.excluded_boundary_count, 1);
         assert_eq!(data.excluded_effect_below_zero_count, 1);
         assert_eq!(data.excluded_effect_above_one_count, 0);
@@ -424,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_at_or_below_user_limit_are_retained_as_censored_subjects() {
+    fn responses_at_or_below_user_limit_are_retained_as_censored_wells() {
         let data = build_equation_dataset(
             &assay(vec![
                 AssayRow {
@@ -439,11 +444,10 @@ mod tests {
             &DrusanoDataSettings {
                 blank_value: 0.1,
                 response_censor_limit: Some(0.2),
-                mic_values: vec![1.0, 1.0],
             },
         )
         .unwrap();
-        assert_eq!(data.subject_count, 1);
+        assert_eq!(data.eligible_well_count, 1);
         assert_eq!(data.censored_count, 1);
         assert_eq!(data.excluded_boundary_count, 0);
         assert!(data.wells[0].censored);
@@ -455,10 +459,9 @@ mod tests {
     }
 
     #[test]
-    fn test2_fixture_suggests_and_retains_all_158_lower_response_wells() {
-        let mut reader = csv::Reader::from_reader(include_bytes!(
-            "../../../../../tests/test2_combined.csv"
-        ) as &[u8]);
+    fn deta_cfz_fixture_suggests_and_retains_all_158_lower_response_wells() {
+        let mut reader =
+            csv::Reader::from_reader(include_bytes!("../../../../../tests/DETA_CFZ.csv") as &[u8]);
         let rows = reader
             .records()
             .map(|record| {
@@ -482,7 +485,6 @@ mod tests {
             &DrusanoDataSettings {
                 blank_value: 0.0,
                 response_censor_limit: Some(0.1),
-                mic_values: vec![1.0, 1.0],
             },
         )
         .unwrap();
@@ -490,7 +492,7 @@ mod tests {
         assert_eq!(data.censored_count, 158);
         assert_eq!(data.excluded_effect_below_zero_count, 10);
         assert_eq!(data.excluded_effect_above_one_count, 0);
-        assert_eq!(data.subject_count, 251);
+        assert_eq!(data.eligible_well_count, 251);
     }
 
     #[test]
@@ -510,7 +512,6 @@ mod tests {
             &DrusanoDataSettings {
                 blank_value: 0.1,
                 response_censor_limit: Some(0.1),
-                mic_values: vec![1.0, 1.0],
             },
         );
         assert!(matches!(
@@ -523,7 +524,6 @@ mod tests {
             &DrusanoDataSettings {
                 blank_value: 0.1,
                 response_censor_limit: Some(1.0),
-                mic_values: vec![1.0, 1.0],
             },
         );
         assert!(matches!(
