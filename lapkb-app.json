@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LAPKB/desktop-releases/main/schemas/app-source-v1.schema.json",
+  "schemaVersion": 1,
+  "id": "checkerboard",
+  "description": "Analyze drug interactions on checkerboard plates.",
+  "icon": "desktop/src-tauri/icons/128x128.png",
+  "tauriConfig": "desktop/src-tauri/tauri.conf.json",
+  "executableAliases": ["checkerboard-desktop"]
+}
