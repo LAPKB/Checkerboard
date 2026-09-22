@@ -8,9 +8,9 @@ export interface PlotColors {
 }
 
 export const defaultPlotColors: PlotColors = {
-  low: "#00a83b",
+  low: "#ff2600",
   midpoint: "#ffffff",
-  high: "#ff2b20",
+  high: "#00f900",
   expected: "#2458a6",
 };
 
@@ -21,6 +21,9 @@ const preferences = new LazyStore("checkerboard-preferences.json", {
 
 export async function loadPlotColors(): Promise<PlotColors> {
   const stored = await preferences.get<Partial<PlotColors>>("plotColors");
+  if (stored?.low === "#00a83b" && stored.high === "#ff2b20") {
+    return { ...defaultPlotColors, ...stored, low: defaultPlotColors.low, high: defaultPlotColors.high };
+  }
   return { ...defaultPlotColors, ...stored };
 }
 

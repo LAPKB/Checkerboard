@@ -352,6 +352,68 @@ pub fn suggest_response_censor_limit(
     }))
 }
 
+/// Suggest a censor boundary for count responses. Zero and one are treated as
+/// below-reporting-limit values, while the smallest response above one remains
+/// uncensored by placing the boundary at the preceding representable number.
+pub fn suggest_count_censor_limit(
+    assay: &AssayInput,
+) -> Result<Option<DrusanoCensorLimitSuggestion>, DrusanoDataError> {
+    let controls = assay
+        .rows
+        .iter()
+        .filter(|row| row.concentrations.iter().all(|value| value.abs() < 1e-12))
+        .collect::<Vec<_>>();
+    if controls.is_empty() {
+        return Err(DrusanoDataError::MissingGrowthControl);
+    }
+    let control_mean = controls.iter().map(|row| row.od).sum::<f64>() / controls.len() as f64;
+    if !control_mean.is_finite() || control_mean <= 0.0 {
+        return Err(DrusanoDataError::InvalidGrowthControl {
+            control: control_mean,
+            blank: 0.0,
+        });
+    }
+
+    let responses = assay
+        .rows
+        .iter()
+        .filter(|row| row.concentrations.iter().any(|value| value.abs() >= 1e-12))
+        .map(|row| row.od)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if responses.is_empty() {
+        return Ok(None);
+    }
+
+    let limit = responses
+        .iter()
+        .copied()
+        .filter(|value| *value > 1.0)
+        .min_by(f64::total_cmp)
+        .map(previous_representable_positive)
+        .unwrap_or(1.0);
+    if !limit.is_finite() || limit >= control_mean {
+        return Ok(None);
+    }
+    let normalized_effect_limit = 1.0 - limit / control_mean;
+    if !normalized_effect_limit.is_finite() || !(0.0..1.0).contains(&normalized_effect_limit) {
+        return Ok(None);
+    }
+
+    Ok(Some(DrusanoCensorLimitSuggestion {
+        response_censor_limit: limit,
+        normalized_effect_limit,
+        below_or_equal_count: responses.iter().filter(|value| **value <= limit).count(),
+        response_count: responses.len(),
+        density_ratio: 0.0,
+    }))
+}
+
+fn previous_representable_positive(value: f64) -> f64 {
+    debug_assert!(value.is_finite() && value > 0.0);
+    f64::from_bits(value.to_bits() - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +621,53 @@ mod tests {
         assert_eq!(suggestion.response_count, 52);
         assert!((0.0..1.0).contains(&suggestion.normalized_effect_limit));
         assert!(suggestion.density_ratio >= 2.0);
+    }
+
+    #[test]
+    fn count_censor_suggestion_is_below_the_lowest_reported_count_and_censors_zero_and_one() {
+        let input = assay(vec![
+            AssayRow {
+                concentrations: vec![0.0, 0.0],
+                od: 100.0,
+            },
+            AssayRow {
+                concentrations: vec![1.0, 0.0],
+                od: 0.0,
+            },
+            AssayRow {
+                concentrations: vec![2.0, 0.0],
+                od: 1.0,
+            },
+            AssayRow {
+                concentrations: vec![0.0, 1.0],
+                od: 2.0,
+            },
+            AssayRow {
+                concentrations: vec![1.0, 1.0],
+                od: 5.0,
+            },
+        ]);
+        let suggestion = suggest_count_censor_limit(&input).unwrap().unwrap();
+
+        assert!(suggestion.response_censor_limit < 2.0);
+        assert!(suggestion.response_censor_limit >= 1.0);
+        assert_eq!(suggestion.below_or_equal_count, 2);
+        assert_eq!(suggestion.response_count, 4);
+
+        let data = build_equation_dataset(
+            &input,
+            &DrusanoDataSettings {
+                blank_value: 0.0,
+                response_censor_limit: Some(suggestion.response_censor_limit),
+            },
+        )
+        .unwrap();
+        assert_eq!(data.censored_count, 2);
+        assert!(
+            data.wells
+                .iter()
+                .filter(|well| well.censored)
+                .all(|well| well.raw_response <= 1.0)
+        );
     }
 }

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { RegimenNavigator } from "./RegimenNavigator";
+import { groupAnalysisUnits } from "./analysis";
 
 import type { DrusanoCensorLimitSuggestion, InputSettings, MusycFitResult, MusycModelSettings, RegimenPreview } from "./types";
 
-type FitEntry = { id: string; label: string; fit: MusycFitResult };
+type FitEntry = { id: string; label: string; regimenLabel?: string; organism?: string | null; fit: MusycFitResult };
 type FitProgress = { phase: "reference" | "bootstrap"; iteration: number; objectiveFunction: number; completedBootstraps: number; totalBootstraps: number; regimenLabel?: string };
 
 export function MusycFitWorkspace({ fits, busy, progress, fit, inputType, settings, setSettings, suggestion, suggestionBusy, suggestionError, settingsComplete, regimens }: {
@@ -32,13 +33,13 @@ export function MusycFitWorkspace({ fits, busy, progress, fit, inputType, settin
   return <main className="workspace"><aside className="sidebar">
     <h2>MuSyC surface fit</h2>
     <p className="help-text">Fit the two-drug four-state MuSyC model. Potency interactions are directional (α₁₂ and α₂₁), efficacy is represented by E₃ and β, and cooperativity interactions by γ₁₂ and γ₂₁.</p>
-    {inputType === "absorbance" && <section className="drusano-model-settings">
+    {(inputType === "absorbance" || inputType === "count") && <section className="drusano-model-settings">
       <h3>Response censoring</h3>
-      <label>Absorbance censor limit (L)<input type="number" step="any" value={settings.responseCensorLimit ?? ""} onChange={(event) => setSettings({ ...settings, responseCensorLimit: nullableNumber(event.target.value) })} /></label>
-      <span className="field-help">Responses at or below L are retained as one-sided observations. MuSyC fits normalized inhibition, so censored wells mean observed E ≥ E<sub>L</sub>.</span>
-      {suggestionBusy ? <p className="help-text">Examining the lower-response frequency distribution…</p>
+      <label>{inputType === "count" ? "Count censor limit (L)" : "Absorbance censor limit (L)"}<input type="number" min={inputType === "count" ? 1 : undefined} step="any" value={settings.responseCensorLimit ?? ""} onChange={(event) => setSettings({ ...settings, responseCensorLimit: nullableNumber(event.target.value) })} /></label>
+      <span className="field-help">{inputType === "count" ? "The suggested L is immediately below the lowest reported count above 1. Values of 0 or 1 are censored." : "Responses at or below L are retained as one-sided observations. MuSyC fits normalized inhibition, so censored wells mean observed E ≥ E_L."}</span>
+      {suggestionBusy ? <p className="help-text">{inputType === "count" ? "Finding the lowest reported count…" : "Examining the lower-response frequency distribution…"}</p>
         : suggestion ? <div className="censor-suggestion"><div><strong>Data suggestion: {format(suggestion.responseCensorLimit)}</strong><span>{suggestion.belowOrEqualCount} of {suggestion.responseCount} responses at or below L · E<sub>L</sub> = {format(suggestion.normalizedEffectLimit)}</span></div><button className="secondary-button" disabled={busy} onClick={() => setSettings({ ...settings, responseCensorLimit: suggestion.responseCensorLimit })}>Use suggestion</button></div>
-          : <p className="help-text">{suggestionError ? `Suggestion unavailable: ${suggestionError}` : "No clear lower-response frequency break was detected. Enter an assay-validated limit."}</p>}
+          : <p className="help-text">{suggestionError ? `Suggestion unavailable: ${suggestionError}` : inputType === "count" ? "No count above 1 was available for a censor-limit suggestion." : "No clear lower-response frequency break was detected. Enter an assay-validated limit."}</p>}
     </section>}
     <section className="drusano-model-settings">
       <h3>Optimizer</h3>
@@ -90,22 +91,24 @@ function DistributionSummaryRow({ label, reference, summary }: { label: string; 
   return <tr><td><strong>{label}</strong></td><td>{format(reference)}</td><td>{format(summary?.mean ?? Number.NaN)}</td><td>{format(summary?.standardDeviation ?? Number.NaN)}</td><td>{format(summary?.median ?? Number.NaN)}</td><td>{formatInterval(summary)}</td></tr>;
 }
 
-export function MusycComparisonWorkspace({ fits }: { fits: FitEntry[] }) {
+export function MusycComparisonWorkspace({ fits, grouping, setGrouping }: { fits: FitEntry[]; grouping: "organism" | "regimen"; setGrouping: (value: "organism" | "regimen") => void }) {
   const [metric, setMetric] = useState<"beta" | "e3">("beta");
-  const ranked = fits.slice().sort((left, right) => {
+  const groups = groupAnalysisUnits(fits, grouping).map((group) => ({ ...group, entries: group.entries.slice().sort((left, right) => {
     const leftValue = metric === "beta" ? left.fit.efficacyBetaSummary?.median : left.fit.combinationEfficacySummary?.median;
     const rightValue = metric === "beta" ? right.fit.efficacyBetaSummary?.median : right.fit.combinationEfficacySummary?.median;
     return finiteRank(rightValue) - finiteRank(leftValue) || left.label.localeCompare(right.label);
-  });
+  }) }));
   return <main className="single-workspace"><section className="content-card comparison-card">
     <div className="card-heading"><div><h1>MuSyC efficacy comparison</h1><p>Rank regimens using the bootstrap distributions from their fitted response surfaces.</p></div><span className="count-badge">{fits.length} fits</span></div>
-    <div className="comparison-content"><section className="comparison-section">
+    <div className="comparison-content">
       <label className="compact-setting">Rank by<select value={metric} onChange={(event) => setMetric(event.target.value as "beta" | "e3")}><option value="beta">Bootstrap median β efficacy synergy</option><option value="e3">Bootstrap median E₃ absolute efficacy</option></select></label>
+      <label className="compact-setting">Group comparisons by<select value={grouping} onChange={(event) => setGrouping(event.target.value as "organism" | "regimen")}><option value="organism">Organism</option><option value="regimen">Regimen</option></select></label>
+      {groups.map((group) => <section className="comparison-section" key={group.key}><h2>{grouping === "organism" ? "Organism" : "Regimen"}: {group.label}</h2>
       <div className="result-table-wrap"><table className="result-table ranking-table"><thead><tr><th>Rank</th><th>Regimen</th><th>Reference β</th><th>Bootstrap median β</th><th>β 95% interval</th><th>Reference E₃</th><th>Bootstrap median E₃</th><th>E₃ 95% interval</th></tr></thead><tbody>
-        {ranked.map((entry, index) => <tr key={entry.id}><td>{index + 1}</td><td><strong>{entry.label}</strong></td><td>{format(entry.fit.efficacyBeta)}</td><td>{format(entry.fit.efficacyBetaSummary?.median ?? Number.NaN)}</td><td>{formatInterval(entry.fit.efficacyBetaSummary)}</td><td>{format(entry.fit.combinationEfficacy)}</td><td>{format(entry.fit.combinationEfficacySummary?.median ?? Number.NaN)}</td><td>{formatInterval(entry.fit.combinationEfficacySummary)}</td></tr>)}
+        {group.entries.map((entry, index) => <tr key={entry.id}><td>{index + 1}</td><td><strong>{entry.label}</strong></td><td>{format(entry.fit.efficacyBeta)}</td><td>{format(entry.fit.efficacyBetaSummary?.median ?? Number.NaN)}</td><td>{formatInterval(entry.fit.efficacyBetaSummary)}</td><td>{format(entry.fit.combinationEfficacy)}</td><td>{format(entry.fit.combinationEfficacySummary?.median ?? Number.NaN)}</td><td>{formatInterval(entry.fit.combinationEfficacySummary)}</td></tr>)}
       </tbody></table></div>
       <p className="policy-note">The selected bootstrap median determines rank. β measures efficacy synergy relative to the stronger fitted monotherapy; E₃ measures absolute combination-state efficacy. Review both because a regimen can have strong absolute efficacy without a positive β, or vice versa.</p>
-    </section></div>
+    </section>)}</div>
   </section></main>;
 }
 

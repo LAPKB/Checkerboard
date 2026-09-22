@@ -33,3 +33,9 @@ impl From<checkerboard_core::drusano_greco::DrusanoDataError> for AppError {
         Self::new("drusanoDataError", error.to_string())
     }
 }
+
+impl From<checkerboard_core::diamond::DiamondError> for AppError {
+    fn from(error: checkerboard_core::diamond::DiamondError) -> Self {
+        Self::new("diamondAnalysisError", error.to_string())
+    }
+}

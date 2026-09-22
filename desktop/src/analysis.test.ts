@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { aggregateBliss, buildMapping, compareDrusanoSimulations, compareRegimens, drusanoDiagnosticPoint, drusanoDiagnosticRegression, exceedanceAuc, exceedanceDomain, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, mostCommonLowerTie, stratificationIndexFor, validateRoles } from "./analysis";
+import { aggregateBliss, buildMapping, compareDrusanoSimulations, compareRegimens, concentrationRangeFor, diamondRankingScore, drusanoDiagnosticPoint, drusanoDiagnosticRegression, exceedanceAuc, exceedanceDomain, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, mostCommonLowerTie, propagateSharedDrugConcentrations, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
 import type { AnalysisResult, ComparisonRegimen, DrusanoFitResult, ImportPreview } from "./types";
 
 const preview: ImportPreview = {
@@ -12,6 +12,21 @@ const preview: ImportPreview = {
   suggestedDrugNames: ["DrugA", "DrugB", "Ampicillin", "Meropenem", "UnitsA", "UnitsB", "Response"],
   regimens: [],
 };
+
+describe("DiaMOND comparison ranking", () => {
+  const result = {
+    totalScores: [
+      { inhibitionLevel: 50, fic: 0.72 },
+      { inhibitionLevel: 90, fic: 0.41 },
+    ],
+  };
+
+  it("uses the explicitly selected FIC level without falling back to the other level", () => {
+    expect(diamondRankingScore(result, 50)).toBe(0.72);
+    expect(diamondRankingScore(result, 90)).toBe(0.41);
+    expect(diamondRankingScore({ totalScores: result.totalScores.slice(0, 1) }, 90)).toBe(Number.POSITIVE_INFINITY);
+  });
+});
 
 describe("column mapping", () => {
   it("requires each core role exactly once", () => {
@@ -107,6 +122,45 @@ describe("Drusano simulation comparison", () => {
   });
 });
 
+describe("Drusano shared-drug simulation inputs", () => {
+  const regimens = [
+    { id: "bdq-a", drugNames: ["BDQ", "A"] },
+    { id: "b-bdq", drugNames: ["B", "BDQ"] },
+    { id: "bdq-c", drugNames: ["BDQ", "C"] },
+    { id: "d-e", drugNames: ["D", "E"] },
+  ];
+
+  it("prepopulates blank fields for the same drug without replacing overrides", () => {
+    const populated = propagateSharedDrugConcentrations({}, regimens, "bdq-a", [0.001, null]);
+    expect(populated).toEqual({
+      "bdq-a": [0.001, null],
+      "b-bdq": [null, 0.001],
+      "bdq-c": [0.001, null],
+      "d-e": [null, null],
+    });
+
+    const overridden = propagateSharedDrugConcentrations(populated, regimens, "b-bdq", [null, 0.002]);
+    expect(overridden["b-bdq"][1]).toBe(0.002);
+    expect(overridden["bdq-a"][0]).toBe(0.001);
+    expect(overridden["bdq-c"][0]).toBe(0.001);
+
+    const sourceChanged = propagateSharedDrugConcentrations(overridden, regimens, "bdq-a", [0.003, null]);
+    expect(sourceChanged["bdq-a"][0]).toBe(0.003);
+    expect(sourceChanged["b-bdq"][1]).toBe(0.002);
+    expect(sourceChanged["bdq-c"][0]).toBe(0.001);
+  });
+
+  it("matches harmless drug-name spacing differences", () => {
+    const values = propagateSharedDrugConcentrations(
+      {},
+      [{ id: "one", drugNames: ["TBA 7371", "A"] }, { id: "two", drugNames: ["B", "TBA7371"] }],
+      "one",
+      [0.25, null],
+    );
+    expect(values.two).toEqual([null, 0.25]);
+  });
+});
+
 describe("p-value formatting", () => {
   it("uses scientific notation only below 0.0001", () => {
     expect(formatPValue("1e-3")).toBe("0.001");
@@ -120,6 +174,24 @@ describe("pooled MIC suggestion", () => {
     expect(mostCommonLowerTie([4, 2, 4, 2])).toBe(2);
     expect(mostCommonLowerTie([1, 2, 2, 4])).toBe(2);
     expect(mostCommonLowerTie([])).toBeNull();
+  });
+
+  it("uses a separate assignment for each organism exposed to a drug", () => {
+    expect(micAssignmentKey("Organism A", "Amikacin"))
+      .not.toBe(micAssignmentKey("Organism B", "Amikacin"));
+    expect(micAssignmentKey("Organism A", "TBA 7371"))
+      .toBe(micAssignmentKey("Organism A", "TBA7371"));
+  });
+
+  it("pools MIC suggestions within an organism but not across organisms", () => {
+    const suggestions = suggestMicsByOrganismDrug([
+      { organism: "Organism A", drugName: "Amikacin", mic: 2 },
+      { organism: "Organism A", drugName: "Amikacin", mic: 2 },
+      { organism: "Organism A", drugName: "Amikacin", mic: 4 },
+      { organism: "Organism B", drugName: "Amikacin", mic: 8 },
+    ]);
+    expect(suggestions[micAssignmentKey("Organism A", "Amikacin")]).toBe(2);
+    expect(suggestions[micAssignmentKey("Organism B", "Amikacin")]).toBe(8);
   });
 });
 
@@ -143,13 +215,13 @@ function regimen(id: string, bliss: number[][], drugCount = 2): ComparisonRegime
       drugNames: Array.from({ length: drugCount }, (_, index) => `Drug ${index + 1}`),
       micValues: Array.from({ length: drugCount }, (_, index) => Math.min(...processed.map((row) => row.concentrations[index]))),
       micZeroTolerance: 5,
-      clinicallyRelevantConcentrations: [],
+      concentrationRanges: [],
       concentrationUnits: [],
       control: { replicateCount: 1, meanOd: 1 },
       processed,
       summary: { sumBliss: 0, meanBliss: 0, positiveSum: 0, negativeSum: 0, combinationCount: processed.length, pValue: null, interpretation: "additive" },
       warnings: [],
-      policy: { mode: "synergyFinderPlus", responseType: "inhibition", baselineCorrection: "none", bootstrapIterations: 10, randomSeed: 123, cellAdditiveThreshold: 10, odCensorThreshold: 0, allowIncompleteGrid: true },
+      policy: { mode: "synergyFinderPlus", responseType: "inhibition", baselineCorrection: "none", bootstrapIterations: 10, randomSeed: 123, cellAdditiveThreshold: 10, blankValue: 0, odCensorThreshold: 0, allowIncompleteGrid: true },
     } satisfies AnalysisResult,
   };
 }
@@ -206,6 +278,17 @@ describe("dose-stratified regimen comparison", () => {
 });
 
 describe("three-drug summaries", () => {
+  it("uses exact per-drug bounds and preserves legacy target compatibility", () => {
+    const value = regimen("pair", [[1, 2, 4], [4, 8, 8]]).analysis;
+    value.concentrationRanges = [{ minimum: 0.5, maximum: 2 }, { minimum: null, maximum: 4 }];
+    expect(withinClinicalWindow(value, value.processed[0])).toBe(true);
+    expect(withinClinicalWindow(value, value.processed[1])).toBe(false);
+
+    value.concentrationRanges = [];
+    value.clinicallyRelevantConcentrations = [4, null];
+    expect(concentrationRangeFor(value, 0)).toEqual({ minimum: 1, maximum: 16 });
+  });
+
   it("summarizes the active pair when the stratified drug is zero", () => {
     const value = regimen("triple", [[0, 1, 4], [0, 2, 8], [1, 1, 100]], 3).analysis;
     value.processed[0].blissSem = 1;
@@ -219,7 +302,7 @@ describe("three-drug summaries", () => {
   it("outlines eligible pairwise cells when the stratifying drug is zero", () => {
     const value = regimen("triple", [[1, 2, 4]], 3).analysis;
     value.processed[0].concentrations[2] = 0;
-    value.clinicallyRelevantConcentrations = [null, null, 4];
+    value.concentrationRanges = [{ minimum: null, maximum: null }, { minimum: 1, maximum: 2 }, { minimum: 1, maximum: 16 }];
     expect(isClinicalWindowCell(value, value.processed[0], 1, 0)).toBe(true);
   });
 

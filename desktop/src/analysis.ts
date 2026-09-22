@@ -3,6 +3,7 @@ import type {
   ComparisonRegimen,
   ComparisonResult,
   ComparisonSettings,
+  ConcentrationRange,
   ColumnMapping,
   ColumnRole,
   DrusanoFitResult,
@@ -18,6 +19,14 @@ const orderedDrugRoles: ColumnRole[] = ["drugA", "drugB", "drugC"];
 
 export type DrusanoDiagnosticScale = "effect" | "absorbance";
 
+export function diamondRankingScore(
+  result: { totalScores: Array<{ inhibitionLevel: number; fic: number }> },
+  level: 50 | 90,
+) {
+  return result.totalScores.find((score) => score.inhibitionLevel === level)?.fic
+    ?? Number.POSITIVE_INFINITY;
+}
+
 export function compareDrusanoSimulations(entries: DrusanoSimulationEntry[]): DrusanoSimulationComparison {
   const usable = entries.filter((entry) => entry.simulation.effects.length > 0
     && entry.simulation.effects.every(Number.isFinite));
@@ -27,6 +36,60 @@ export function compareDrusanoSimulations(entries: DrusanoSimulationEntry[]): Dr
       || left.label.localeCompare(right.label))
     .map((entry, index) => ({ ...entry, rank: index + 1 }));
   return { rankings };
+}
+
+export function propagateSharedDrugConcentrations(
+  current: Record<string, Array<number | null>>,
+  regimens: Array<{ id: string; drugNames: string[] }>,
+  sourceId: string,
+  values: Array<number | null>,
+): Record<string, Array<number | null>> {
+  const source = regimens.find((regimen) => regimen.id === sourceId);
+  if (!source) return { ...current, [sourceId]: [...values] };
+
+  const previous = current[sourceId] ?? source.drugNames.map(() => null);
+  const changedValues = source.drugNames.flatMap((drugName, index) => {
+    const value = values[index] ?? null;
+    return value != null && value !== previous[index]
+      ? [{ drugKey: normalizedDrugKey(drugName), value }]
+      : [];
+  });
+  const next = { ...current, [sourceId]: [...values] };
+  for (const target of regimens) {
+    if (target.id === sourceId) continue;
+    const targetValues = [...(current[target.id] ?? target.drugNames.map(() => null))];
+    let populated = false;
+    for (const changed of changedValues) {
+      const targetIndex = target.drugNames.findIndex((name) => normalizedDrugKey(name) === changed.drugKey);
+      if (targetIndex >= 0 && targetValues[targetIndex] == null) {
+        targetValues[targetIndex] = changed.value;
+        populated = true;
+      }
+    }
+    if (populated || !current[target.id]) next[target.id] = targetValues;
+  }
+  return next;
+}
+
+export function groupAnalysisUnits<T extends { label: string; regimenLabel?: string; organism?: string | null }>(
+  entries: T[],
+  grouping: "organism" | "regimen",
+): Array<{ key: string; label: string; entries: T[] }> {
+  const groups = new Map<string, { key: string; label: string; entries: T[] }>();
+  for (const entry of entries) {
+    const value = grouping === "organism"
+      ? entry.organism?.trim() || "Unspecified organism"
+      : entry.regimenLabel?.trim() || entry.label;
+    const key = `${grouping}:${value}`;
+    const group = groups.get(key) ?? { key, label: value, entries: [] };
+    group.entries.push(entry);
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function normalizedDrugKey(name: string) {
+  return name.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 export interface DrusanoDiagnosticPoint {
@@ -84,7 +147,7 @@ export function validateRoles(roles: ColumnRole[]): string[] {
       errors.push(`${roleLabel(role)} must be assigned exactly once.`);
     }
   }
-  for (const role of ["drugNameA", "drugNameB", "drugNameC", "unitsA", "unitsB", "unitsC", "drugC"] as ColumnRole[]) {
+  for (const role of ["drugNameA", "drugNameB", "drugNameC", "unitsA", "unitsB", "unitsC", "drugC", "organism"] as ColumnRole[]) {
     if (roles.filter((value) => value === role).length > 1) {
       errors.push(`${roleLabel(role)} can be assigned at most once.`);
     }
@@ -121,6 +184,7 @@ export function roleLabel(role: ColumnRole): string {
     unitsA: "Units A",
     unitsB: "Units B",
     unitsC: "Units C",
+    organism: "Organism",
     response: "Response",
   }[role];
 }
@@ -153,6 +217,22 @@ export function mostCommonLowerTie(values: number[]): number | null {
     }
   }
   return selected;
+}
+
+export function micAssignmentKey(organism: string | null | undefined, drugName: string): string {
+  return JSON.stringify([organism?.trim() || "", normalizedDrugKey(drugName)]);
+}
+
+export function suggestMicsByOrganismDrug(
+  estimates: Array<{ organism?: string | null; drugName: string; mic: number | null }>,
+): Record<string, number | null> {
+  const candidates = new Map<string, number[]>();
+  for (const estimate of estimates) {
+    if (estimate.mic == null || !Number.isFinite(estimate.mic) || estimate.mic <= 0) continue;
+    const key = micAssignmentKey(estimate.organism, estimate.drugName);
+    candidates.set(key, [...(candidates.get(key) ?? []), estimate.mic]);
+  }
+  return Object.fromEntries([...candidates].map(([key, values]) => [key, mostCommonLowerTie(values)]));
 }
 
 export interface BlissAggregate {
@@ -190,16 +270,34 @@ export function inactiveDrugPairSummary(analysis: AnalysisResult, inactiveIndex:
 
 export function withinClinicalWindow(analysis: AnalysisResult, row: ProcessedCombination): boolean {
   return row.concentrations.every((dose, index) => {
-    const target = analysis.clinicallyRelevantConcentrations[index];
-    return dose <= 0 || target == null || (dose >= target / 4 && dose <= target * 4);
+    const range = concentrationRangeFor(analysis, index);
+    return dose <= 0
+      || (range.minimum == null || dose >= range.minimum)
+      && (range.maximum == null || dose <= range.maximum);
   });
 }
 
 export function isClinicalWindowCell(analysis: AnalysisResult, row: ProcessedCombination, xIndex: number, yIndex: number): boolean {
-  return analysis.clinicallyRelevantConcentrations.some((value) => value != null)
+  return hasConcentrationRanges(analysis)
     && row.concentrations[xIndex] > 0
     && row.concentrations[yIndex] > 0
     && withinClinicalWindow(analysis, row);
+}
+
+export function concentrationRangeFor(analysis: AnalysisResult, index: number): ConcentrationRange {
+  const explicit = analysis.concentrationRanges?.[index];
+  if (explicit) return explicit;
+  const legacyTarget = analysis.clinicallyRelevantConcentrations?.[index];
+  return legacyTarget == null
+    ? { minimum: null, maximum: null }
+    : { minimum: legacyTarget / 4, maximum: legacyTarget * 4 };
+}
+
+export function hasConcentrationRanges(analysis: AnalysisResult): boolean {
+  return analysis.drugNames.some((_, index) => {
+    const range = concentrationRangeFor(analysis, index);
+    return range.minimum != null || range.maximum != null;
+  });
 }
 
 export function stratificationIndexFor(regimen: ComparisonRegimen, overrides: Record<string, string>, sharedDrugs: string[]): number {

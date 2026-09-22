@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod drusano_greco;
+pub mod diamond;
 mod synergyfinder_native;
 
 const ZERO_TOLERANCE: f64 = 1e-12;
@@ -45,6 +46,8 @@ pub struct AnalysisPolicy {
     pub bootstrap_iterations: usize,
     pub random_seed: u64,
     pub cell_additive_threshold: f64,
+    #[serde(default)]
+    pub blank_value: f64,
     pub od_censor_threshold: f64,
     pub allow_incomplete_grid: bool,
 }
@@ -58,6 +61,7 @@ impl Default for AnalysisPolicy {
             bootstrap_iterations: 10,
             random_seed: 123,
             cell_additive_threshold: 10.0,
+            blank_value: 0.0,
             od_censor_threshold: 0.05,
             allow_incomplete_grid: true,
         }
@@ -89,6 +93,13 @@ pub enum BaselineCorrection {
     All,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConcentrationRange {
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisResult {
@@ -99,6 +110,8 @@ pub struct AnalysisResult {
     pub mic_zero_tolerance: f64,
     #[serde(default)]
     pub clinically_relevant_concentrations: Vec<Option<f64>>,
+    #[serde(default)]
+    pub concentration_ranges: Vec<ConcentrationRange>,
     #[serde(default)]
     pub concentration_units: Vec<String>,
     pub control: ControlStatistics,
@@ -449,6 +462,7 @@ pub fn analyze_with_progress(
         mic_values: Vec::new(),
         mic_zero_tolerance: 0.0,
         clinically_relevant_concentrations: Vec::new(),
+        concentration_ranges: Vec::new(),
         concentration_units: Vec::new(),
         control: ControlStatistics {
             replicate_count: control_values.len(),
@@ -472,12 +486,17 @@ pub fn summarize_by(result: &AnalysisResult, drug_index: usize) -> Option<Strati
         if result.policy.mode == AnalysisMode::SynergyFinderPlus
             && (!row.concentrations.iter().all(|value| *value > 0.0)
                 || !row.concentrations.iter().enumerate().all(|(index, dose)| {
-                    result
-                        .clinically_relevant_concentrations
-                        .get(index)
-                        .copied()
-                        .flatten()
-                        .is_none_or(|target| *dose >= target / 4.0 && *dose <= target * 4.0)
+                    if let Some(range) = result.concentration_ranges.get(index) {
+                        range.minimum.is_none_or(|minimum| *dose >= minimum)
+                            && range.maximum.is_none_or(|maximum| *dose <= maximum)
+                    } else {
+                        result
+                            .clinically_relevant_concentrations
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .is_none_or(|target| *dose >= target / 4.0 && *dose <= target * 4.0)
+                    }
                 }))
         {
             continue;
@@ -713,6 +732,7 @@ fn analyze_synergyfinder_central(
         mic_values: Vec::new(),
         mic_zero_tolerance: 0.0,
         clinically_relevant_concentrations: Vec::new(),
+        concentration_ranges: Vec::new(),
         concentration_units: Vec::new(),
         control: ControlStatistics {
             replicate_count: control_rows.len(),
@@ -857,6 +877,7 @@ mod tests {
             bootstrap_iterations: 10,
             random_seed: 123,
             cell_additive_threshold: 0.05,
+            blank_value: 0.0,
             od_censor_threshold: 0.05,
             allow_incomplete_grid: true,
         }
@@ -1131,5 +1152,48 @@ mod tests {
         assert!((cell.bliss_sem.unwrap() - 0.24014442329427563).abs() < 1e-12);
         assert!((cell.bliss_ci_left.unwrap() - 10.463968061904925).abs() < 1e-12);
         assert!((cell.bliss_ci_right.unwrap() - 12.4952905824432).abs() < 1e-12);
+    }
+
+    #[test]
+    fn synergyfinder_raw_response_applies_blank_and_censor_limit_before_bliss() {
+        let input = AssayInput {
+            drug_names: vec!["A".into(), "B".into()],
+            rows: vec![
+                AssayRow {
+                    concentrations: vec![0.0, 0.0],
+                    od: 1.0,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 0.0],
+                    od: 0.55,
+                },
+                AssayRow {
+                    concentrations: vec![0.0, 1.0],
+                    od: 0.55,
+                },
+                AssayRow {
+                    concentrations: vec![1.0, 1.0],
+                    od: 0.10,
+                },
+            ],
+        };
+        let policy = AnalysisPolicy {
+            response_type: ResponseType::RawOd,
+            blank_value: 0.10,
+            od_censor_threshold: 0.19,
+            baseline_correction: BaselineCorrection::None,
+            ..AnalysisPolicy::default()
+        };
+        let result = analyze(&input, policy).unwrap();
+        let combination = result
+            .processed
+            .iter()
+            .find(|row| row.concentrations == [1.0, 1.0])
+            .unwrap();
+        assert!((combination.effect - 90.0).abs() < 1e-12);
+        assert!((combination.bliss_interaction - 15.0).abs() < 1e-12);
+        assert_eq!(combination.censored_replicate_count, 1);
+        assert_eq!(result.policy.blank_value, 0.10);
+        assert_eq!(result.policy.od_censor_threshold, 0.19);
     }
 }

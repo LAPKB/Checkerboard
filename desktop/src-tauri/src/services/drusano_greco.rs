@@ -56,7 +56,7 @@ pub struct DrusanoAssayErrorSettings {
 impl Default for DrusanoAssayErrorSettings {
     fn default() -> Self {
         Self {
-            coefficients: [0.02, 0.0, 0.1, 0.0],
+            coefficients: [0.01, 0.0, 0.0, 0.0],
             lambda: 0.01,
         }
     }
@@ -1310,7 +1310,7 @@ mod tests {
         assert!((total_probability - 1.0).abs() < 1e-8);
         assert!(!result.predictions.is_empty());
         assert!(result.regression.is_some());
-        assert_eq!(result.assay_error.coefficients, [0.02, 0.0, 0.1, 0.0]);
+        assert_eq!(result.assay_error.coefficients, [0.01, 0.0, 0.0, 0.0]);
         assert_eq!(result.assay_error.initial_lambda, 0.01);
         assert!(result.assay_error.fitted_lambda.is_finite());
         assert_eq!(result.cycles, result.run_cycles);

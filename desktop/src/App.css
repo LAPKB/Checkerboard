@@ -181,7 +181,7 @@ h1 { margin: 0 0 4px; font-size: 1.05rem; }
 .stage-card { min-height: calc(100vh - 90px); }
 .stage-content { display: grid; gap: 14px; padding: 20px; }
 .project-card { max-width: 1000px; margin: 0 auto; }
-.analysis-choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; padding: 28px; }
+.analysis-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; padding: 28px; }
 .analysis-choice { grid-template-columns: auto 1fr; gap: 13px; align-items: start; min-height: 150px; margin: 0; padding: 22px; border: 2px solid #d6e0e7; border-radius: 9px; background: #f8fafb; cursor: pointer; }
 .analysis-choice.selected { border-color: #235789; background: #eef5fa; box-shadow: 0 0 0 3px rgba(35,87,137,.09); }
 .analysis-choice input { width: 18px; min-height: 18px; margin-top: 2px; accent-color: #235789; }
@@ -205,6 +205,14 @@ h1 { margin: 0 0 4px; font-size: 1.05rem; }
 .censor-suggestion strong { color: #235789; font-size: .78rem; }
 .censor-suggestion span { color: #5d6f7d; font-size: .7rem; line-height: 1.35; }
 .censor-suggestion button { min-height: 30px; padding: 4px 8px; font-size: .72rem; }
+.import-scope-panel { margin: 12px 0; padding: 12px; border: 1px solid #c7d5df; border-radius: 7px; background: #f7fafc; }
+.import-scope-panel > div:first-child { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.import-scope-panel h2 { margin: 0; font-size: 1rem; }
+.import-scope-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.import-scope-grid fieldset { display: grid; align-content: start; gap: 6px; min-width: 0; max-height: 190px; overflow: auto; }
+.header-order-control { display: flex; align-items: center; gap: 6px; color: #526675; font-size: .72rem; white-space: nowrap; }
+.header-order-control select { min-height: 30px; padding: 3px 24px 3px 7px; font-size: .72rem; }
+@media (max-width: 900px) { .import-scope-grid { grid-template-columns: 1fr; } }
 .radio-field { display: flex; gap: 16px; margin: 12px 0; padding: 10px 12px; border: 1px solid #cbd6de; border-radius: 6px; }
 .radio-field legend { padding: 0 5px; color: #334150; font-size: .82rem; font-weight: 700; }
 .radio-field label { display: flex; grid-auto-flow: column; align-items: center; gap: 6px; margin: 0; }
@@ -370,6 +378,7 @@ td.antagonistic { color: #a02d2d; font-weight: 700; }
 .facet-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; align-items: start; }
 .heatmap-figure { max-width: 100%; margin: 0; padding: 14px; overflow-x: auto; border: 1px solid #dce4ea; border-radius: 7px; background: #fafcfd; }
 .heatmap-figure figcaption { margin-bottom: 8px; font-weight: 750; text-align: center; }
+.heatmap-axes { display: grid; grid-template-columns: 2rem minmax(0, 1fr); align-items: center; }
 .heatmap-grid { display: grid; gap: 2px; align-items: stretch; }
 .axis-label { display: grid; place-items: center; min-height: 28px; color: #596975; font-size: .72rem; }
 .heat-cell { display: grid; place-items: center; min-height: 54px; padding: 3px; border: 1px solid rgba(80,80,80,.45); color: #17212b; font-size: .72rem; text-shadow: 0 1px rgba(255,255,255,.5); }
@@ -380,8 +389,59 @@ td.antagonistic { color: #a02d2d; font-weight: 700; }
 .heat-cell.clinical-bottom { border-bottom: 3px solid #111; }
 .heat-cell small { font-size: .62rem; font-weight: 500; }
 .heatmap-x-name, .heatmap-y-name { color: #40515e; font-size: .77rem; font-weight: 700; text-align: center; }
-.heatmap-x-name { margin-top: 8px; }
-.heatmap-y-name { margin-bottom: 4px; }
+.heatmap-x-name { grid-column: 2; margin-top: 8px; }
+.heatmap-y-name { grid-column: 1; grid-row: 1; white-space: nowrap; transform: rotate(-90deg); }
+.method-card { max-width: 760px; padding: 16px; border: 1px solid #cbd9e4; border-radius: 7px; background: #f2f7fb; }
+.method-card p { margin: 6px 0 0; color: #526675; line-height: 1.5; }
+.diamond-curve-grid { display: grid; grid-template-columns: repeat(2, minmax(360px, 1fr)); gap: 16px; }
+.diamond-plots-panel { display: grid; gap: 18px; }
+.diamond-plot-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.diamond-plot-toolbar h1, .diamond-method-figure h2 { margin: 0; }
+.diamond-sidebar-isobole { padding: 11px 12px; border: 1px solid #cfdce5; border-radius: 7px; background: #f7fafc; }
+.diamond-sidebar-isobole h3 { margin: 0 0 8px; color: #235789; font-size: .92rem; }
+.diamond-sidebar-isobole p { margin: 6px 0; }
+.diamond-plot-toolbar p { margin: 5px 0 0; color: #667582; }
+.level-toggle { display: inline-flex; overflow: hidden; border: 1px solid #b9c8d4; border-radius: 6px; }
+.level-toggle button { min-width: 64px; padding: 7px 10px; border: 0; border-right: 1px solid #b9c8d4; background: #fff; }
+.level-toggle button:last-child { border-right: 0; }
+.level-toggle button.tab-active { color: #fff; background: #235789; }
+.level-toggle button:disabled { color: #a8b1b8; background: #f2f4f5; }
+.diamond-method-grid { display: grid; grid-template-columns: repeat(2, minmax(390px, 1fr)); gap: 18px; align-items: start; }
+.diamond-method-figure { min-width: 0; margin: 0; padding: 14px; border: 1px solid #dce4ea; border-radius: 8px; background: #fafcfd; }
+.diamond-method-figure h2 { color: #235789; font-size: 1rem; }
+.diamond-method-figure svg { display: block; width: 100%; height: auto; margin-top: 8px; overflow: visible; }
+.diamond-method-figure svg text { fill: #4f606d; font-size: 11px; }
+.diamond-method-figure figcaption { display: grid; gap: 6px; margin-top: 8px; color: #596b78; font-size: .76rem; line-height: 1.4; }
+.diamond-plot-background { fill: #f4f7f9; stroke: #cad5dd; }
+.diamond-assay-cell { opacity: .38; stroke: rgba(255,255,255,.55); stroke-width: .6; }
+.diamond-isobole { stroke: #2369c9; stroke-width: 2.5; stroke-dasharray: 8 5; }
+.diamond-isobole-section { display: grid; gap: 12px; }
+.diamond-isobole-section > h2 { margin: 0; color: #235789; font-size: 1.05rem; }
+.diamond-isobole-section > p { margin: -5px 0 0; color: #667582; }
+.diamond-observed-contour { stroke: #d12d9c; stroke-width: 3; stroke-linecap: round; }
+.diamond-primary-marker { fill: #171a1e; stroke: #fff; stroke-width: 1.5; opacity: .68; }
+.diamond-surface-marker { fill: #fff; stroke: #1a8f46; stroke-width: 3; opacity: .72; }
+.diamond-surface-marker.disagreement { stroke: #d83a32; }
+.diamond-dose-ray { stroke: #e1a719; stroke-width: 2; }
+.diamond-single-marker { fill: #fff; stroke: #2f3941; stroke-width: 2; }
+.diamond-expected-marker { fill: #1f65c1; stroke: #fff; stroke-width: 1.5; opacity: .62; }
+.diamond-observed-marker { opacity: .68; }
+.diamond-expected-dose { stroke: #626d75; stroke-width: 1.5; stroke-dasharray: 7 5; }
+.diamond-synergy-region { fill: rgba(35,177,77,.08); }
+.diamond-antagonism-region { fill: rgba(224,59,50,.07); }
+.diamond-region-label { font-weight: 750; }
+.diamond-region-label.synergy { fill: #17773a; }
+.diamond-region-label.antagonism { fill: #a82e28; }
+.diamond-ci-whisker line { stroke: #171a1e; stroke-width: 2.2; }
+.diamond-single-plane { fill: rgba(42,103,190,.12); stroke: #2a67be; stroke-width: 2; }
+.diamond-pair-plane { fill: rgba(217,52,185,.16); stroke: #d934b9; stroke-width: 2; }
+.diamond-pair-marker { fill: #fff; stroke: #d934b9; stroke-width: 2; }
+.diamond-plot-label, .diamond-axis-label { font-weight: 750; }
+.diamond-inline-legend { display: flex; flex-wrap: wrap; gap: 7px 14px; }
+.diamond-inline-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.diamond-inline-legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; }
+.diamond-plot-unavailable { min-height: 260px; }
+.diamond-plot-unavailable p { color: #667582; }
 .plot-panel { position: relative; width: 100%; min-height: 610px; }
 .interaction-legend { display: grid; grid-template-columns: auto minmax(180px, 340px) auto; align-items: center; justify-content: center; gap: 8px; margin: -8px auto 0; color: #657582; font-size: .75rem; }
 .interaction-legend i { height: 13px; border: 1px solid #9caab5; border-radius: 3px; }
@@ -400,4 +460,5 @@ td.antagonistic { color: #a02d2d; font-weight: 700; }
   .instruction-split { grid-template-columns: minmax(0, 1fr) minmax(285px, .9fr); gap: 18px; }
   .instruction-method-grid { gap: 16px; }
   .residual-dose-grid { grid-template-columns: minmax(0, 1fr); }
+  .diamond-method-grid { grid-template-columns: minmax(0, 1fr); }
 }

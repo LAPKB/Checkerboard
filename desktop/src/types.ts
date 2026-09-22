@@ -3,13 +3,14 @@ export type ColumnRole =
   | "drugNameA" | "drugNameB" | "drugNameC"
   | "drugA" | "drugB" | "drugC"
   | "unitsA" | "unitsB" | "unitsC"
+  | "organism"
   | "response";
 
 export type AnalysisMode = "synergyFinderPlus" | "legacyOd";
 export type ResponseType = "viability" | "viabilityFraction" | "inhibition" | "inhibitionFraction" | "rawOd";
 export type BaselineCorrection = "none" | "part" | "all";
-export type AnalysisType = "bliss" | "drusanoGreco" | "musyc";
-export type InputType = "absorbance" | "fluorescence" | "cfu";
+export type AnalysisType = "bliss" | "diamond" | "drusanoGreco" | "musyc";
+export type InputType = "absorbance" | "fluorescence" | "count" | "normalized";
 export type ResponseDirection = "viability" | "inhibition";
 
 export interface InputSettings {
@@ -123,6 +124,8 @@ export interface DrusanoRegimenSimulationResult {
 export interface DrusanoSimulationEntry {
   id: string;
   label: string;
+  regimenLabel?: string;
+  organism?: string | null;
   simulation: DrusanoRegimenSimulationResult;
 }
 
@@ -181,6 +184,7 @@ export interface ImportRequest {
   startColumn: number;
   rowLimit: number;
   columnLimit: number;
+  organismColumn: number | null;
 }
 
 export interface ImportPreview {
@@ -196,6 +200,9 @@ export interface ImportPreview {
 export interface RegimenPreview {
   id: string;
   label: string;
+  regimenKey: string;
+  regimenLabel: string;
+  organism: string | null;
   drugNames: string[];
   concentrationUnits: string[];
   suggestedResponseType: ResponseType;
@@ -220,6 +227,7 @@ export interface AnalysisPolicy {
   bootstrapIterations: number;
   randomSeed: number;
   cellAdditiveThreshold: number;
+  blankValue: number;
   odCensorThreshold: number;
   allowIncompleteGrid: boolean;
 }
@@ -255,11 +263,17 @@ export interface AnalysisSummary {
   interpretation: InteractionInterpretation;
 }
 
+export interface ConcentrationRange {
+  minimum: number | null;
+  maximum: number | null;
+}
+
 export interface AnalysisResult {
   drugNames: string[];
   micValues: number[];
   micZeroTolerance: number;
-  clinicallyRelevantConcentrations: (number | null)[];
+  concentrationRanges: ConcentrationRange[];
+  clinicallyRelevantConcentrations?: (number | null)[];
   concentrationUnits: string[];
   control: { replicateCount: number; meanOd: number };
   processed: ProcessedCombination[];
@@ -268,9 +282,94 @@ export interface AnalysisResult {
   policy: AnalysisPolicy;
 }
 
+export interface DiamondPolicy {
+  responseType: ResponseType;
+  blankValue: number;
+  responseCensorThreshold: number;
+  bootstrapIterations: number;
+  randomSeed: number;
+  diagonalToleranceLog2: number;
+}
+
+export interface DiamondScore {
+  inhibitionLevel: number;
+  observedDose: number;
+  expectedDose: number;
+  fic: number;
+  log2Fic: number;
+  ciLower: number | null;
+  ciUpper: number | null;
+  interpretation: InteractionInterpretation;
+}
+
+export interface DiamondHillFit {
+  maximumInhibition: number;
+  ec50: number;
+  hillSlope: number;
+  rSquared: number;
+  ic50: number | null;
+  ic90: number | null;
+}
+
+export interface DiamondCurve {
+  drugIndices: number[];
+  drugNames: string[];
+  points: Array<{
+    concentrations: number[];
+    normalizedTotalDose: number;
+    meanInhibition: number;
+    replicateCount: number;
+  }>;
+  fit: DiamondHillFit;
+}
+
+export interface DiamondIsoboleDiagnostic {
+  drugIndices: number[];
+  drugNames: string[];
+  inhibitionLevel: number;
+  singleDrugIcs: number[];
+  contourSegments: Array<{ start: number[]; end: number[] }>;
+  rayDirection: number[];
+  rayIntersection: number[] | null;
+  surfaceFic: number | null;
+  primaryFic: number;
+  absoluteLog2Difference: number | null;
+  agreesWithPrimary: boolean | null;
+  rayIntersectionCount: number;
+  gridShape: number[];
+}
+
+export interface DiamondResult {
+  drugNames: string[];
+  doseAnchors: number[];
+  concentrationUnits: string[];
+  controlMean: number;
+  controlReplicates: number;
+  curves: DiamondCurve[];
+  assayLocations: Array<{ concentrations: number[]; meanInhibition: number; replicateCount: number }>;
+  totalScores: DiamondScore[];
+  pairwiseSummaries: Array<{ drugIndices: number[]; drugNames: string[]; scores: DiamondScore[] }>;
+  emergentScores: DiamondScore[];
+  isoboleDiagnostics?: DiamondIsoboleDiagnostic[];
+  excludedOffDiagonalLocations: number;
+  warnings: string[];
+  policy: DiamondPolicy;
+}
+
+export interface DiamondRegimen {
+  id: string;
+  label: string;
+  regimenLabel?: string;
+  organism?: string | null;
+  result: DiamondResult;
+  source?: ComparisonSource;
+}
+
 export interface ComparisonRegimen {
   id: string;
   label: string;
+  regimenLabel?: string;
+  organism?: string | null;
   analysis: AnalysisResult;
   source?: ComparisonSource;
 }

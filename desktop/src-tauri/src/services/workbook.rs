@@ -72,8 +72,10 @@ pub fn export_results(
             2,
             0,
             format!(
-                "Native Rust analysis benchmarked against synergyfinder 3.20.0; response type: {:?}; baseline correction: {:?}; bootstrap iterations: {}; seed: {}",
+                "Native Rust analysis benchmarked against synergyfinder 3.20.0; response type: {:?}; blank: {}; response censor limit: {}; baseline correction: {:?}; bootstrap iterations: {}; seed: {}",
                 analysis.policy.response_type,
+                analysis.policy.blank_value,
+                analysis.policy.od_censor_threshold,
                 analysis.policy.baseline_correction,
                 analysis.policy.bootstrap_iterations,
                 analysis.policy.random_seed
@@ -106,28 +108,26 @@ pub fn export_results(
             4,
             0,
             format!(
-                "Clinically relevant concentrations (analysis window 1/4× to 4×): {}",
+                "Analysis concentration ranges: {}",
                 analysis
                     .drug_names
                     .iter()
                     .enumerate()
                     .map(|(index, drug)| {
-                        match analysis
-                            .clinically_relevant_concentrations
+                        let unit = analysis
+                            .concentration_units
                             .get(index)
-                            .copied()
-                            .flatten()
-                        {
-                            Some(value) => {
-                                let unit = analysis
-                                    .concentration_units
-                                    .get(index)
-                                    .filter(|unit| !unit.is_empty())
-                                    .map(|unit| format!(" {unit}"))
-                                    .unwrap_or_default();
-                                format!("{drug}={value}{unit}")
-                            }
-                            None => format!("{drug}=unrestricted"),
+                            .filter(|unit| !unit.is_empty())
+                            .map(|unit| format!(" {unit}"))
+                            .unwrap_or_default();
+                        if let Some(range) = analysis.concentration_ranges.get(index) {
+                            let minimum = range.minimum.map_or_else(|| "unbounded".into(), |value| value.to_string());
+                            let maximum = range.maximum.map_or_else(|| "unbounded".into(), |value| value.to_string());
+                            format!("{drug}={minimum}–{maximum}{unit}")
+                        } else if let Some(target) = analysis.clinically_relevant_concentrations.get(index).copied().flatten() {
+                            format!("{drug}={}–{}{unit}", target / 4.0, target * 4.0)
+                        } else {
+                            format!("{drug}=unrestricted")
                         }
                     })
                     .collect::<Vec<_>>()

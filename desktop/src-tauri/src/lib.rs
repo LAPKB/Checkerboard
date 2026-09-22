@@ -18,6 +18,7 @@ pub fn run() {
             commands::fit_musyc,
             commands::simulate_drusano_regimen,
             commands::analyze_table,
+            commands::analyze_diamond,
             commands::export_results,
             commands::save_project_snapshot,
             commands::load_project_snapshot,

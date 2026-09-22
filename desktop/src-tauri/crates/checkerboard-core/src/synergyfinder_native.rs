@@ -16,6 +16,7 @@ struct Group {
     concentrations: Vec<f64>,
     original: Vec<f64>,
     responses: Vec<f64>,
+    censored_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,14 @@ pub(super) fn analyze(
     if policy.random_seed > i32::MAX as u64 {
         return Err(AnalysisError::InvalidRandomSeed(policy.random_seed));
     }
+    if !policy.blank_value.is_finite() {
+        return Err(AnalysisError::InvalidControlMean(policy.blank_value));
+    }
+    if !policy.od_censor_threshold.is_finite() || policy.od_censor_threshold < 0.0 {
+        return Err(AnalysisError::InvalidOdCensorThreshold(
+            policy.od_censor_threshold,
+        ));
+    }
     let control_rows = input
         .rows
         .iter()
@@ -47,13 +56,14 @@ pub(super) fn analyze(
         return Err(AnalysisError::MissingControl);
     }
     let control_mean = mean(&control_rows);
+    let adjusted_control_mean = control_mean - policy.blank_value;
     if policy.response_type == ResponseType::Viability && (0.5..=2.0).contains(&control_mean) {
         return Err(AnalysisError::ViabilityScaleMismatch);
     }
     if policy.response_type == ResponseType::RawOd
-        && (!control_mean.is_finite() || control_mean <= 0.0)
+        && (!adjusted_control_mean.is_finite() || adjusted_control_mean <= 0.0)
     {
-        return Err(AnalysisError::InvalidControlMean(control_mean));
+        return Err(AnalysisError::InvalidControlMean(adjusted_control_mean));
     }
 
     let mut grouped = HashMap::<ConcentrationKey, Group>::new();
@@ -69,11 +79,20 @@ pub(super) fn analyze(
                 }
             })
             .collect::<Vec<_>>();
+        let (raw_response, was_censored) = if policy.response_type == ResponseType::RawOd
+            && row.od <= policy.od_censor_threshold
+        {
+            (policy.od_censor_threshold, true)
+        } else {
+            (row.od, false)
+        };
         let original = match policy.response_type {
             ResponseType::Viability | ResponseType::Inhibition => row.od,
             ResponseType::ViabilityFraction => 100.0 * row.od,
             ResponseType::InhibitionFraction => 100.0 * row.od,
-            ResponseType::RawOd => 100.0 * row.od / control_mean,
+            ResponseType::RawOd => {
+                100.0 * (raw_response - policy.blank_value) / adjusted_control_mean
+            }
         };
         let response = match policy.response_type {
             ResponseType::Viability | ResponseType::ViabilityFraction | ResponseType::RawOd => {
@@ -86,9 +105,13 @@ pub(super) fn analyze(
             concentrations,
             original: Vec::new(),
             responses: Vec::new(),
+            censored_count: 0,
         });
         group.original.push(original);
         group.responses.push(response);
+        if was_censored {
+            group.censored_count += 1;
+        }
     }
     let mut groups = grouped.into_values().collect::<Vec<_>>();
     groups.sort_by(|left, right| compare_coordinates(&left.concentrations, &right.concentrations));
@@ -198,7 +221,7 @@ pub(super) fn analyze(
             concentrations: group.concentrations.clone(),
             mean_original_od: mean(&group.original),
             mean_censored_od: effect,
-            censored_replicate_count: 0,
+            censored_replicate_count: group.censored_count,
             effect,
             single_agent_effects,
             bliss_expected,
@@ -242,6 +265,7 @@ pub(super) fn analyze(
         mic_values: Vec::new(),
         mic_zero_tolerance: 0.0,
         clinically_relevant_concentrations: Vec::new(),
+        concentration_ranges: Vec::new(),
         concentration_units: Vec::new(),
         control: ControlStatistics {
             replicate_count: control_rows.len(),

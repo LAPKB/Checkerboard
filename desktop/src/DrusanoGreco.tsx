@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   compareDrusanoSimulations,
+  groupAnalysisUnits,
   drusanoDiagnosticPoint,
   drusanoDiagnosticRegression,
   type DrusanoDiagnosticPoint,
@@ -46,7 +47,7 @@ error_sd = sqrt(lambda^2 + (
        + C3*predicted_absorbance^3
 )^2)`;
 
-type FitEntry = { id: string; label: string; fit: DrusanoFitResult };
+type FitEntry = { id: string; label: string; regimenLabel?: string; organism?: string | null; fit: DrusanoFitResult };
 type FitProgress = { phase: "reference" | "bootstrap"; cycle: number; objectiveFunction: number; completedBootstraps: number; totalBootstraps: number; regimenLabel?: string };
 
 export function ProjectWorkspace({ analysisType, setAnalysisType }: {
@@ -59,6 +60,10 @@ export function ProjectWorkspace({ analysisType, setAnalysisType }: {
       <label className={analysisType === "bliss" ? "analysis-choice selected" : "analysis-choice"}>
         <input type="radio" name="analysis-type" checked={analysisType === "bliss"} onChange={() => setAnalysisType("bliss")} />
         <span><strong>Bliss</strong><small>Analyze two- and three-drug checkerboards with SynergyFinder+-compatible Bliss scores and regimen ranking.</small></span>
+      </label>
+      <label className={analysisType === "diamond" ? "analysis-choice selected" : "analysis-choice"}>
+        <input type="radio" name="analysis-type" checked={analysisType === "diamond"} onChange={() => setAnalysisType("diamond")} />
+        <span><strong>DiaMOND</strong><small>Fit equipotent diagonal dose responses and rank two- and three-drug combinations with Loewe FIC50 and FIC90.</small></span>
       </label>
       <label className={analysisType === "drusanoGreco" ? "analysis-choice selected" : "analysis-choice"}>
         <input type="radio" name="analysis-type" checked={analysisType === "drusanoGreco"} onChange={() => setAnalysisType("drusanoGreco")} />
@@ -77,31 +82,16 @@ export function InputTypeControls({ settings, setSettings, analysisType }: {
   setSettings: (value: InputSettings) => void;
   analysisType: AnalysisType;
 }) {
-  const optical = settings.inputType === "absorbance" || settings.inputType === "fluorescence";
   const update = (patch: Partial<InputSettings>) => setSettings({ ...settings, ...patch });
   return <section className="input-settings">
     <h2>Input response</h2>
     <label>Input type<select value={settings.inputType} onChange={(event) => update({ inputType: event.target.value as InputSettings["inputType"] })}>
       <option value="" disabled>Choose input type…</option>
-      <option value="absorbance">Absorbance</option><option value="fluorescence">Fluorescence</option><option value="cfu">CFU</option>
+      <option value="absorbance">Absorbance</option><option value="fluorescence">Fluorescence</option><option value="count">Count</option>
+      {(analysisType === "bliss" || analysisType === "diamond") && <option value="normalized">Control-normalized viability (auto-detect scale)</option>}
     </select></label>
-    {analysisType !== "bliss" ? <>
-      <div className="normalization-note">
-        <strong>Fixed response normalization</strong>
-        <p>Every response type is converted to effect as E = 1 − (observation − blank) / (mean growth control − blank).</p>
-        <p>For absorbance, responses at or below the user-selected censor limit are retained with CENS = 1. Configure the limit and assay error model on Fit.</p>
-      </div>
-      <label className="include-control"><input type="checkbox" checked disabled />Blank adjustment</label>
-      <label className="include-control"><input type="checkbox" checked disabled />Relative to growth control</label>
-      <label>Blank response<input type="number" step="any" value={settings.blankValue ?? ""} onChange={(event) => update({ blankValue: nullableNumber(event.target.value) })} /><span className="field-help">Enter a value greater than 0 only when the imported responses have not already been blank-adjusted. If they are already blank-adjusted, enter 0.</span></label>
-    </> : optical && <>
-      <label className="include-control"><input type="checkbox" checked={settings.blankAdjustment} onChange={(event) => update({ blankAdjustment: event.target.checked })} />Blank adjustment</label>
-      <label className="include-control"><input type="checkbox" checked={settings.relativeToGrowthControl} onChange={(event) => update({ relativeToGrowthControl: event.target.checked })} />Relative to growth control</label>
-      <fieldset className="radio-field"><legend>Response direction</legend>
-        <label><input type="radio" name="response-direction" checked={settings.responseDirection === "viability"} onChange={() => update({ responseDirection: "viability" })} />Viability</label>
-        <label><input type="radio" name="response-direction" checked={settings.responseDirection === "inhibition"} onChange={() => update({ responseDirection: "inhibition" })} />Inhibition</label>
-      </fieldset>
-    </>}
+    {settings.inputType === "normalized" && <p className="field-help">The all-zero drug controls determine the scale: a mean near 1 is treated as fractional viability and a mean near 100 as percentage viability.</p>}
+    {settings.inputType !== "count" && settings.inputType !== "normalized" && <label>Blank response<input type="number" step="any" value={settings.blankValue ?? ""} onChange={(event) => update({ blankValue: nullableNumber(event.target.value) })} /><span className="field-help">Enter a value greater than 0 only when the imported responses have not already been blank-adjusted. If they are already blank-adjusted, enter 0.</span></label>}
   </section>;
 }
 
@@ -143,13 +133,13 @@ export function DrusanoFitWorkspace({
   return <main className="workspace"><aside className="sidebar">
     <h2>NPAG equation fit</h2>
     <p className="help-text">PMcore jointly estimates EC50₁, EC50₂, h₁,₀, h₂,₀, B₁, B₂, and α₁₂ from all eligible drug-exposed wells in one reference fit. It then performs fixed-dose-grid parametric bootstrap refits to estimate uncertainty.</p>
-    {inputType === "absorbance" && <section className="drusano-model-settings">
+    {(inputType === "absorbance" || inputType === "count") && <section className="drusano-model-settings">
       <h3>Response censoring</h3>
-      <label>Absorbance censor limit (L)<input type="number" step="any" value={settings.responseCensorLimit ?? ""} onChange={(event) => setSettings({ ...settings, responseCensorLimit: nullableNumber(event.target.value) })} /></label>
-      <span className="field-help">Responses at or below L are retained as CENS = 1. The transformed boundary must satisfy 0 ≤ E<sub>L</sub> &lt; 1.</span>
-      {suggestionBusy ? <p className="help-text">Examining the lower-response frequency distribution…</p>
-        : suggestion ? <div className="censor-suggestion"><div><strong>Data suggestion: {format(suggestion.responseCensorLimit)}</strong><span>{suggestion.belowOrEqualCount} of {suggestion.responseCount} drug-exposed responses at or below L · E<sub>L</sub> = {format(suggestion.normalizedEffectLimit)} · density drop {format(suggestion.densityRatio)}×</span></div><button className="secondary-button" disabled={busy} onClick={() => setSettings({ ...settings, responseCensorLimit: suggestion.responseCensorLimit })}>Use suggestion</button></div>
-          : <p className="help-text">{suggestionError ? `Suggestion unavailable: ${suggestionError}` : "No clear lower-response frequency break was detected. Enter an assay-validated limit."}</p>}
+      <label>{inputType === "count" ? "Count censor limit (L)" : "Absorbance censor limit (L)"}<input type="number" min={inputType === "count" ? 1 : undefined} step="any" value={settings.responseCensorLimit ?? ""} onChange={(event) => setSettings({ ...settings, responseCensorLimit: nullableNumber(event.target.value) })} /></label>
+      <span className="field-help">{inputType === "count" ? "The suggested L is immediately below the lowest reported count above 1. Values of 0 or 1 are censored; all responses at or below L are retained as CENS = 1." : <>Responses at or below L are retained as CENS = 1. The transformed boundary must satisfy 0 ≤ E<sub>L</sub> &lt; 1.</>}</span>
+      {suggestionBusy ? <p className="help-text">{inputType === "count" ? "Finding the lowest reported count…" : "Examining the lower-response frequency distribution…"}</p>
+        : suggestion ? <div className="censor-suggestion"><div><strong>Data suggestion: {format(suggestion.responseCensorLimit)}</strong><span>{suggestion.belowOrEqualCount} of {suggestion.responseCount} drug-exposed responses at or below L · E<sub>L</sub> = {format(suggestion.normalizedEffectLimit)}{inputType === "absorbance" ? ` · density drop ${format(suggestion.densityRatio)}×` : ""}</span></div><button className="secondary-button" disabled={busy} onClick={() => setSettings({ ...settings, responseCensorLimit: suggestion.responseCensorLimit })}>Use suggestion</button></div>
+          : <p className="help-text">{suggestionError ? `Suggestion unavailable: ${suggestionError}` : inputType === "count" ? "No count above 1 was available for a censor-limit suggestion." : "No clear lower-response frequency break was detected. Enter an assay-validated limit."}</p>}
     </section>}
     <section className="drusano-model-settings">
       <h3>Assay error model</h3>
@@ -398,7 +388,7 @@ export function DrusanoRegimenWorkspace({ fits, regimens, simulations, concentra
 
   return <main className="workspace"><aside className="sidebar">
     <h2>Constant-concentration regimen</h2>
-    <p className="help-text">Enter each constant free concentration in the imported concentration units. The simulator divides it by that drug’s maximum tested concentration before evaluating Equation 2.</p>
+    <p className="help-text">Enter each constant free concentration in the imported concentration units. A value prepopulates blank fields for the same drug in other regimens; each regimen can then be overridden independently. The simulator divides it by that drug’s maximum tested concentration before evaluating Equation 2.</p>
     {fits.length > 1 && <RegimenNavigator regimens={fits} selectedId={selected.id} onSelect={setSelectedId} compact label="Fitted regimen" />}
     <section className="drusano-model-settings">
       {selected.fit.data.drugNames.map((name, index) => <label key={name}>{name} free concentration{units[index] ? ` (${units[index]})` : ""}<input type="number" min="0" step="any" value={entered[index] ?? ""} onChange={(event) => updateConcentration(index, nullableNumber(event.target.value))} /><span className="field-help">Tested maximum: {format(selected.fit.data.maxConcentrations[index])}{units[index] ? ` ${units[index]}` : ""}{entered[index] != null && Number.isFinite(entered[index]) ? ` · ${format(entered[index]! / selected.fit.data.maxConcentrations[index])} × tested maximum` : ""}</span></label>)}
@@ -424,17 +414,19 @@ export function DrusanoRegimenWorkspace({ fits, regimens, simulations, concentra
   </section></main>;
 }
 
-export function DrusanoComparisonWorkspace({ entries }: { entries: DrusanoSimulationEntry[] }) {
-  const result = compareDrusanoSimulations(entries);
+export function DrusanoComparisonWorkspace({ entries, grouping, setGrouping }: { entries: DrusanoSimulationEntry[]; grouping: "organism" | "regimen"; setGrouping: (value: "organism" | "regimen") => void }) {
+  const groups = groupAnalysisUnits(entries, grouping);
   return <main className="single-workspace"><section className="content-card comparison-card">
     <div className="card-heading"><div><h1>Drusano regimen comparison</h1><p>Regimens are ranked by median simulated efficacy at the concentrations entered on Simulate.</p></div><span className="count-badge">{entries.length} simulations</span></div>
-    <div className="comparison-content"><section className="comparison-section">
-      <h2>Median predicted efficacy ranking</h2>
+    <div className="comparison-content">
+      <label className="compact-setting">Group comparisons by<select value={grouping} onChange={(event) => setGrouping(event.target.value as "organism" | "regimen")}><option value="organism">Organism</option><option value="regimen">Regimen</option></select></label>
+      {groups.map((group) => { const result = compareDrusanoSimulations(group.entries); return <section className="comparison-section" key={group.key}>
+      <h2>{grouping === "organism" ? "Organism" : "Regimen"}: {group.label}</h2>
       <div className="result-table-wrap"><table className="result-table ranking-table"><thead><tr><th>Rank</th><th>Regimen</th><th>Median E</th><th>Mean E</th><th>95% interval</th><th>Simulations</th></tr></thead><tbody>
         {result.rankings.map((entry) => <tr key={entry.id}><td>{entry.rank}</td><td><strong>{entry.label}</strong></td><td>{format(entry.simulation.summary.median)}</td><td>{format(entry.simulation.summary.mean)}</td><td>{format(entry.simulation.summary.percentile2_5)}–{format(entry.simulation.summary.percentile97_5)}</td><td>{entry.simulation.simulationCount.toLocaleString()}</td></tr>)}
       </tbody></table></div>
       <p className="policy-note">This is a descriptive model-based ranking at the concentrations selected on Simulate. Inferential tests are intentionally omitted because the 1,000 Monte Carlo draws are resamples from fitted bootstrap vectors, not independent biological replicates.</p>
-    </section></div>
+    </section>; })}</div>
   </section></main>;
 }
 

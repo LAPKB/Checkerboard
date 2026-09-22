@@ -1,6 +1,7 @@
 use checkerboard_core::{
-    AnalysisPolicy, AnalysisResult, ColumnMapping, ResponseType, analyze_with_progress,
+    AnalysisPolicy, AnalysisResult, ColumnMapping, ConcentrationRange, ResponseType, analyze_with_progress,
     assay_from_rows,
+    diamond::{DiamondPolicy, DiamondResult},
     drusano_greco::{
         DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings, build_equation_dataset,
         suggest_response_censor_limit,
@@ -39,6 +40,9 @@ pub struct ImportPreview {
 pub struct RegimenPreview {
     pub id: String,
     pub label: String,
+    pub regimen_key: String,
+    pub regimen_label: String,
+    pub organism: Option<String>,
     pub drug_names: Vec<String>,
     pub concentration_units: Vec<String>,
     pub suggested_response_type: ResponseType,
@@ -59,9 +63,32 @@ pub struct AnalyzeTableRequest {
     #[serde(default)]
     pub regimen_drug_names: Vec<String>,
     #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
+    #[serde(default)]
     pub concentration_units: Vec<String>,
     #[serde(default)]
     pub clinically_relevant_concentrations: Vec<Option<f64>>,
+    #[serde(default)]
+    pub concentration_ranges: Vec<ConcentrationRange>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeDiamondRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub policy: DiamondPolicy,
+    pub dose_anchors: Vec<f64>,
+    #[serde(default)]
+    pub regimen_drug_names: Vec<String>,
+    #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
+    #[serde(default)]
+    pub concentration_units: Vec<String>,
 }
 
 fn default_mic_zero_tolerance() -> f64 {
@@ -74,9 +101,15 @@ pub struct InferMicsRequest {
     pub import: ImportRequest,
     pub mapping: ColumnMapping,
     pub response_type: ResponseType,
+    #[serde(default)]
+    pub blank_value: f64,
     pub zero_tolerance: f64,
     #[serde(default)]
     pub regimen_drug_names: Vec<String>,
+    #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +122,10 @@ pub struct PrepareDrusanoDataRequest {
     pub assay_error: DrusanoAssayErrorSettings,
     #[serde(default)]
     pub regimen_drug_names: Vec<String>,
+    #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
     #[serde(default = "default_drusano_max_cycles")]
     pub max_cycles: usize,
     #[serde(default)]
@@ -118,7 +155,13 @@ pub struct SuggestDrusanoCensorLimitRequest {
     pub mapping: ColumnMapping,
     pub blank_value: f64,
     #[serde(default)]
+    pub count_data: bool,
+    #[serde(default)]
     pub regimen_drug_names: Vec<String>,
+    #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +172,10 @@ pub struct FitMusycRequest {
     pub settings: DrusanoDataSettings,
     #[serde(default)]
     pub regimen_drug_names: Vec<String>,
+    #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
     #[serde(default = "default_musyc_max_iterations")]
     pub max_iterations: usize,
     #[serde(default = "default_musyc_bootstrap_iterations")]
@@ -198,7 +245,15 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
     let table = importer::read_table(&request)?;
     let total_rows = table.rows.len();
     let total_columns = table.headers.len();
-    let suggested_roles = suggest_roles(&table.headers);
+    let mut suggested_roles = suggest_roles(&table.headers);
+    if let Some(column) = request.organism_column.filter(|column| *column < suggested_roles.len()) {
+        for role in &mut suggested_roles {
+            if role == "organism" {
+                *role = "ignore".into();
+            }
+        }
+        suggested_roles[column] = "organism".into();
+    }
     let mut suggested_drug_names = table
         .headers
         .iter()
@@ -242,12 +297,20 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
         })
         .collect::<Vec<_>>();
     let response_column = suggested_roles.iter().position(|role| role == "response");
-    let mut regimens = describe_regimens(&table, &drug_columns, response_column);
+    let organism_column = suggested_roles.iter().position(|role| role == "organism");
+    let mut regimens = describe_regimens(
+        &table,
+        &drug_columns,
+        response_column,
+        organism_column,
+    );
     if regimens.is_empty() {
         regimens.push(generic_regimen_preview(
             &table,
             &drug_columns,
             response_column,
+            None,
+            None,
         ));
     }
     Ok(ImportPreview {
@@ -270,7 +333,12 @@ pub fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppErro
         ));
     }
     let table = importer::read_table(&request.import)?;
-    let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
     let assay = assay_from_rows(&rows, &request.mapping)?;
     let control_values = assay
         .rows
@@ -307,9 +375,10 @@ pub fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppErro
                     ResponseType::Inhibition => 100.0 - row.od,
                     ResponseType::InhibitionFraction => 100.0 * (1.0 - row.od),
                     ResponseType::RawOd => {
-                        let control = control_mean.filter(|value| value.is_finite() && *value > 0.0)
+                        let control = control_mean.map(|value| value - request.blank_value)
+                            .filter(|value| value.is_finite() && *value > 0.0)
                             .ok_or_else(|| AppError::new("invalidControl", "Raw-OD MIC inference requires a positive untreated-control mean."))?;
-                        100.0 * row.od / control
+                        100.0 * (row.od - request.blank_value) / control
                     }
                 };
                 let entry = groups.entry(concentration.to_bits()).or_insert((concentration, 0.0, 0));
@@ -347,16 +416,30 @@ pub fn suggest_drusano_censor_limit(
     request: SuggestDrusanoCensorLimitRequest,
 ) -> Result<Option<DrusanoCensorLimitSuggestion>, AppError> {
     let table = importer::read_table(&request.import)?;
-    let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
     let assay = assay_from_rows(&rows, &request.mapping)?;
-    Ok(suggest_response_censor_limit(&assay, request.blank_value)?)
+    Ok(if request.count_data {
+        checkerboard_core::drusano_greco::suggest_count_censor_limit(&assay)?
+    } else {
+        suggest_response_censor_limit(&assay, request.blank_value)?
+    })
 }
 
 fn prepare_drusano_data_inner(
     request: PrepareDrusanoDataRequest,
 ) -> Result<DrusanoDataSet, AppError> {
     let table = importer::read_table(&request.import)?;
-    let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
     let assay = assay_from_rows(&rows, &request.mapping)?;
     Ok(build_equation_dataset(&assay, &request.settings)?)
 }
@@ -413,7 +496,12 @@ pub async fn fit_musyc(
 ) -> Result<MusycFitResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let table = importer::read_table(&request.import)?;
-        let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
+        let rows = select_regimen_rows(
+            &table,
+            &request.regimen_drug_names,
+            request.organism.as_deref(),
+            request.organism_column,
+        )?;
         let assay = assay_from_rows(&rows, &request.mapping)?;
         let data = build_equation_dataset(&assay, &request.settings)?;
         musyc::fit_with_bootstrap(
@@ -460,13 +548,65 @@ pub async fn analyze_table(
         .map_err(|error| AppError::new("analysisWorkerError", error.to_string()))?
 }
 
+#[tauri::command]
+pub async fn analyze_diamond(
+    request: AnalyzeDiamondRequest,
+    on_progress: Channel<AnalysisProgress>,
+) -> Result<DiamondResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let table = importer::read_table(&request.import)?;
+        let rows = select_regimen_rows(
+            &table,
+            &request.regimen_drug_names,
+            request.organism.as_deref(),
+            request.organism_column,
+        )?;
+        validate_regimen_units(
+            &table.headers,
+            &rows,
+            &request.mapping,
+            &request.concentration_units,
+        )?;
+        let assay = assay_from_rows(&rows, &request.mapping)?;
+        let mut result = checkerboard_core::diamond::analyze(
+            &assay,
+            &request.dose_anchors,
+            request.policy,
+            |completed, total| {
+                let _ = on_progress.send(AnalysisProgress {
+                    completed_iterations: completed,
+                    total_iterations: total,
+                });
+            },
+        )?;
+        result.concentration_units = if request.concentration_units.len() == assay.drug_names.len() {
+            request.concentration_units
+        } else {
+            vec![String::new(); assay.drug_names.len()]
+        };
+        Ok(result)
+    })
+    .await
+    .map_err(|error| AppError::new("diamondWorkerError", error.to_string()))?
+}
+
 fn analyze_table_inner(
     request: AnalyzeTableRequest,
     on_progress: Option<Channel<AnalysisProgress>>,
 ) -> Result<AnalysisResult, AppError> {
     let table = importer::read_table(&request.import)?;
-    let rows = select_regimen_rows(&table, &request.regimen_drug_names)?;
-    validate_regimen_units(&table.headers, &rows, &request.concentration_units)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
+    validate_regimen_units(
+        &table.headers,
+        &rows,
+        &request.mapping,
+        &request.concentration_units,
+    )?;
     let mut assay = assay_from_rows(&rows, &request.mapping)?;
     if request.mic_values.len() != assay.drug_names.len()
         || request
@@ -487,32 +627,47 @@ fn analyze_table_inner(
     }
     let policy = request.policy.unwrap_or_default();
     validate_response_values(&assay, policy.response_type)?;
-    let clinically_relevant = if request.clinically_relevant_concentrations.is_empty() {
-        vec![None; assay.drug_names.len()]
-    } else {
-        request.clinically_relevant_concentrations
-    };
-    if clinically_relevant.len() != assay.drug_names.len()
-        || clinically_relevant
+    let legacy_clinically_relevant = request.clinically_relevant_concentrations;
+    let concentration_ranges = if !request.concentration_ranges.is_empty() {
+        request.concentration_ranges
+    } else if !legacy_clinically_relevant.is_empty() {
+        legacy_clinically_relevant
             .iter()
-            .flatten()
-            .any(|value| !value.is_finite() || *value <= 0.0)
+            .map(|target| ConcentrationRange {
+                minimum: target.map(|value| value / 4.0),
+                maximum: target.map(|value| value * 4.0),
+            })
+            .collect()
+    } else {
+        vec![ConcentrationRange::default(); assay.drug_names.len()]
+    };
+    if concentration_ranges.len() != assay.drug_names.len()
+        || concentration_ranges
+            .iter()
+            .any(|range| {
+                range.minimum.is_some_and(|value| !value.is_finite() || value < 0.0)
+                    || range.maximum.is_some_and(|value| !value.is_finite() || value <= 0.0)
+                    || matches!((range.minimum, range.maximum), (Some(minimum), Some(maximum)) if minimum > maximum)
+            })
     {
         return Err(AppError::new(
-            "invalidClinicallyRelevantConcentrations",
-            "Clinically relevant concentrations must be blank or finite and positive, with one field per drug.",
+            "invalidConcentrationRanges",
+            "Concentration ranges must have finite, nonnegative lower bounds and positive upper bounds, with the minimum no greater than the maximum.",
         ));
     }
     let full_assay = assay.clone();
-    let has_clinical_window = clinically_relevant.iter().any(Option::is_some);
+    let has_clinical_window = concentration_ranges
+        .iter()
+        .any(|range| range.minimum.is_some() || range.maximum.is_some());
     if has_clinical_window {
         assay.rows.retain(|row| {
             row.concentrations
                 .iter()
-                .zip(&clinically_relevant)
-                .all(|(dose, target)| {
+                .zip(&concentration_ranges)
+                .all(|(dose, range)| {
                     *dose <= 0.0
-                        || target.is_none_or(|value| *dose >= value / 4.0 && *dose <= value * 4.0)
+                        || (range.minimum.is_none_or(|minimum| *dose >= minimum)
+                            && range.maximum.is_none_or(|maximum| *dose <= maximum))
                 })
         });
         if !assay
@@ -521,8 +676,8 @@ fn analyze_table_inner(
             .any(|row| row.concentrations.iter().all(|value| *value > 0.0))
         {
             return Err(AppError::new(
-                "noClinicallyRelevantCombinations",
-                "No combination wells fall within two two-fold dilutions below or above the clinically relevant concentrations.",
+                "noCombinationsInConcentrationRange",
+                "No combination wells fall within the specified concentration ranges.",
             ));
         }
     }
@@ -562,13 +717,14 @@ fn analyze_table_inner(
             })
             .collect();
         result.warnings.push(checkerboard_core::AnalysisWarning {
-            code: "clinicallyRelevantWindow".into(),
-            message: "Overall statistics are restricted to wells within two two-fold dilutions below or above each specified clinically relevant concentration; the full observed surface remains available for context.".into(),
+            code: "concentrationRange".into(),
+            message: "Overall statistics are restricted to wells within the specified concentration range for each drug; the full observed surface remains available for context.".into(),
         });
     }
     result.mic_values = request.mic_values;
     result.mic_zero_tolerance = request.mic_zero_tolerance;
-    result.clinically_relevant_concentrations = clinically_relevant;
+    result.clinically_relevant_concentrations = Vec::new();
+    result.concentration_ranges = concentration_ranges;
     result.concentration_units = if request.concentration_units.len() == assay.drug_names.len() {
         request.concentration_units
     } else {
@@ -580,21 +736,40 @@ fn analyze_table_inner(
 fn select_regimen_rows(
     table: &importer::ImportedTable,
     regimen_drug_names: &[String],
+    organism: Option<&str>,
+    organism_column: Option<usize>,
 ) -> Result<Vec<Vec<String>>, AppError> {
-    if regimen_drug_names.is_empty() {
+    if regimen_drug_names.is_empty() && organism.is_none() {
         return Ok(table.rows.clone());
     }
-    let Ok(name_columns) = regimen_name_columns(&table.headers) else {
+    let name_columns = regimen_name_columns(&table.headers).ok();
+    if !regimen_drug_names.is_empty() && name_columns.is_none() && organism.is_none() {
         // A file without confidently inferred drug-name columns is presented as
         // one regimen. Column mapping still determines concentrations and the
         // response; no rows should be rejected merely because headers differ.
         return Ok(table.rows.clone());
-    };
+    }
+    if organism.is_some() && organism_column.is_none() {
+        return Err(AppError::new(
+            "missingOrganismColumn",
+            "An organism was selected, but no Organism column is mapped.",
+        ));
+    }
     let selected = table
         .rows
         .iter()
         .filter(|row| {
-            row_drug_names(row, &name_columns).is_some_and(|names| names == regimen_drug_names)
+            let regimen_matches = regimen_drug_names.is_empty()
+                || name_columns.as_ref().is_none_or(|columns| {
+                    row_drug_names(row, columns)
+                        .is_some_and(|names| names == regimen_drug_names)
+                });
+            let organism_matches = organism.is_none_or(|selected_organism| {
+                organism_column
+                    .and_then(|column| row.get(column))
+                    .is_some_and(|value| value.trim() == selected_organism)
+            });
+            regimen_matches && organism_matches
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -602,8 +777,13 @@ fn select_regimen_rows(
         Err(AppError::new(
             "missingRegimen",
             format!(
-                "No rows were found for regimen {}.",
-                regimen_drug_names.join(" + ")
+                "No rows were found for {}{}.",
+                if regimen_drug_names.is_empty() {
+                    "the selected regimen".into()
+                } else {
+                    format!("regimen {}", regimen_drug_names.join(" + "))
+                },
+                organism.map_or_else(String::new, |value| format!(" and organism {value}"))
             ),
         ))
     } else {
@@ -615,32 +795,58 @@ fn describe_regimens(
     table: &importer::ImportedTable,
     drug_columns: &[usize],
     response_column: Option<usize>,
+    organism_column: Option<usize>,
 ) -> Vec<RegimenPreview> {
     let Ok(name_columns) = regimen_name_columns(&table.headers) else {
-        return vec![generic_regimen_preview(
-            table,
-            drug_columns,
-            response_column,
-        )];
+        let mut organisms = table
+            .rows
+            .iter()
+            .filter_map(|row| row_organism(row, organism_column))
+            .collect::<Vec<_>>();
+        organisms.sort();
+        organisms.dedup();
+        if organisms.is_empty() {
+            return vec![generic_regimen_preview(
+                table,
+                drug_columns,
+                response_column,
+                organism_column,
+                None,
+            )];
+        }
+        return organisms
+            .into_iter()
+            .enumerate()
+            .map(|(index, organism)| {
+                generic_regimen_preview(
+                    table,
+                    drug_columns,
+                    response_column,
+                    organism_column,
+                    Some((index + 1, organism)),
+                )
+            })
+            .collect();
     };
     let unit_columns = [0, 1, 2].map(|index| find_units_column(&table.headers, index));
-    let mut combinations = Vec::<Vec<String>>::new();
+    let mut combinations = Vec::<(Vec<String>, Option<String>)>::new();
     for row in &table.rows {
         if let Some(names) = row_drug_names(row, &name_columns)
-            && !combinations.contains(&names)
+            && !combinations.contains(&(names.clone(), row_organism(row, organism_column)))
         {
-            combinations.push(names);
+            combinations.push((names, row_organism(row, organism_column)));
         }
     }
     combinations
         .into_iter()
         .enumerate()
-        .map(|(index, drug_names)| {
+        .map(|(index, (drug_names, organism))| {
             let rows = table
                 .rows
                 .iter()
                 .filter(|row| {
                     row_drug_names(row, &name_columns).is_some_and(|names| names == drug_names)
+                        && row_organism(row, organism_column) == organism
                 })
                 .collect::<Vec<_>>();
             let concentration_units = (0..drug_names.len())
@@ -668,11 +874,18 @@ fn describe_regimens(
             let suggested_response_type =
                 infer_response_type(&rows, active_drug_columns, response_column);
             let id = (index + 1).to_string();
-            let label = format!("{} — {}", id, drug_names.join(" + "));
+            let regimen_label = drug_names.join(" + ");
+            let label = organism.as_ref().map_or_else(
+                || format!("{id} — {regimen_label}"),
+                |value| format!("{id} — {value} — {regimen_label}"),
+            );
             let total_rows = rows.len();
             RegimenPreview {
                 id,
                 label,
+                regimen_key: drug_names.join("\u{1f}"),
+                regimen_label,
+                organism,
                 drug_names,
                 concentration_units,
                 suggested_response_type,
@@ -687,6 +900,8 @@ fn generic_regimen_preview(
     table: &importer::ImportedTable,
     drug_columns: &[usize],
     response_column: Option<usize>,
+    organism_column: Option<usize>,
+    organism_entry: Option<(usize, String)>,
 ) -> RegimenPreview {
     let drug_count = drug_columns.len().clamp(2, 3);
     let drug_names = (0..drug_count)
@@ -708,16 +923,37 @@ fn generic_regimen_preview(
                 .unwrap_or_default()
         })
         .collect();
-    let row_refs = table.rows.iter().collect::<Vec<_>>();
+    let organism = organism_entry.as_ref().map(|(_, value)| value.clone());
+    let row_refs = table
+        .rows
+        .iter()
+        .filter(|row| row_organism(row, organism_column) == organism)
+        .collect::<Vec<_>>();
+    let id = organism_entry.as_ref().map_or(1, |(index, _)| *index).to_string();
+    let regimen_label = drug_names.join(" + ");
     RegimenPreview {
-        id: "1".into(),
-        label: format!("1 — {}", drug_names.join(" + ")),
+        id: id.clone(),
+        label: organism.as_ref().map_or_else(
+            || format!("{id} — {regimen_label}"),
+            |value| format!("{id} — {value} — {regimen_label}"),
+        ),
+        regimen_key: drug_names.join("\u{1f}"),
+        regimen_label,
+        organism: organism.clone(),
         concentration_units,
         suggested_response_type: infer_response_type(&row_refs, drug_columns, response_column),
         drug_names,
-        rows: table.rows.iter().take(100).cloned().collect(),
-        total_rows: table.rows.len(),
+        rows: row_refs.iter().take(100).map(|row| (*row).clone()).collect(),
+        total_rows: row_refs.len(),
     }
+}
+
+fn row_organism(row: &[String], column: Option<usize>) -> Option<String> {
+    column
+        .and_then(|index| row.get(index))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn regimen_name_columns(headers: &[String]) -> Result<Vec<Option<usize>>, AppError> {
@@ -796,18 +1032,34 @@ fn infer_response_type(
         })
         .filter_map(|row| row.get(response_column)?.trim().parse::<f64>().ok())
         .collect::<Vec<_>>();
-    // Fractional assay data can contain a small number of values outside 0–1
-    // after background correction. Use absolute magnitudes, and do not let a
-    // few noisy wells force an otherwise fractional regimen onto a percent
-    // scale.
-    let fractional = is_fractional_response_scale(&values);
     let control_mean = mean_or(&controls, 0.0);
     let treated_mean = mean_or(&treated, control_mean);
+    // For normalized viability, the all-zero drug arms identify the scale:
+    // controls centered near 1 are fractional and controls centered near 100
+    // are percentages. Fall back to the whole response distribution when the
+    // controls are absent/ambiguous or when inhibition increases with dose.
+    let fractional = if control_mean >= treated_mean {
+        normalized_viability_scale_from_controls(&controls)
+            .unwrap_or_else(|| is_fractional_response_scale(&values))
+    } else {
+        is_fractional_response_scale(&values)
+    };
     match (control_mean >= treated_mean, fractional) {
         (true, true) => ResponseType::ViabilityFraction,
         (true, false) => ResponseType::Viability,
         (false, true) => ResponseType::InhibitionFraction,
         (false, false) => ResponseType::Inhibition,
+    }
+}
+
+fn normalized_viability_scale_from_controls(controls: &[f64]) -> Option<bool> {
+    let mean = mean_or(controls, f64::NAN);
+    if (0.5..=2.0).contains(&mean) {
+        Some(true)
+    } else if (50.0..=150.0).contains(&mean) {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -827,28 +1079,43 @@ fn is_fractional_response_scale(values: &[f64]) -> bool {
 fn validate_regimen_units(
     headers: &[String],
     rows: &[Vec<String>],
+    mapping: &ColumnMapping,
     expected: &[String],
 ) -> Result<(), AppError> {
     if expected.is_empty() || expected.iter().all(|unit| unit.trim().is_empty()) {
         return Ok(());
     }
     for (index, expected_unit) in expected.iter().enumerate() {
-        let column = find_units_column(headers, index).ok_or_else(|| {
-            AppError::new(
-                "missingUnits",
-                format!("Missing Units {} column.", (b'A' + index as u8) as char),
-            )
-        })?;
-        if expected_unit.trim().is_empty()
-            || rows.iter().any(|row| {
+        let expected_unit = expected_unit.trim();
+        let explicit_units_match = find_units_column(headers, index).map(|column| {
+            rows.iter().all(|row| {
                 row.get(column)
-                    .is_none_or(|value| value.trim() != expected_unit.trim())
+                    .is_some_and(|value| value.trim() == expected_unit)
             })
+        });
+        let embedded_unit = mapping
+            .drugs
+            .get(index)
+            .and_then(|drug| headers.get(drug.column))
+            .and_then(|header| parse_concentration_header(header))
+            .map(|parsed| parsed.unit);
+        let embedded_units_match = embedded_unit
+            .as_deref()
+            .is_some_and(|unit| unit.trim() == expected_unit);
+
+        if expected_unit.is_empty()
+            || explicit_units_match.map_or(!embedded_units_match, |units_match| !units_match)
         {
+            let code = if explicit_units_match.is_none() && embedded_unit.is_none() {
+                "missingUnits"
+            } else {
+                "inconsistentUnits"
+            };
             return Err(AppError::new(
-                "inconsistentUnits",
+                code,
                 format!(
-                    "Regimen concentration units for drug {} must be nonblank and consistent.",
+                    "Regimen concentration units for drug {} must be nonblank and consistent, either in a Units {} column or the mapped concentration header.",
+                    (b'A' + index as u8) as char,
                     (b'A' + index as u8) as char
                 ),
             ));
@@ -896,7 +1163,9 @@ pub fn quit_application(app: tauri::AppHandle) {
 
 fn default_role(header: &str, _index: usize) -> String {
     let normalized = normalize_header(header);
-    if matches!(normalized.as_str(), "druga" | "drug1" | "drugname1") {
+    if matches!(normalized.as_str(), "organism" | "organismname") {
+        "organism".into()
+    } else if matches!(normalized.as_str(), "druga" | "drug1" | "drugname1") {
         "drugNameA".into()
     } else if matches!(normalized.as_str(), "drugb" | "drug2" | "drugname2") {
         "drugNameB".into()
@@ -1151,6 +1420,46 @@ mod tests {
     }
 
     #[test]
+    fn organism_column_partitions_identical_regimens_and_filters_rows() {
+        let table = importer::ImportedTable {
+            headers: vec![
+                "Organism".into(),
+                "Drug A".into(),
+                "Drug B".into(),
+                "Conc A".into(),
+                "Conc B".into(),
+                "Response".into(),
+            ],
+            rows: vec![
+                vec!["Org 1".into(), "A".into(), "B".into(), "0".into(), "0".into(), "1".into()],
+                vec!["Org 1".into(), "A".into(), "B".into(), "1".into(), "1".into(), "0.5".into()],
+                vec!["Org 2".into(), "A".into(), "B".into(), "0".into(), "0".into(), "1".into()],
+                vec!["Org 2".into(), "A".into(), "B".into(), "1".into(), "1".into(), "0.25".into()],
+            ],
+        };
+
+        assert_eq!(
+            suggest_roles(&table.headers),
+            ["organism", "drugNameA", "drugNameB", "drugA", "drugB", "response"]
+        );
+        let regimens = describe_regimens(&table, &[3, 4], Some(5), Some(0));
+        assert_eq!(regimens.len(), 2);
+        assert_eq!(regimens[0].regimen_key, regimens[1].regimen_key);
+        assert_eq!(regimens[0].organism.as_deref(), Some("Org 1"));
+        assert_eq!(regimens[1].organism.as_deref(), Some("Org 2"));
+
+        let selected = select_regimen_rows(
+            &table,
+            &["A".into(), "B".into()],
+            Some("Org 2"),
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|row| row[0] == "Org 2"));
+    }
+
+    #[test]
     fn concentration_headers_supply_drug_names_units_and_roles() {
         let table = importer::ImportedTable {
             headers: vec![
@@ -1163,7 +1472,7 @@ mod tests {
         };
         let roles = suggest_roles(&table.headers);
         assert_eq!(roles, ["drugA", "drugB", "response", "ignore"]);
-        let regimens = describe_regimens(&table, &[0, 1], Some(2));
+        let regimens = describe_regimens(&table, &[0, 1], Some(2), None);
         assert_eq!(regimens.len(), 1);
         assert_eq!(regimens[0].drug_names, ["Amikacin", "Clofazimine"]);
         assert_eq!(regimens[0].concentration_units, ["mg/L", "µM"]);
@@ -1181,6 +1490,70 @@ mod tests {
                 unit: "mg/L".into(),
             })
         );
+    }
+
+    #[test]
+    fn embedded_concentration_units_satisfy_regimen_validation() {
+        let headers = vec![
+            "File Name".into(),
+            "Species".into(),
+            "Full Strain".into(),
+            "Cefidericol Conc (mg/L)".into(),
+            "Amikacin Conc (mg/L)".into(),
+            "Relative OD".into(),
+        ];
+        let rows = vec![vec![
+            "096".into(),
+            "E. cloacea complex".into(),
+            "E. cloacea complex 16537-1a".into(),
+            "64".into(),
+            "0".into(),
+            "0.0154".into(),
+        ]];
+        let mapping = ColumnMapping {
+            drugs: vec![
+                checkerboard_core::MappedDrug {
+                    column: 3,
+                    name: "Cefidericol".into(),
+                },
+                checkerboard_core::MappedDrug {
+                    column: 4,
+                    name: "Amikacin".into(),
+                },
+            ],
+            response_column: 5,
+        };
+
+        validate_regimen_units(&headers, &rows, &mapping, &["mg/L".into(), "mg/L".into()])
+            .expect("units embedded in mapped concentration headers should be accepted");
+    }
+
+    #[test]
+    fn embedded_concentration_unit_mismatch_is_reported() {
+        let headers = vec![
+            "Cefidericol Conc (mg/L)".into(),
+            "Amikacin Conc (mg/L)".into(),
+            "Relative OD".into(),
+        ];
+        let rows = vec![vec!["1".into(), "1".into(), "0.5".into()]];
+        let mapping = ColumnMapping {
+            drugs: vec![
+                checkerboard_core::MappedDrug {
+                    column: 0,
+                    name: "Cefidericol".into(),
+                },
+                checkerboard_core::MappedDrug {
+                    column: 1,
+                    name: "Amikacin".into(),
+                },
+            ],
+            response_column: 2,
+        };
+
+        let error =
+            validate_regimen_units(&headers, &rows, &mapping, &["mg/L".into(), "µM".into()])
+                .expect_err("a conflicting embedded concentration unit should be rejected");
+        assert_eq!(error.code, "inconsistentUnits");
     }
 
     #[test]
@@ -1212,7 +1585,7 @@ mod tests {
         };
         let roles = suggest_roles(&table.headers);
         assert_eq!(roles, ["ignore", "ignore", "ignore"]);
-        let regimens = describe_regimens(&table, &[], None);
+        let regimens = describe_regimens(&table, &[], None, None);
         assert_eq!(regimens.len(), 1);
         assert_eq!(regimens[0].drug_names, ["Drug 1", "Drug 2"]);
         assert_eq!(regimens[0].rows, table.rows);
@@ -1239,6 +1612,7 @@ mod tests {
                 start_column: 1,
                 row_limit: 0,
                 column_limit: 0,
+                organism_column: None,
             };
             let preview = import_preview(import.clone()).expect("fixture should open");
             assert_eq!(
@@ -1283,6 +1657,8 @@ mod tests {
                 },
                 assay_error: DrusanoAssayErrorSettings::default(),
                 regimen_drug_names: preview.regimens[0].drug_names.clone(),
+                organism: None,
+                organism_column: None,
                 max_cycles: default_drusano_max_cycles(),
                 continuation: None,
                 bootstrap_iterations: 1,
@@ -1314,6 +1690,7 @@ mod tests {
                 start_column: 1,
                 row_limit: 0,
                 column_limit: 0,
+                organism_column: None,
             })
             .expect("Bliss-calibrated fixture should open");
             assert_eq!(
@@ -1355,6 +1732,7 @@ mod tests {
             start_column: 1,
             row_limit: 0,
             column_limit: 0,
+            organism_column: None,
         };
         let result = analyze_table_inner(
             AnalyzeTableRequest {
@@ -1376,8 +1754,11 @@ mod tests {
                 mic_values: vec![1.0, 1.0],
                 mic_zero_tolerance: 5.0,
                 regimen_drug_names: Vec::new(),
+                organism: None,
+                organism_column: None,
                 concentration_units: vec![String::new(), String::new()],
                 clinically_relevant_concentrations: Vec::new(),
+                concentration_ranges: Vec::new(),
             },
             None,
         )
@@ -1399,6 +1780,7 @@ mod tests {
             start_column: 1,
             row_limit: 0,
             column_limit: 0,
+            organism_column: None,
         };
         let result = analyze_table_inner(
             AnalyzeTableRequest {
@@ -1420,8 +1802,11 @@ mod tests {
                 mic_values: vec![1.0, 1.0],
                 mic_zero_tolerance: 5.0,
                 regimen_drug_names: Vec::new(),
+                organism: None,
+                organism_column: None,
                 concentration_units: vec![String::new(), String::new()],
                 clinically_relevant_concentrations: Vec::new(),
+                concentration_ranges: Vec::new(),
             },
             None,
         )
@@ -1458,6 +1843,7 @@ mod tests {
                 start_column: 1,
                 row_limit: 0,
                 column_limit: 0,
+                organism_column: None,
             },
             mapping: ColumnMapping {
                 drugs: vec![
@@ -1473,8 +1859,11 @@ mod tests {
                 response_column: 2,
             },
             response_type: ResponseType::ViabilityFraction,
+            blank_value: 0.0,
             zero_tolerance: 70.0,
             regimen_drug_names: Vec::new(),
+            organism: None,
+            organism_column: None,
         })
         .unwrap();
         assert_eq!(
@@ -1491,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_regimens_are_described_separately_and_clinical_windows_filter_doses() {
+    fn multiple_regimens_are_described_separately_and_exact_concentration_ranges_filter_doses() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("fixtures/valid/multiple_regimens.csv")
@@ -1504,6 +1893,7 @@ mod tests {
             start_column: 1,
             row_limit: 0,
             column_limit: 0,
+            organism_column: None,
         };
         let preview = import_preview(import.clone()).unwrap();
         assert_eq!(
@@ -1561,8 +1951,14 @@ mod tests {
                 mic_values: vec![1.0, 1.0],
                 mic_zero_tolerance: 5.0,
                 regimen_drug_names: vec!["Ampicillin".into(), "Meropenem".into()],
+                organism: None,
+                organism_column: None,
                 concentration_units: vec!["mg/L".into(), "mg/L".into()],
-                clinically_relevant_concentrations: vec![Some(1.0), Some(1.0)],
+                clinically_relevant_concentrations: Vec::new(),
+                concentration_ranges: vec![
+                    ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
+                    ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
+                ],
             },
             None,
         )
@@ -1570,8 +1966,11 @@ mod tests {
         assert_eq!(result.summary.combination_count, 1);
         assert_eq!(result.processed.len(), 7);
         assert_eq!(
-            result.clinically_relevant_concentrations,
-            vec![Some(1.0), Some(1.0)]
+            result.concentration_ranges,
+            vec![
+                ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
+                ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
+            ]
         );
         assert_eq!(result.concentration_units, vec!["mg/L", "mg/L"]);
     }
@@ -1590,11 +1989,11 @@ mod tests {
         assert_eq!(inferred("0", "75"), ResponseType::Inhibition);
         assert_eq!(inferred("-0.02", "0.75"), ResponseType::InhibitionFraction);
 
-        let mut noisy_fractional_rows = vec![
-            vec!["0".into(), "0".into(), "1".into()],
-            vec!["1".into(), "1".into(), "1.4".into()],
-        ];
-        noisy_fractional_rows.extend((0..38).map(|_| vec!["1".into(), "1".into(), "0.25".into()]));
+        let mut noisy_fractional_rows = vec![vec!["0".into(), "0".into(), "1".into()]];
+        noisy_fractional_rows
+            .extend((0..4).map(|_| vec!["1".into(), "1".into(), "1.4".into()]));
+        noisy_fractional_rows
+            .extend((0..36).map(|_| vec!["1".into(), "1".into(), "0.25".into()]));
         assert_eq!(
             infer_response_type(
                 &noisy_fractional_rows.iter().collect::<Vec<_>>(),
@@ -1603,6 +2002,73 @@ mod tests {
             ),
             ResponseType::ViabilityFraction
         );
+    }
+
+    #[test]
+    fn test2_combined_fractional_viability_runs_every_diamond_regimen() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/test2_combined.csv")
+            .canonicalize()
+            .unwrap();
+        let import = ImportRequest {
+            path: fixture.to_string_lossy().into_owned(),
+            worksheet: None,
+            start_row: 1,
+            start_column: 1,
+            row_limit: 0,
+            column_limit: 0,
+            organism_column: None,
+        };
+        let table = importer::read_table(&import).unwrap();
+        let preview = import_preview(import).unwrap();
+        assert_eq!(preview.regimens.len(), 7);
+
+        for regimen in preview.regimens {
+            let rows = select_regimen_rows(&table, &regimen.drug_names, None, None).unwrap();
+            let assay = assay_from_rows(
+                &rows,
+                &ColumnMapping {
+                    drugs: vec![
+                        checkerboard_core::MappedDrug {
+                            column: 3,
+                            name: regimen.drug_names[0].clone(),
+                        },
+                        checkerboard_core::MappedDrug {
+                            column: 2,
+                            name: regimen.drug_names[1].clone(),
+                        },
+                    ],
+                    response_column: 6,
+                },
+            )
+            .unwrap();
+            let anchors = (0..2)
+                .map(|index| {
+                    assay
+                        .rows
+                        .iter()
+                        .map(|row| row.concentrations[index])
+                        .fold(0.0_f64, f64::max)
+                })
+                .collect::<Vec<_>>();
+            let result = checkerboard_core::diamond::analyze(
+                &assay,
+                &anchors,
+                DiamondPolicy {
+                    response_type: ResponseType::ViabilityFraction,
+                    bootstrap_iterations: 2,
+                    ..DiamondPolicy::default()
+                },
+                |_, _| {},
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", regimen.regimen_label));
+            assert!(
+                !result.total_scores.is_empty(),
+                "{} did not produce a total FIC",
+                regimen.regimen_label
+            );
+        }
     }
 
     #[test]
@@ -1619,6 +2085,7 @@ mod tests {
             start_column: 1,
             row_limit: 0,
             column_limit: 0,
+            organism_column: None,
         };
         let preview = import_preview(import.clone()).unwrap();
         assert_eq!(preview.total_rows, 11_088);
@@ -1680,8 +2147,15 @@ mod tests {
                 mic_values: vec![1.0, 1.0, 1.0],
                 mic_zero_tolerance: 5.0,
                 regimen_drug_names: first.drug_names.clone(),
+                organism: None,
+                organism_column: None,
                 concentration_units: first.concentration_units.clone(),
-                clinically_relevant_concentrations: vec![None, None, Some(4.0)],
+                clinically_relevant_concentrations: Vec::new(),
+                concentration_ranges: vec![
+                    ConcentrationRange::default(),
+                    ConcentrationRange::default(),
+                    ConcentrationRange { minimum: Some(1.0), maximum: Some(16.0) },
+                ],
             },
             None,
         )
@@ -1706,5 +2180,69 @@ mod tests {
         let restricted_mean =
             restricted_scores.iter().sum::<f64>() / restricted_scores.len() as f64;
         assert!((restricted_mean - result.summary.mean_bliss).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test3_combined_produces_pairwise_and_emergent_diamond_scores() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/test3_combined.csv")
+            .canonicalize()
+            .unwrap();
+        let import = ImportRequest {
+            path: fixture.to_string_lossy().into_owned(),
+            worksheet: None,
+            start_row: 1,
+            start_column: 1,
+            row_limit: 0,
+            column_limit: 0,
+            organism_column: None,
+        };
+        let table = importer::read_table(&import).unwrap();
+        let preview = import_preview(import).unwrap();
+        let regimen = &preview.regimens[0];
+        let rows = select_regimen_rows(&table, &regimen.drug_names, None, None).unwrap();
+        let assay = assay_from_rows(
+            &rows,
+            &ColumnMapping {
+                drugs: (0..3)
+                    .map(|index| checkerboard_core::MappedDrug {
+                        column: 3 + index,
+                        name: regimen.drug_names[index].clone(),
+                    })
+                    .collect(),
+                response_column: 9,
+            },
+        )
+        .unwrap();
+        let anchors = (0..3)
+            .map(|index| {
+                assay
+                    .rows
+                    .iter()
+                    .map(|row| row.concentrations[index])
+                    .fold(0.0_f64, f64::max)
+            })
+            .collect::<Vec<_>>();
+        let result = checkerboard_core::diamond::analyze(
+            &assay,
+            &anchors,
+            DiamondPolicy {
+                response_type: ResponseType::ViabilityFraction,
+                bootstrap_iterations: 2,
+                ..DiamondPolicy::default()
+            },
+            |_, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(result.pairwise_summaries.len(), 3);
+        assert!(
+            result
+                .emergent_scores
+                .iter()
+                .any(|score| score.inhibition_level == 50.0)
+        );
+        assert!(!result.assay_locations.is_empty());
     }
 }

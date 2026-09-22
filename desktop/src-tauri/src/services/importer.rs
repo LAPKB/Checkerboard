@@ -14,6 +14,8 @@ pub struct ImportRequest {
     pub start_column: usize,
     pub row_limit: usize,
     pub column_limit: usize,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +236,7 @@ mod tests {
             start_column: 2,
             row_limit: 1,
             column_limit: 2,
+            organism_column: None,
         };
         let selected = select_range(rows, &request).unwrap();
         assert_eq!(selected.headers, vec!["DrugA", "OD"]);

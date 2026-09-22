@@ -22,7 +22,7 @@ The R package remains an optional development oracle for parity tests.
 - Algorithm-level selection among Bliss, Drusano–Greco, and MuSyC workflows.
 - A compact Drusano–Greco navigation path of Import → Fit → Simulate → Compare; MIC and
   separate Results tabs remain specific to the Bliss workflow.
-- Explicit absorbance, fluorescence, or CFU input policy.
+- Explicit absorbance, fluorescence, or Count input policy; Count bypasses blank adjustment.
 - Drusano–Greco blank/growth-control response normalization, maximum-tested-concentration-normalized doses,
   and a user-editable absorbance censor limit with a lower-tail frequency-break suggestion.
 - Separate PMcore NPAG fits for each two-drug regimen, with all eligible wells
@@ -44,6 +44,11 @@ The R package remains an optional development oracle for parity tests.
   observed-versus-predicted effect plots
   and regression statistics.
 - Tauri-independent two- and three-drug Bliss analysis.
+- Native two- and three-drug DiaMOND analysis with fitted equipotent-diagonal
+  FIC50/FIC90 estimates and reproducible bootstrap confidence intervals. Complete
+  two-drug grids (including pairwise faces of three-drug assays) additionally
+  receive non-extrapolated IC50/IC90 isobole diagnostics; their equipotent-ray
+  intersections are compared with, but never replace, the primary diagonal FIC.
 - Validation for controls, numeric input, concentrations, OD, and required
   single-agent observations.
 - Replicate averaging and incomplete-grid warnings.
