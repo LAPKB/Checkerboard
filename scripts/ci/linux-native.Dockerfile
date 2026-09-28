@@ -39,12 +39,14 @@ ENV CARGO_NET_OFFLINE=true \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_SSH_COMMAND=/bin/false
 RUN --network=none cd desktop && npm run tauri -- build --target "$LINUX_TARGET" --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
-# AppImage packaging can fetch public linuxdeploy helpers; no SSH mount or keys remain.
-RUN cd desktop && npm run tauri -- bundle --target "$LINUX_TARGET" --bundles appimage,deb,rpm --ci --no-sign
+# Keep the compiler output independent of AppImage's deployment/ELF rewriting.
+RUN install -d /out \
+    && cp "desktop/src-tauri/target/$LINUX_TARGET/release/checkmate-desktop" /out/checkmate
+RUN cd desktop && npm run tauri -- bundle --target "$LINUX_TARGET" --bundles deb,rpm --ci --no-sign
+# Public linuxdeploy downloads happen without source credentials.
+RUN cd desktop && npm run tauri -- bundle --target "$LINUX_TARGET" --bundles appimage --ci --no-sign
 RUN set -eu; \
     base="desktop/src-tauri/target/$LINUX_TARGET/release"; \
-    install -d /out; \
-    cp "$base/checkmate-desktop" /out/checkmate; \
     for kind in appimage deb rpm; do \
       case "$kind" in appimage) extension=AppImage ;; *) extension="$kind" ;; esac; \
       set -- "$base/bundle/$kind/"*."$extension"; \
