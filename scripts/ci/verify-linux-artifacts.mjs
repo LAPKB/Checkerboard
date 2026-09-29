@@ -86,6 +86,23 @@ async function describe(directory, name) {
   return { name, bytes: info.size, sha256: hash.digest("hex") };
 }
 
+function bundledExecutableHash(compiler, bundleType) {
+  // Tauri CLI 2.11.4 patches only the first UNK marker for each package,
+  // then restores the compiler output. Every other byte must stay unchanged.
+  // https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle.rs
+  const marker = Buffer.from("__TAURI_BUNDLE_TYPE_VAR_UNK");
+  const offset = compiler.indexOf(marker);
+  const hash = createHash("sha256");
+  if (offset < 0) return hash.update(compiler).digest("hex");
+  const replacement = Buffer.from(`__TAURI_BUNDLE_TYPE_VAR_${bundleType}`);
+  assert.equal(replacement.length, marker.length, "Invalid Tauri bundle type");
+  return hash
+    .update(compiler.subarray(0, offset))
+    .update(replacement)
+    .update(compiler.subarray(offset + marker.length))
+    .digest("hex");
+}
+
 function verifyPackages(target, directory, appHash, run) {
   const expected = targets[target];
   const options = { maxBuffer: 512 * 1024 * 1024, timeout: 120000 };
@@ -121,29 +138,18 @@ function verifyPackages(target, directory, appHash, run) {
     "Wrong RPM identity, version or architecture",
   );
   const rpmApp = run("bsdtar", ["-xOf", rpm, "./usr/bin/checkmate-desktop"], options);
-  const payloads = [
-    { format: "deb", bytes: debApp },
-    { format: "rpm", bytes: rpmApp },
-  ].map(({ format, bytes }) => {
+  const compiler = readFileSync(join(directory, files[0]));
+  assert.equal(
+    createHash("sha256").update(compiler).digest("hex"),
+    appHash,
+    "Compiler executable changed during verification",
+  );
+  for (const [bundleType, bytes] of [["DEB", debApp], ["RPM", rpmApp]]) {
     assertElf(bytes, expected.machine);
-    return {
-      format,
-      bytes: bytes.length,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-    };
-  });
-  console.log("Linux executable verification", {
-    compiler: {
-      bytes: lstatSync(join(directory, files[0])).size,
-      sha256: appHash,
-    },
-    payloads,
-  });
-  for (const payload of payloads) {
     assert.equal(
-      payload.sha256,
-      appHash,
-      `${payload.format} packaged app differs from the verified executable`,
+      createHash("sha256").update(bytes).digest("hex"),
+      bundledExecutableHash(compiler, bundleType),
+      `Packaged app differs from the verified executable (${bundleType} marker applied)`,
     );
   }
 }
