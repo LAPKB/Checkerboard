@@ -121,12 +121,29 @@ function verifyPackages(target, directory, appHash, run) {
     "Wrong RPM identity, version or architecture",
   );
   const rpmApp = run("bsdtar", ["-xOf", rpm, "./usr/bin/checkmate-desktop"], options);
-  for (const bytes of [debApp, rpmApp]) {
+  const payloads = [
+    { format: "deb", bytes: debApp },
+    { format: "rpm", bytes: rpmApp },
+  ].map(({ format, bytes }) => {
     assertElf(bytes, expected.machine);
+    return {
+      format,
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+  });
+  console.log("Linux executable verification", {
+    compiler: {
+      bytes: lstatSync(join(directory, files[0])).size,
+      sha256: appHash,
+    },
+    payloads,
+  });
+  for (const payload of payloads) {
     assert.equal(
-      createHash("sha256").update(bytes).digest("hex"),
+      payload.sha256,
       appHash,
-      "Packaged app differs from the verified executable",
+      `${payload.format} packaged app differs from the verified executable`,
     );
   }
 }
