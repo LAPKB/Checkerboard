@@ -21,6 +21,9 @@ env:
 
 jobs:
   macos:
+    permissions:
+      contents: read
+      actions: write
     name: macOS ARM64, then Intel build candidates
     if: >-
       github.repository == 'LAPKB/Checkerboard'
@@ -70,6 +73,11 @@ jobs:
         run: cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
       - name: Build ARM64 app and DMG
         run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin
+      - name: Prune superseded candidate artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/prune-superseded-artifacts.py
+
       - name: Retain ARM64 artifacts before Intel build
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -99,6 +107,9 @@ jobs:
         run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$RUST_HOME_DIR" checkmate-rust "$RUST_HOME_IDENTITY"
 
   containers:
+    permissions:
+      contents: read
+      actions: write
     name: ${{ matrix.target }} build candidate
     if: >-
       github.repository == 'LAPKB/Checkerboard'
@@ -133,6 +144,10 @@ jobs:
       - name: Build and verify packages without private credentials
         id: build
         run: bash scripts/ci/build-container-candidate.sh "${{ matrix.target }}"
+      - name: Prune superseded candidate artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/prune-superseded-artifacts.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: checkmate-${{ matrix.target }}-build-candidate
