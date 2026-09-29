@@ -3,8 +3,6 @@ name: Checkmate CI
 on:
   push:
     branches: [launcher-checkmate-support]
-  pull_request:
-    branches: [launcher-checkmate-support]
   workflow_dispatch:
     inputs:
       source_sha:
@@ -26,9 +24,11 @@ jobs:
     name: macOS ARM64, then Intel build candidates
     if: >-
       github.repository == 'LAPKB/Checkerboard'
-      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-      && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/launcher-checkmate-support')
-    runs-on: macos-15
+      && github.ref == 'refs/heads/launcher-checkmate-support'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on:
+      group: desktop-macos
+      labels: [self-hosted, macOS, ARM64]
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -55,12 +55,10 @@ jobs:
           identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$root")"
           printf 'CARGO_HOME=%s/cargo\nRUSTUP_HOME=%s/rustup\nCARGO_TARGET_DIR=%s/target\n' "$root" "$root" "$root" >> "$GITHUB_ENV"
           printf 'directory=%s\nidentity=%s\n' "$root" "$identity" >> "$GITHUB_OUTPUT"
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.97.1
-          target: aarch64-apple-darwin
-          rustflags: ""
-          cache: false
+          targets: aarch64-apple-darwin
       - name: Build frontend
         working-directory: desktop
         run: npm ci && npm exec -- tsc && npm exec -- vite build
@@ -104,22 +102,22 @@ jobs:
     name: ${{ matrix.target }} build candidate
     if: >-
       github.repository == 'LAPKB/Checkerboard'
-      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-      && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/launcher-checkmate-support')
-    runs-on: ${{ matrix.runner }}
+      && github.ref == 'refs/heads/launcher-checkmate-support'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Linux, "${{ matrix.runner_arch }}"]
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            runner_arch: X64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+            runner_arch: ARM64
           - target: x86_64-pc-windows-msvc
-            runner: ubuntu-24.04
+            runner_arch: X64
           - target: aarch64-pc-windows-msvc
-            runner: ubuntu-24.04
+            runner_arch: X64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
