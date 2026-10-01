@@ -17,7 +17,11 @@ env:
   CHECKMATE_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
   CHECKMATE_REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
   CARGO_BUILD_JOBS: "2"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   GIT_TERMINAL_PROMPT: "0"
+  # Existing public staging trust; no issuer or archive-signing secret is embedded.
+  LAPKB_LOCAL_SIGNING_KID: local-staging-1
+  LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64: 0KsmsPwJpk64Iq2RTjYS65RsH_WfE0aMP8K6F7p4FeM
 
 jobs:
   macos:
@@ -64,13 +68,20 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build frontend
         working-directory: desktop
-        run: npm ci && npm exec -- tsc && npm exec -- vite build
-      - name: Fetch locked public dependencies
+        run: npm ci && npm test && npm exec -- tsc && npm exec -- vite build
+      - name: Validate public verifier inputs
+        run: node scripts/ci/validate-pilot-inputs.mjs
+      - name: Fetch pinned private dependencies with scoped read-only identities
+        env:
+          LAPKB_SDK_READ_KEY: ${{ secrets.LAPKB_SDK_READ_KEY }}
+          LAPKB_PROTOCOL_READ_KEY: ${{ secrets.LAPKB_PROTOCOL_READ_KEY }}
+        run: bash scripts/ci/with-private-ssh-agent.sh cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Test native licensing and scientific core offline
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: "1"
           GIT_SSH_COMMAND: /usr/bin/false
-        run: cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+        run: cargo test --workspace --locked --offline --features local-staging --target aarch64-apple-darwin --manifest-path desktop/src-tauri/Cargo.toml
       - name: Build ARM64 app and DMG
         run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin
       - name: Prune superseded candidate artifacts
@@ -141,9 +152,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
-      - name: Build and verify packages without private credentials
+      - name: Build and verify packages with credentials confined to fetch
         id: build
-        run: bash scripts/ci/build-container-candidate.sh "${{ matrix.target }}"
+        env:
+          LAPKB_SDK_READ_KEY: ${{ secrets.LAPKB_SDK_READ_KEY }}
+          LAPKB_PROTOCOL_READ_KEY: ${{ secrets.LAPKB_PROTOCOL_READ_KEY }}
+        run: bash scripts/ci/with-private-ssh-agent.sh bash scripts/ci/build-container-candidate.sh "${{ matrix.target }}"
       - name: Prune superseded candidate artifacts
         env:
           GITHUB_TOKEN: ${{ github.token }}

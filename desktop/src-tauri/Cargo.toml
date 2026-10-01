@@ -9,6 +9,11 @@ edition = "2024"
 members = [".", "crates/checkerboard-core"]
 resolver = "2"
 
+[features]
+# Pilot builds can embed public lease-verification material; absent or invalid
+# trust configuration leaves the native session locked.
+local-staging = []
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -26,6 +31,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
+tokio = { version = "1", features = ["time"] }
 checkerboard-core = { path = "crates/checkerboard-core" }
 pmcore = "0.27.1"
 faer = "0.24"
@@ -40,6 +46,12 @@ rust_xlsxwriter = "0.96"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "daba4ce5add38c9147f185e9caec6defa65a22a6", features = ["client"] }
+
+[dev-dependencies]
+ed25519-dalek = "2.1.1"
+lapkb-authorization-protocol = { git = "ssh://git@github.com/LAPKB/desktop-authorization.git", rev = "bcca349d7ea3d448c85a177fed3b1af4d3f941a1" }
+tauri = { version = "2", features = ["test"] }
 
 [patch.crates-io]
 pharmsol = { path = "../../vendor/pharmsol" }

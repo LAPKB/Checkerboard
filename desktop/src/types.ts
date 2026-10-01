@@ -1,3 +1,18 @@
+export type AuthPhase = "unconfigured" | "restoring" | "signed_out" | "authenticated" | "suspended";
+
+export interface AuthUser {
+  subject: string;
+  displayName: string;
+  email: string | null;
+}
+
+export interface AuthView {
+  phase: AuthPhase;
+  user: AuthUser | null;
+  accountId: string | null;
+  message: string | null;
+}
+
 export type ColumnRole =
   | "ignore"
   | "drugNameA" | "drugNameB" | "drugNameC"

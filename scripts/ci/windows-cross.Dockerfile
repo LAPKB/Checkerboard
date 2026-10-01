@@ -4,6 +4,10 @@ FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca
 
 ARG WINDOWS_TARGET
 ARG CARGO_BUILD_JOBS=2
+ARG LAPKB_LOCAL_SIGNING_KID
+ARG LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64
+ENV LAPKB_LOCAL_SIGNING_KID=${LAPKB_LOCAL_SIGNING_KID} \
+    LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64=${LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64}
 ENV CARGO_HOME=/tmp/checkmate-cargo-home \
     RUSTUP_HOME=/tmp/checkmate-rustup-home \
     CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
@@ -30,11 +34,28 @@ RUN case "$WINDOWS_TARGET" in \
 WORKDIR /workspace
 COPY . .
 
-RUN cd desktop && npm ci && npm exec -- tsc && npm exec -- vite build
+RUN node scripts/ci/validate-pilot-inputs.mjs \
+    && cd desktop && npm ci && npm exec -- tsc && npm exec -- vite build
 
 RUN install -d -m 700 /root/.ssh
 
-RUN GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_SSH_COMMAND=/bin/false \
+# Fetch only the two pinned private repositories; no private key enters a layer.
+RUN --mount=type=ssh,id=default,required=true \
+    --mount=type=secret,id=sdk-public,target=/root/.ssh/sdk.pub,required=true \
+    --mount=type=secret,id=protocol-public,target=/root/.ssh/protocol.pub,required=true \
+    set -eu; \
+    test -S "$SSH_AUTH_SOCK"; \
+    agent_identities=/tmp/checkmate-agent-identities; \
+    git_config=/tmp/checkmate-private-gitconfig; \
+    ssh-add -L > "$agent_identities"; \
+    chmod 600 "$agent_identities"; \
+    trap 'rm -f "$agent_identities" "$git_config" /root/.ssh/config /root/.ssh/known_hosts' EXIT; \
+    node scripts/ci/configure-private-git.mjs \
+      /root/.ssh/sdk.pub /root/.ssh/protocol.pub "$agent_identities" \
+      /root/.ssh/config "$git_config" /root/.ssh/known_hosts "$SSH_AUTH_SOCK"; \
+    export GIT_CONFIG_GLOBAL="$git_config" GIT_CONFIG_NOSYSTEM=1 GIT_SSH_VARIANT=ssh; \
+    export GIT_SSH_COMMAND='node /workspace/scripts/ci/repo-ssh.mjs'; \
+    export LAPKB_PRIVATE_SSH_CONFIG=/root/.ssh/config LAPKB_SSH_BINARY=/usr/bin/ssh; \
     cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 
 ENV CARGO_NET_OFFLINE=true \
@@ -46,7 +67,7 @@ ENV CARGO_NET_OFFLINE=true \
 RUN cargo xwin cache xwin
 
 
-RUN --network=none cd desktop && npm run tauri -- build --runner cargo-xwin --target "$WINDOWS_TARGET" --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
+RUN --network=none cd desktop && npm run tauri -- build --runner cargo-xwin --target "$WINDOWS_TARGET" --features local-staging --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
 # Tauri may download public NSIS helpers; no source credentials remain in this step.
 RUN cd desktop && npm run tauri -- bundle --target "$WINDOWS_TARGET" --bundles nsis --ci --no-sign
 

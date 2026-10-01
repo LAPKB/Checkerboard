@@ -4,6 +4,10 @@ FROM rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c
 
 ARG LINUX_TARGET
 ARG CARGO_BUILD_JOBS=2
+ARG LAPKB_LOCAL_SIGNING_KID
+ARG LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64
+ENV LAPKB_LOCAL_SIGNING_KID=${LAPKB_LOCAL_SIGNING_KID} \
+    LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64=${LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64}
 ENV CARGO_HOME=/tmp/checkmate-cargo-home \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
@@ -28,17 +32,34 @@ RUN case "$(uname -m):$LINUX_TARGET" in \
 
 WORKDIR /workspace
 COPY . .
-RUN cd desktop && npm ci && npm exec -- tsc && npm exec -- vite build
+RUN node scripts/ci/validate-pilot-inputs.mjs \
+    && cd desktop && npm ci && npm test && npm exec -- tsc && npm exec -- vite build
 
-# This CI-only source uses public dependencies; no private credentials are mounted.
-RUN GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_SSH_COMMAND=/bin/false \
+# Fetch only the two pinned private repositories; no private key enters a layer.
+RUN --mount=type=ssh,id=default,required=true \
+    --mount=type=secret,id=sdk-public,target=/root/.ssh/sdk.pub,required=true \
+    --mount=type=secret,id=protocol-public,target=/root/.ssh/protocol.pub,required=true \
+    set -eu; \
+    test -S "$SSH_AUTH_SOCK"; \
+    agent_identities=/tmp/checkmate-agent-identities; \
+    git_config=/tmp/checkmate-private-gitconfig; \
+    ssh-add -L > "$agent_identities"; \
+    chmod 600 "$agent_identities"; \
+    trap 'rm -f "$agent_identities" "$git_config" /root/.ssh/config /root/.ssh/known_hosts' EXIT; \
+    node scripts/ci/configure-private-git.mjs \
+      /root/.ssh/sdk.pub /root/.ssh/protocol.pub "$agent_identities" \
+      /root/.ssh/config "$git_config" /root/.ssh/known_hosts "$SSH_AUTH_SOCK"; \
+    export GIT_CONFIG_GLOBAL="$git_config" GIT_CONFIG_NOSYSTEM=1 GIT_SSH_VARIANT=ssh; \
+    export GIT_SSH_COMMAND='node /workspace/scripts/ci/repo-ssh.mjs'; \
+    export LAPKB_PRIVATE_SSH_CONFIG=/root/.ssh/config LAPKB_SSH_BINARY=/usr/bin/ssh; \
     cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 
 ENV CARGO_NET_OFFLINE=true \
     GIT_CONFIG_GLOBAL=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_SSH_COMMAND=/bin/false
-RUN --network=none cd desktop && npm run tauri -- build --target "$LINUX_TARGET" --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
+RUN --network=none cargo test --workspace --locked --offline --features local-staging --manifest-path desktop/src-tauri/Cargo.toml
+RUN --network=none cd desktop && npm run tauri -- build --target "$LINUX_TARGET" --features local-staging --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
 # AppImage packaging can fetch public linuxdeploy helpers; no SSH mount or keys remain.
 RUN cd desktop && npm run tauri -- bundle --target "$LINUX_TARGET" --bundles appimage,deb,rpm --ci --no-sign
 RUN set -eu; \

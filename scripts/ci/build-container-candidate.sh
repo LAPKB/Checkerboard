@@ -36,13 +36,50 @@ artifact_prefix=checkmate-artifacts
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+: "${SSH_AUTH_SOCK:?SSH_AUTH_SOCK is required}"
+: "${LAPKB_SDK_PUBLIC_KEY_FILE:?LAPKB_SDK_PUBLIC_KEY_FILE is required}"
+: "${LAPKB_PROTOCOL_PUBLIC_KEY_FILE:?LAPKB_PROTOCOL_PUBLIC_KEY_FILE is required}"
+: "${LAPKB_LOCAL_SIGNING_KID:?Public verifier key ID is required}"
+: "${LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64:?Public verifier key is required}"
+node scripts/ci/validate-pilot-inputs.mjs
 repo_root="$(git rev-parse --show-toplevel)"
 runner_temp_real="$(realpath -e -- "$RUNNER_TEMP")"
 runner_uid="$(id -u)"
 runner_gid="$(id -g)"
 : "${CHECKMATE_SOURCE_SHA:?CHECKMATE_SOURCE_SHA is required}"
 [[ "$(git rev-parse HEAD)" == "$CHECKMATE_SOURCE_SHA" ]] || { echo 'Unexpected source commit' >&2; exit 1; }
-unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG BUILDX_CONFIG SSH_AUTH_SOCK SSH_AGENT_PID
+ssh_socket="$SSH_AUTH_SOCK"
+sdk_public_key_file="$LAPKB_SDK_PUBLIC_KEY_FILE"
+protocol_public_key_file="$LAPKB_PROTOCOL_PUBLIC_KEY_FILE"
+python3 - "$runner_temp_real" "$ssh_socket" "$sdk_public_key_file" "$protocol_public_key_file" <<'PY'
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+socket, sdk, protocol = map(pathlib.Path, sys.argv[2:])
+try:
+    directory = sdk.parent
+    info = os.lstat(socket)
+    if (not stat.S_ISSOCK(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid() or socket.name != 'a'
+            or socket.parent != directory or socket.resolve(strict=True) != socket):
+        raise ValueError()
+    parent = os.lstat(directory)
+    if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
+            or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700
+            or directory.parent != root or not directory.name.startswith('checkmate-ssh.')
+            or directory.resolve(strict=True) != directory):
+        raise ValueError()
+    for path, name in ((sdk, 'sdk.pub'), (protocol, 'protocol.pub')):
+        item = os.lstat(path)
+        if (path.parent != directory or path.name != name or not stat.S_ISREG(item.st_mode)
+                or stat.S_ISLNK(item.st_mode) or item.st_uid != os.getuid()
+                or stat.S_IMODE(item.st_mode) != 0o600 or path.resolve(strict=True) != path):
+            raise ValueError()
+except (OSError, ValueError):
+    raise SystemExit("Public SSH identities or agent socket are not in this job's private directory")
+PY
+unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG BUILDX_CONFIG SSH_AUTH_SOCK SSH_AGENT_PID \
+  GIT_SSH_COMMAND GIT_SSH GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM \
+  LAPKB_SDK_PUBLIC_KEY_FILE LAPKB_PROTOCOL_PUBLIC_KEY_FILE LAPKB_PRIVATE_SSH_CONFIG LAPKB_SSH_BINARY
 
 private_config=''
 artifact_dir=''
@@ -177,8 +214,13 @@ artifact_may_be_root=1
 "${docker_argv[@]}" buildx build \
   --builder "$builder" \
   --platform "$platform" \
+  --ssh "default=$ssh_socket" \
+  --secret "id=sdk-public,src=$sdk_public_key_file" \
+  --secret "id=protocol-public,src=$protocol_public_key_file" \
   --build-arg "$target_argument=$target" \
   --build-arg CARGO_BUILD_JOBS=2 \
+  --build-arg "LAPKB_LOCAL_SIGNING_KID=$LAPKB_LOCAL_SIGNING_KID" \
+  --build-arg "LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64=$LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64" \
   --output "type=local,dest=$artifact_dir" \
   --file "$dockerfile" \
   "$repo_root"

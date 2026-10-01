@@ -8,7 +8,7 @@ case "$target" in
   *) printf 'Unsupported macOS target: %s\n' "$target" >&2; exit 2 ;;
 esac
 
-(cd desktop && npm run tauri -- build --target "$target" --bundles app,dmg --config '{"build":{"beforeBuildCommand":""}}' --ci --no-sign -- --locked --offline)
+(cd desktop && npm run tauri -- build --target "$target" --bundles app,dmg --features local-staging --config '{"build":{"beforeBuildCommand":""}}' --ci --no-sign -- --locked --offline)
 bundle="${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}/$target/release/bundle"
 app="$bundle/macos/Checkmate.app"
 plist="$app/Contents/Info.plist"
@@ -34,5 +34,5 @@ if (( ${#disks[@]} != 1 )) || [[ ! -s "${disks[0]}" ]]; then
 fi
 tar -czf "$bundle/macos/Checkmate.app.tar.gz" -C "$bundle/macos" Checkmate.app
 test -s "$bundle/macos/Checkmate.app.tar.gz"
-printf '### Unsigned macOS %s build candidate\n\n- **No trusted verifier configuration; not usable as licensed pilots.**\n- No code signing or notarization.\n- Packaged Mach-O architecture: `%s` (verified with `lipo` from `CFBundleExecutable`).\n- %s\n- The `.app.tar.gz` updater-format archive is unsigned and not update-ready.\n' \
+printf '### Unsigned macOS %s build candidate\n\n- Existing public staging verifier configuration is embedded; live licensing and runtime acceptance are not established.\n- No code signing or notarization.\n- Packaged Mach-O architecture: `%s` (verified with `lipo` from `CFBundleExecutable`).\n- %s\n- The `.app.tar.gz` updater-format archive is unsigned and not update-ready.\n' \
   "$target_label" "$actual_arch" "$cross_note" >> "$GITHUB_STEP_SUMMARY"

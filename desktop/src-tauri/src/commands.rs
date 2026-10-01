@@ -1,6 +1,6 @@
 use checkerboard_core::{
-    AnalysisPolicy, AnalysisResult, ColumnMapping, ConcentrationRange, ResponseType, analyze_with_progress,
-    assay_from_rows,
+    AnalysisPolicy, AnalysisResult, ColumnMapping, ConcentrationRange, ResponseType,
+    analyze_with_progress, assay_from_rows,
     diamond::{DiamondPolicy, DiamondResult},
     drusano_greco::{
         DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings, build_equation_dataset,
@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 
 use crate::{
+    auth::CapturedAuthorization,
     error::AppError,
+    protected_output::ProtectedOutput,
     services::{
         drusano_greco::{
             self, DrusanoAssayErrorSettings, DrusanoFitContinuation, DrusanoFitResult,
@@ -188,8 +190,12 @@ fn default_musyc_max_iterations() -> usize {
     5_000
 }
 
-fn default_musyc_bootstrap_iterations() -> usize { 500 }
-fn default_musyc_bootstrap_seed() -> u64 { 123 }
+fn default_musyc_bootstrap_iterations() -> usize {
+    500
+}
+fn default_musyc_bootstrap_seed() -> u64 {
+    123
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,8 +217,8 @@ pub struct ExportResultsRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisProgress {
-    completed_iterations: usize,
-    total_iterations: usize,
+    pub(crate) completed_iterations: usize,
+    pub(crate) total_iterations: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,18 +241,19 @@ pub struct MusycFitProgress {
     pub total_bootstraps: usize,
 }
 
-#[tauri::command]
-pub fn list_worksheets(path: String) -> Result<Vec<String>, AppError> {
+pub(crate) fn list_worksheets(path: String) -> Result<Vec<String>, AppError> {
     importer::list_worksheets(&path)
 }
 
-#[tauri::command]
-pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError> {
+pub(crate) fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError> {
     let table = importer::read_table(&request)?;
     let total_rows = table.rows.len();
     let total_columns = table.headers.len();
     let mut suggested_roles = suggest_roles(&table.headers);
-    if let Some(column) = request.organism_column.filter(|column| *column < suggested_roles.len()) {
+    if let Some(column) = request
+        .organism_column
+        .filter(|column| *column < suggested_roles.len())
+    {
         for role in &mut suggested_roles {
             if role == "organism" {
                 *role = "ignore".into();
@@ -271,21 +278,17 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
         let suffix = normalized.strip_prefix("conc");
         if let Some(suffix) =
             suffix.filter(|value| value.chars().all(|character| character.is_ascii_digit()))
-        {
-            if let Some(drug_column) = table
+            && let Some(drug_column) = table
                 .headers
                 .iter()
                 .position(|candidate| normalize_header(candidate) == format!("drug{suffix}"))
-            {
-                if let Some(name) = table
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.get(drug_column))
-                    .find(|value| !value.trim().is_empty())
-                {
-                    suggested_drug_names[index] = name.trim().to_string();
-                }
-            }
+            && let Some(name) = table
+                .rows
+                .iter()
+                .filter_map(|row| row.get(drug_column))
+                .find(|value| !value.trim().is_empty())
+        {
+            suggested_drug_names[index] = name.trim().to_string();
         }
     }
     let drug_columns = ["drugA", "drugB", "drugC"]
@@ -298,12 +301,7 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
         .collect::<Vec<_>>();
     let response_column = suggested_roles.iter().position(|role| role == "response");
     let organism_column = suggested_roles.iter().position(|role| role == "organism");
-    let mut regimens = describe_regimens(
-        &table,
-        &drug_columns,
-        response_column,
-        organism_column,
-    );
+    let mut regimens = describe_regimens(&table, &drug_columns, response_column, organism_column);
     if regimens.is_empty() {
         regimens.push(generic_regimen_preview(
             &table,
@@ -324,8 +322,7 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
     })
 }
 
-#[tauri::command]
-pub fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppError> {
+pub(crate) fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppError> {
     if !request.zero_tolerance.is_finite() || request.zero_tolerance < 0.0 {
         return Err(AppError::new(
             "invalidMicTolerance",
@@ -404,15 +401,13 @@ pub fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppErro
         .collect()
 }
 
-#[tauri::command]
-pub fn prepare_drusano_data(
+pub(crate) fn prepare_drusano_data(
     request: PrepareDrusanoDataRequest,
 ) -> Result<DrusanoDataSet, AppError> {
     prepare_drusano_data_inner(request)
 }
 
-#[tauri::command]
-pub fn suggest_drusano_censor_limit(
+pub(crate) fn suggest_drusano_censor_limit(
     request: SuggestDrusanoCensorLimitRequest,
 ) -> Result<Option<DrusanoCensorLimitSuggestion>, AppError> {
     let table = importer::read_table(&request.import)?;
@@ -444,155 +439,225 @@ fn prepare_drusano_data_inner(
     Ok(build_equation_dataset(&assay, &request.settings)?)
 }
 
-#[tauri::command]
-pub async fn fit_drusano_greco(
+pub(crate) async fn fit_drusano_greco_protected(
+    authorization: CapturedAuthorization,
     request: PrepareDrusanoDataRequest,
-    on_progress: Channel<DrusanoFitProgress>,
+    on_progress: Channel<ProtectedOutput<DrusanoFitProgress>>,
 ) -> Result<DrusanoFitResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let assay_error = request.assay_error.clone();
-        let max_cycles = request.max_cycles;
-        let continuation = request.continuation.clone();
-        let bootstrap_iterations = request.bootstrap_iterations;
-        let bootstrap_seed = request.bootstrap_seed;
-        let data = prepare_drusano_data_inner(request)?;
-        drusano_greco::fit_npag_with_options(
-            data,
-            assay_error,
-            max_cycles,
-            continuation,
-            bootstrap_iterations,
-            bootstrap_seed,
-            |phase, cycle, objective_function, completed_bootstraps, total_bootstraps| {
-                let _ = on_progress.send(DrusanoFitProgress {
-                    phase: phase.into(),
-                    cycle,
-                    objective_function,
-                    completed_bootstraps,
-                    total_bootstraps,
-                });
-            },
-        )
-        .map_err(|error| AppError::new("drusanoFitError", error.to_string()))
+        crate::run_protected_work(authorization, |authorization| {
+            run_drusano_fit(request, move |progress| {
+                let _ = crate::protected_output::send(&authorization, &on_progress, progress);
+            })
+        })
     })
     .await
     .map_err(|error| AppError::new("drusanoWorkerError", error.to_string()))?
 }
 
-#[tauri::command]
-pub async fn simulate_drusano_regimen(
-    request: DrusanoRegimenSimulationRequest,
-) -> Result<DrusanoRegimenSimulationResult, AppError> {
-    tauri::async_runtime::spawn_blocking(move || drusano_greco::simulate_regimen(request))
-        .await
-        .map_err(|error| AppError::new("drusanoSimulationWorkerError", error.to_string()))?
-        .map_err(|error| AppError::new("drusanoSimulationError", error.to_string()))
+fn run_drusano_fit(
+    request: PrepareDrusanoDataRequest,
+    send_progress: impl Fn(DrusanoFitProgress) + Send + Sync + 'static,
+) -> Result<DrusanoFitResult, AppError> {
+    let assay_error = request.assay_error.clone();
+    let max_cycles = request.max_cycles;
+    let continuation = request.continuation.clone();
+    let bootstrap_iterations = request.bootstrap_iterations;
+    let bootstrap_seed = request.bootstrap_seed;
+    let data = prepare_drusano_data_inner(request)?;
+    drusano_greco::fit_npag_with_options(
+        data,
+        assay_error,
+        max_cycles,
+        continuation,
+        bootstrap_iterations,
+        bootstrap_seed,
+        |phase, cycle, objective_function, completed_bootstraps, total_bootstraps| {
+            send_progress(DrusanoFitProgress {
+                phase: phase.into(),
+                cycle,
+                objective_function,
+                completed_bootstraps,
+                total_bootstraps,
+            });
+        },
+    )
+    .map_err(|error| AppError::new("drusanoFitError", error.to_string()))
 }
 
-#[tauri::command]
-pub async fn fit_musyc(
+pub(crate) async fn simulate_drusano_regimen_protected(
+    authorization: CapturedAuthorization,
+    request: DrusanoRegimenSimulationRequest,
+) -> Result<DrusanoRegimenSimulationResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::run_protected_work(authorization, |_| {
+            drusano_greco::simulate_regimen(request)
+                .map_err(|error| AppError::new("drusanoSimulationError", error.to_string()))
+        })
+    })
+    .await
+    .map_err(|error| AppError::new("drusanoSimulationWorkerError", error.to_string()))?
+}
+
+pub(crate) async fn fit_musyc_protected(
+    authorization: CapturedAuthorization,
     request: FitMusycRequest,
-    on_progress: Channel<MusycFitProgress>,
+    on_progress: Channel<ProtectedOutput<MusycFitProgress>>,
 ) -> Result<MusycFitResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let table = importer::read_table(&request.import)?;
-        let rows = select_regimen_rows(
-            &table,
-            &request.regimen_drug_names,
-            request.organism.as_deref(),
-            request.organism_column,
-        )?;
-        let assay = assay_from_rows(&rows, &request.mapping)?;
-        let data = build_equation_dataset(&assay, &request.settings)?;
-        musyc::fit_with_bootstrap(
-            data,
-            request.max_iterations,
-            request.bootstrap_iterations,
-            request.bootstrap_seed,
-            |phase, iteration, objective_function, completed_bootstraps, total_bootstraps| {
-                let _ = on_progress.send(MusycFitProgress {
-                    phase: phase.into(), iteration, objective_function,
-                    completed_bootstraps, total_bootstraps,
-                });
-            },
-        )
-            .map_err(|error| AppError::new("musycFitError", error.to_string()))
+        crate::run_protected_work(authorization, |authorization| {
+            run_musyc_fit(request, move |progress| {
+                let _ = crate::protected_output::send(&authorization, &on_progress, progress);
+            })
+        })
     })
     .await
     .map_err(|error| AppError::new("musycWorkerError", error.to_string()))?
 }
 
-#[tauri::command]
-pub async fn save_project_snapshot(path: String, snapshot_json: String) -> Result<(), AppError> {
-    tauri::async_runtime::spawn_blocking(move || snapshot::save(&path, &snapshot_json))
-        .await
-        .map_err(|error| AppError::new("projectSaveWorkerError", error.to_string()))?
-        .map_err(|error| AppError::new("projectSaveError", error.to_string()))
+fn run_musyc_fit(
+    request: FitMusycRequest,
+    send_progress: impl Fn(MusycFitProgress) + Send + Sync + 'static,
+) -> Result<MusycFitResult, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    let data = build_equation_dataset(&assay, &request.settings)?;
+    musyc::fit_with_bootstrap(
+        data,
+        request.max_iterations,
+        request.bootstrap_iterations,
+        request.bootstrap_seed,
+        |phase, iteration, objective_function, completed_bootstraps, total_bootstraps| {
+            send_progress(MusycFitProgress {
+                phase: phase.into(),
+                iteration,
+                objective_function,
+                completed_bootstraps,
+                total_bootstraps,
+            });
+        },
+    )
+    .map_err(|error| AppError::new("musycFitError", error.to_string()))
 }
 
-#[tauri::command]
-pub async fn load_project_snapshot(path: String) -> Result<String, AppError> {
-    tauri::async_runtime::spawn_blocking(move || snapshot::load(&path))
-        .await
-        .map_err(|error| AppError::new("projectLoadWorkerError", error.to_string()))?
-        .map_err(|error| AppError::new("projectLoadError", error.to_string()))
+pub(crate) async fn save_project_snapshot_protected(
+    authorization: CapturedAuthorization,
+    path: String,
+    snapshot_json: String,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::run_protected_work(authorization, |authorization| {
+            snapshot::save(&path, &snapshot_json, &|| authorization.is_valid())
+                .map_err(|error| AppError::new("projectSaveError", error.to_string()))
+        })
+    })
+    .await
+    .map_err(|error| AppError::new("projectSaveWorkerError", error.to_string()))?
 }
 
-#[tauri::command]
-pub async fn analyze_table(
+pub(crate) async fn load_project_snapshot_protected(
+    authorization: CapturedAuthorization,
+    path: String,
+) -> Result<String, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::run_protected_work(authorization, |_| {
+            snapshot::load(&path)
+                .map_err(|error| AppError::new("projectLoadError", error.to_string()))
+        })
+    })
+    .await
+    .map_err(|error| AppError::new("projectLoadWorkerError", error.to_string()))?
+}
+
+pub(crate) async fn analyze_table_protected(
+    authorization: CapturedAuthorization,
     request: AnalyzeTableRequest,
-    on_progress: Channel<AnalysisProgress>,
+    on_progress: Channel<ProtectedOutput<AnalysisProgress>>,
 ) -> Result<AnalysisResult, AppError> {
-    tauri::async_runtime::spawn_blocking(move || analyze_table_inner(request, Some(on_progress)))
-        .await
-        .map_err(|error| AppError::new("analysisWorkerError", error.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::run_protected_work(authorization, |authorization| {
+            analyze_table_inner_with_progress(request, move |progress| {
+                let _ = crate::protected_output::send(&authorization, &on_progress, progress);
+            })
+        })
+    })
+    .await
+    .map_err(|error| AppError::new("analysisWorkerError", error.to_string()))?
 }
 
-#[tauri::command]
-pub async fn analyze_diamond(
+pub(crate) async fn analyze_diamond_protected(
+    authorization: CapturedAuthorization,
     request: AnalyzeDiamondRequest,
-    on_progress: Channel<AnalysisProgress>,
+    on_progress: Channel<ProtectedOutput<AnalysisProgress>>,
 ) -> Result<DiamondResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let table = importer::read_table(&request.import)?;
-        let rows = select_regimen_rows(
-            &table,
-            &request.regimen_drug_names,
-            request.organism.as_deref(),
-            request.organism_column,
-        )?;
-        validate_regimen_units(
-            &table.headers,
-            &rows,
-            &request.mapping,
-            &request.concentration_units,
-        )?;
-        let assay = assay_from_rows(&rows, &request.mapping)?;
-        let mut result = checkerboard_core::diamond::analyze(
-            &assay,
-            &request.dose_anchors,
-            request.policy,
-            |completed, total| {
-                let _ = on_progress.send(AnalysisProgress {
-                    completed_iterations: completed,
-                    total_iterations: total,
-                });
-            },
-        )?;
-        result.concentration_units = if request.concentration_units.len() == assay.drug_names.len() {
-            request.concentration_units
-        } else {
-            vec![String::new(); assay.drug_names.len()]
-        };
-        Ok(result)
+        crate::run_protected_work(authorization, |authorization| {
+            analyze_diamond_inner(request, move |progress| {
+                let _ = crate::protected_output::send(&authorization, &on_progress, progress);
+            })
+        })
     })
     .await
     .map_err(|error| AppError::new("diamondWorkerError", error.to_string()))?
 }
 
+fn analyze_diamond_inner(
+    request: AnalyzeDiamondRequest,
+    mut send_progress: impl FnMut(AnalysisProgress),
+) -> Result<DiamondResult, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
+    validate_regimen_units(
+        &table.headers,
+        &rows,
+        &request.mapping,
+        &request.concentration_units,
+    )?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    let mut result = checkerboard_core::diamond::analyze(
+        &assay,
+        &request.dose_anchors,
+        request.policy,
+        |completed, total| {
+            send_progress(AnalysisProgress {
+                completed_iterations: completed,
+                total_iterations: total,
+            });
+        },
+    )?;
+    result.concentration_units = if request.concentration_units.len() == assay.drug_names.len() {
+        request.concentration_units
+    } else {
+        vec![String::new(); assay.drug_names.len()]
+    };
+    Ok(result)
+}
+
 fn analyze_table_inner(
     request: AnalyzeTableRequest,
     on_progress: Option<Channel<AnalysisProgress>>,
+) -> Result<AnalysisResult, AppError> {
+    analyze_table_inner_with_progress(request, move |progress| {
+        if let Some(channel) = &on_progress {
+            let _ = channel.send(progress);
+        }
+    })
+}
+
+fn analyze_table_inner_with_progress(
+    request: AnalyzeTableRequest,
+    mut send_progress: impl FnMut(AnalysisProgress),
 ) -> Result<AnalysisResult, AppError> {
     let table = importer::read_table(&request.import)?;
     let rows = select_regimen_rows(
@@ -684,25 +749,21 @@ fn analyze_table_inner(
     let mut restricted_total = 0;
     let mut result = analyze_with_progress(&assay, policy, |completed, total| {
         restricted_total = total;
-        if let Some(channel) = &on_progress {
-            let _ = channel.send(AnalysisProgress {
-                completed_iterations: completed,
-                total_iterations: if has_clinical_window {
-                    total * 2
-                } else {
-                    total
-                },
-            });
-        }
+        send_progress(AnalysisProgress {
+            completed_iterations: completed,
+            total_iterations: if has_clinical_window {
+                total * 2
+            } else {
+                total
+            },
+        });
     })?;
     if has_clinical_window {
         let full_result = analyze_with_progress(&full_assay, policy, |completed, total| {
-            if let Some(channel) = &on_progress {
-                let _ = channel.send(AnalysisProgress {
-                    completed_iterations: restricted_total + completed,
-                    total_iterations: restricted_total + total,
-                });
-            }
+            send_progress(AnalysisProgress {
+                completed_iterations: restricted_total + completed,
+                total_iterations: restricted_total + total,
+            });
         })?;
         let restricted_rows = result.processed.clone();
         result.processed = full_result
@@ -761,8 +822,7 @@ fn select_regimen_rows(
         .filter(|row| {
             let regimen_matches = regimen_drug_names.is_empty()
                 || name_columns.as_ref().is_none_or(|columns| {
-                    row_drug_names(row, columns)
-                        .is_some_and(|names| names == regimen_drug_names)
+                    row_drug_names(row, columns).is_some_and(|names| names == regimen_drug_names)
                 });
             let organism_matches = organism.is_none_or(|selected_organism| {
                 organism_column
@@ -929,7 +989,10 @@ fn generic_regimen_preview(
         .iter()
         .filter(|row| row_organism(row, organism_column) == organism)
         .collect::<Vec<_>>();
-    let id = organism_entry.as_ref().map_or(1, |(index, _)| *index).to_string();
+    let id = organism_entry
+        .as_ref()
+        .map_or(1, |(index, _)| *index)
+        .to_string();
     let regimen_label = drug_names.join(" + ");
     RegimenPreview {
         id: id.clone(),
@@ -943,7 +1006,11 @@ fn generic_regimen_preview(
         concentration_units,
         suggested_response_type: infer_response_type(&row_refs, drug_columns, response_column),
         drug_names,
-        rows: row_refs.iter().take(100).map(|row| (*row).clone()).collect(),
+        rows: row_refs
+            .iter()
+            .take(100)
+            .map(|row| (*row).clone())
+            .collect(),
         total_rows: row_refs.len(),
     }
 }
@@ -1147,18 +1214,36 @@ fn validate_response_values(
     Ok(())
 }
 
-#[tauri::command]
-pub fn export_results(request: ExportResultsRequest) -> Result<(), AppError> {
-    crate::services::workbook::export_results(
-        &request.path,
-        &request.analysis,
-        request.stratify_index,
-    )
+pub(crate) async fn export_results_protected(
+    authorization: CapturedAuthorization,
+    request: ExportResultsRequest,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::run_protected_work(authorization, |authorization| {
+            crate::services::workbook::export_results(
+                &request.path,
+                &request.analysis,
+                request.stratify_index,
+                &|| authorization.is_valid(),
+            )
+        })
+    })
+    .await
+    .map_err(|error| AppError::new("workbookExportWorkerError", error.to_string()))?
 }
 
-#[tauri::command]
-pub fn quit_application(app: tauri::AppHandle) {
+pub(crate) fn quit_application_protected<R: tauri::Runtime>(
+    authorization: &CapturedAuthorization,
+    app: tauri::AppHandle<R>,
+) -> Result<(), AppError> {
+    if !authorization.is_valid() {
+        return Err(AppError::new(
+            "accessDenied",
+            authorization.auth().denial_message(),
+        ));
+    }
     app.exit(0);
+    Ok(())
 }
 
 fn default_role(header: &str, _index: usize) -> String {
@@ -1248,11 +1333,10 @@ fn suggest_roles(headers: &[String]) -> Vec<String> {
             && (normalized.contains("concentration")
                 || normalized.contains("conc")
                 || parse_concentration_header(header).is_some())
+            && let Some(drug_index) = used_drugs.iter().position(|used| !used)
         {
-            if let Some(drug_index) = used_drugs.iter().position(|used| !used) {
-                roles[index] = format!("drug{}", (b'A' + drug_index as u8) as char);
-                used_drugs[drug_index] = true;
-            }
+            roles[index] = format!("drug{}", (b'A' + drug_index as u8) as char);
+            used_drugs[drug_index] = true;
         }
     }
 
@@ -1431,16 +1515,51 @@ mod tests {
                 "Response".into(),
             ],
             rows: vec![
-                vec!["Org 1".into(), "A".into(), "B".into(), "0".into(), "0".into(), "1".into()],
-                vec!["Org 1".into(), "A".into(), "B".into(), "1".into(), "1".into(), "0.5".into()],
-                vec!["Org 2".into(), "A".into(), "B".into(), "0".into(), "0".into(), "1".into()],
-                vec!["Org 2".into(), "A".into(), "B".into(), "1".into(), "1".into(), "0.25".into()],
+                vec![
+                    "Org 1".into(),
+                    "A".into(),
+                    "B".into(),
+                    "0".into(),
+                    "0".into(),
+                    "1".into(),
+                ],
+                vec![
+                    "Org 1".into(),
+                    "A".into(),
+                    "B".into(),
+                    "1".into(),
+                    "1".into(),
+                    "0.5".into(),
+                ],
+                vec![
+                    "Org 2".into(),
+                    "A".into(),
+                    "B".into(),
+                    "0".into(),
+                    "0".into(),
+                    "1".into(),
+                ],
+                vec![
+                    "Org 2".into(),
+                    "A".into(),
+                    "B".into(),
+                    "1".into(),
+                    "1".into(),
+                    "0.25".into(),
+                ],
             ],
         };
 
         assert_eq!(
             suggest_roles(&table.headers),
-            ["organism", "drugNameA", "drugNameB", "drugA", "drugB", "response"]
+            [
+                "organism",
+                "drugNameA",
+                "drugNameB",
+                "drugA",
+                "drugB",
+                "response"
+            ]
         );
         let regimens = describe_regimens(&table, &[3, 4], Some(5), Some(0));
         assert_eq!(regimens.len(), 2);
@@ -1448,13 +1567,8 @@ mod tests {
         assert_eq!(regimens[0].organism.as_deref(), Some("Org 1"));
         assert_eq!(regimens[1].organism.as_deref(), Some("Org 2"));
 
-        let selected = select_regimen_rows(
-            &table,
-            &["A".into(), "B".into()],
-            Some("Org 2"),
-            Some(0),
-        )
-        .unwrap();
+        let selected =
+            select_regimen_rows(&table, &["A".into(), "B".into()], Some("Org 2"), Some(0)).unwrap();
         assert_eq!(selected.len(), 2);
         assert!(selected.iter().all(|row| row[0] == "Org 2"));
     }
@@ -1956,8 +2070,14 @@ mod tests {
                 concentration_units: vec!["mg/L".into(), "mg/L".into()],
                 clinically_relevant_concentrations: Vec::new(),
                 concentration_ranges: vec![
-                    ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
-                    ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
+                    ConcentrationRange {
+                        minimum: Some(0.75),
+                        maximum: Some(1.25),
+                    },
+                    ConcentrationRange {
+                        minimum: Some(0.75),
+                        maximum: Some(1.25),
+                    },
                 ],
             },
             None,
@@ -1968,8 +2088,14 @@ mod tests {
         assert_eq!(
             result.concentration_ranges,
             vec![
-                ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
-                ConcentrationRange { minimum: Some(0.75), maximum: Some(1.25) },
+                ConcentrationRange {
+                    minimum: Some(0.75),
+                    maximum: Some(1.25)
+                },
+                ConcentrationRange {
+                    minimum: Some(0.75),
+                    maximum: Some(1.25)
+                },
             ]
         );
         assert_eq!(result.concentration_units, vec!["mg/L", "mg/L"]);
@@ -1990,10 +2116,8 @@ mod tests {
         assert_eq!(inferred("-0.02", "0.75"), ResponseType::InhibitionFraction);
 
         let mut noisy_fractional_rows = vec![vec!["0".into(), "0".into(), "1".into()]];
-        noisy_fractional_rows
-            .extend((0..4).map(|_| vec!["1".into(), "1".into(), "1.4".into()]));
-        noisy_fractional_rows
-            .extend((0..36).map(|_| vec!["1".into(), "1".into(), "0.25".into()]));
+        noisy_fractional_rows.extend((0..4).map(|_| vec!["1".into(), "1".into(), "1.4".into()]));
+        noisy_fractional_rows.extend((0..36).map(|_| vec!["1".into(), "1".into(), "0.25".into()]));
         assert_eq!(
             infer_response_type(
                 &noisy_fractional_rows.iter().collect::<Vec<_>>(),
@@ -2154,7 +2278,10 @@ mod tests {
                 concentration_ranges: vec![
                     ConcentrationRange::default(),
                     ConcentrationRange::default(),
-                    ConcentrationRange { minimum: Some(1.0), maximum: Some(16.0) },
+                    ConcentrationRange {
+                        minimum: Some(1.0),
+                        maximum: Some(16.0),
+                    },
                 ],
             },
             None,
