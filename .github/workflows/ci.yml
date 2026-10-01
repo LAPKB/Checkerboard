@@ -58,9 +58,10 @@ jobs:
           root="$(mktemp -d "$RUNNER_TEMP/checkmate-rust.XXXXXXXXXX")"
           root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root")"
           chmod 700 "$root"
-          mkdir -m 700 "$root/cargo" "$root/rustup" "$root/target"
+          mkdir -m 700 "$root/cargo" "$root/rustup" "$root/target" \
+            "$root/r-library" "$root/r-downloads"
           identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$root")"
-          printf 'CARGO_HOME=%s/cargo\nRUSTUP_HOME=%s/rustup\nCARGO_TARGET_DIR=%s/target\n' "$root" "$root" "$root" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s/cargo\nRUSTUP_HOME=%s/rustup\nCARGO_TARGET_DIR=%s/target\nR_LIBS_USER=%s/r-library\n' "$root" "$root" "$root" "$root" >> "$GITHUB_ENV"
           printf 'directory=%s\nidentity=%s\n' "$root" "$identity" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -76,6 +77,51 @@ jobs:
           LAPKB_SDK_READ_KEY: ${{ secrets.LAPKB_SDK_READ_KEY }}
           LAPKB_PROTOCOL_READ_KEY: ${{ secrets.LAPKB_PROTOCOL_READ_KEY }}
         run: bash scripts/ci/with-private-ssh-agent.sh cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Install the pinned development-only R parity oracle
+        timeout-minutes: 30
+        env:
+          R_JOB_DIRECTORY: ${{ steps.rust_home.outputs.directory }}
+          R_JOB_IDENTITY: ${{ steps.rust_home.outputs.identity }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/ci/owned-temp-dir.py validate \
+            "$RUNNER_TEMP" "$R_JOB_DIRECTORY" checkmate-rust "$R_JOB_IDENTITY"
+          export TMPDIR="$R_JOB_DIRECTORY/r-downloads"
+          archive="$TMPDIR/synergyfinder_3.20.0.tar.gz"
+          mirror=https://bioconductor.statistik.tu-dortmund.de
+          package=packages/3.23/bioc/src/contrib/synergyfinder_3.20.0.tar.gz
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 --max-filesize 33554432 \
+            --retry 3 --output "$archive" "$mirror/$package"
+          printf '%s  %s\n' \
+            a23f757272bffeee7d729e1f6d3bfba062e8ecd25a7597dc34421a7409fdb1f1 \
+            "$archive" | shasum -a 256 --check
+          Rscript --vanilla - "$R_LIBS_USER" "$archive" <<'RS'
+          args <- commandArgs(trailingOnly = TRUE)
+          library <- normalizePath(args[[1]], mustWork = TRUE)
+          .libPaths(c(library, .Library), include.site = FALSE)
+          options(repos = c(CRAN = "https://cloud.r-project.org"),
+                  timeout = 180)
+          # Use native binaries, not system/compiler installs. All writes stay
+          # in this job's library. The shipped app has no R dependency.
+          dependencies <- c(
+            "drc", "reshape2", "tidyverse", "dplyr", "tidyr", "purrr", "furrr",
+            "ggplot2", "ggforce", "vegan", "gstat", "sp", "SpatialExtremes",
+            "ggrepel", "kriging", "plotly", "stringr", "future", "mice",
+            "nleqslv", "magrittr", "pbapply", "metR", "jsonlite"
+          )
+          install.packages(dependencies, lib = library, type = "binary",
+                           Ncpus = 2L,
+                           dependencies = c("Depends", "Imports", "LinkingTo"))
+          install.packages(args[[2]], repos = NULL, type = "source",
+                           lib = library, Ncpus = 2L)
+          stopifnot(requireNamespace("synergyfinder", quietly = TRUE),
+                    requireNamespace("jsonlite", quietly = TRUE),
+                    identical(as.character(packageVersion("synergyfinder")),
+                              "3.20.0"))
+          RS
       - name: Test native licensing and scientific core offline
         env:
           GIT_CONFIG_GLOBAL: /dev/null
