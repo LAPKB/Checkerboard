@@ -9,12 +9,13 @@ case "$target" in
   *) printf 'Unsupported macOS target: %s\n' "$target" >&2; exit 2 ;;
 esac
 case "$phase" in
-  app|dmg) ;;
+  app) bundles=app ;;
+  dmg) bundles=app,dmg ;;
   *) printf 'Unsupported macOS build phase: %s\n' "$phase" >&2; exit 2 ;;
 esac
 
 node scripts/ci/validate-pilot-inputs.mjs
-(cd desktop && npm run tauri -- build --target "$target" --bundles "$phase" \
+(cd desktop && npm run tauri -- build --target "$target" --bundles "$bundles" \
   --features local-staging \
   --config '{"build":{"beforeBuildCommand":""},"bundle":{"macOS":{"signingIdentity":"-"}}}' \
   --ci -- --locked --offline)
