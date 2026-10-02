@@ -38,7 +38,8 @@ if [[ "$actual_arch" != "$expected_arch" ]]; then
 fi
 /usr/bin/codesign --verify --deep --strict "$app"
 if [[ "$phase" == app ]]; then
-  tar -czf "$bundle/macos/Checkmate.app.tar.gz" -C "$bundle/macos" Checkmate.app
+  # macOS metadata sidecars are not sealed app resources; do not add them to the archive.
+  COPYFILE_DISABLE=1 tar --format=ustar -czf "$bundle/macos/Checkmate.app.tar.gz" -C "$bundle/macos" Checkmate.app
   test -s "$bundle/macos/Checkmate.app.tar.gz"
   printf '### macOS %s app build candidate\n\n- Ad-hoc signature verified for the app bundle.\n- Packaged Mach-O architecture: `%s` (verified with `lipo` from `CFBundleExecutable`).\n- Existing `Checkmate.app.tar.gz` installation archive created and verified non-empty.\n' \
     "$target_label" "$actual_arch" >> "$GITHUB_STEP_SUMMARY"
