@@ -77,8 +77,8 @@ jobs:
           LAPKB_SDK_READ_KEY: ${{ secrets.LAPKB_SDK_READ_KEY }}
           LAPKB_PROTOCOL_READ_KEY: ${{ secrets.LAPKB_PROTOCOL_READ_KEY }}
         run: bash scripts/ci/with-private-ssh-agent.sh cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
-      - name: Build ARM64 app and DMG
-        run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin
+      - name: Build ARM64 app and install archive
+        run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin app
       - name: Prune superseded candidate artifacts
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -88,21 +88,33 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: checkmate-macos-arm64-build-candidate
-          path: |
-            ${{ env.CARGO_TARGET_DIR }}/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            ${{ env.CARGO_TARGET_DIR }}/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+          path: ${{ env.CARGO_TARGET_DIR }}/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
           if-no-files-found: error
           retention-days: 7
       - name: Install Intel Rust target
         run: rustup target add --toolchain 1.97.1 x86_64-apple-darwin
-      - name: Build Intel app and DMG
-        run: bash scripts/ci/build-macos-candidate.sh x86_64-apple-darwin
+      - name: Build Intel app and install archive
+        run: bash scripts/ci/build-macos-candidate.sh x86_64-apple-darwin app
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: checkmate-macos-x64-build-candidate
-          path: |
-            ${{ env.CARGO_TARGET_DIR }}/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            ${{ env.CARGO_TARGET_DIR }}/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+          path: ${{ env.CARGO_TARGET_DIR }}/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build ARM64 DMG
+        run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-macos-arm64-dmg-build-candidate
+          path: ${{ env.CARGO_TARGET_DIR }}/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build Intel DMG
+        run: bash scripts/ci/build-macos-candidate.sh x86_64-apple-darwin dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-macos-x64-dmg-build-candidate
+          path: ${{ env.CARGO_TARGET_DIR }}/x86_64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 7
       - name: Install the pinned development-only R parity oracle

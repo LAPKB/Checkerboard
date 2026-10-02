@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-target="${1:?usage: build-macos-candidate.sh <aarch64-apple-darwin|x86_64-apple-darwin>}"
+target="${1:?usage: build-macos-candidate.sh <aarch64-apple-darwin|x86_64-apple-darwin> [app|dmg]}"
+phase="${2:-app}"
 case "$target" in
-  aarch64-apple-darwin) expected_arch=arm64; target_label=ARM64; cross_note='ARM64 build; native runtime not exercised.' ;;
-  x86_64-apple-darwin) expected_arch=x86_64; target_label=x64; cross_note='Intel build; native runtime not exercised.' ;;
+  aarch64-apple-darwin) expected_arch=arm64; target_label=ARM64 ;;
+  x86_64-apple-darwin) expected_arch=x86_64; target_label=x64 ;;
   *) printf 'Unsupported macOS target: %s\n' "$target" >&2; exit 2 ;;
+esac
+case "$phase" in
+  app|dmg) ;;
+  *) printf 'Unsupported macOS build phase: %s\n' "$phase" >&2; exit 2 ;;
 esac
 
 node scripts/ci/validate-pilot-inputs.mjs
-(cd desktop && npm run tauri -- build --target "$target" --bundles app,dmg \
+(cd desktop && npm run tauri -- build --target "$target" --bundles "$phase" \
   --features local-staging \
   --config '{"build":{"beforeBuildCommand":""},"bundle":{"macOS":{"signingIdentity":"-"}}}' \
   --ci -- --locked --offline)
@@ -31,13 +36,18 @@ if [[ "$actual_arch" != "$expected_arch" ]]; then
   exit 1
 fi
 /usr/bin/codesign --verify --deep --strict "$app"
-shopt -s nullglob
-disks=("$bundle/dmg/"*.dmg)
-if (( ${#disks[@]} != 1 )) || [[ ! -s "${disks[0]}" ]]; then
-  printf 'Expected exactly one non-empty macOS DMG in %s/dmg\n' "$bundle" >&2
-  exit 1
+if [[ "$phase" == app ]]; then
+  tar -czf "$bundle/macos/Checkmate.app.tar.gz" -C "$bundle/macos" Checkmate.app
+  test -s "$bundle/macos/Checkmate.app.tar.gz"
+  printf '### macOS %s app build candidate\n\n- Ad-hoc signature verified for the app bundle.\n- Packaged Mach-O architecture: `%s` (verified with `lipo` from `CFBundleExecutable`).\n- Existing `Checkmate.app.tar.gz` installation archive created and verified non-empty.\n' \
+    "$target_label" "$actual_arch" >> "$GITHUB_STEP_SUMMARY"
+else
+  shopt -s nullglob
+  disks=("$bundle/dmg/"*.dmg)
+  if (( ${#disks[@]} != 1 )) || [[ ! -s "${disks[0]}" ]]; then
+    printf 'Expected exactly one non-empty macOS DMG in %s/dmg\n' "$bundle" >&2
+    exit 1
+  fi
+  printf '### macOS %s DMG build candidate\n\n- Ad-hoc signature verified for the app bundle.\n- Packaged Mach-O architecture: `%s` (verified with `lipo` from `CFBundleExecutable`).\n- Exactly one non-empty DMG verified: `%s`.\n' \
+    "$target_label" "$actual_arch" "${disks[0]}" >> "$GITHUB_STEP_SUMMARY"
 fi
-tar -czf "$bundle/macos/Checkmate.app.tar.gz" -C "$bundle/macos" Checkmate.app
-test -s "$bundle/macos/Checkmate.app.tar.gz"
-printf '### macOS %s build candidate\n\n- Existing public staging verifier configuration is embedded; live licensing and runtime acceptance are not established.\n- Ad-hoc bundle signature verified; no Developer ID signing or notarization.\n- Packaged Mach-O architecture: `%s` (verified with `lipo` from `CFBundleExecutable`).\n- %s\n- The `.app.tar.gz` updater-format archive is unsigned and not update-ready.\n' \
-  "$target_label" "$actual_arch" "$cross_note" >> "$GITHUB_STEP_SUMMARY"
