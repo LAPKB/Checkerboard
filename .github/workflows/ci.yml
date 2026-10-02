@@ -118,7 +118,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Install the pinned development-only R parity oracle
-        timeout-minutes: 30
+        timeout-minutes: 60
         env:
           R_JOB_DIRECTORY: ${{ steps.rust_home.outputs.directory }}
           R_JOB_IDENTITY: ${{ steps.rust_home.outputs.identity }}
@@ -128,6 +128,89 @@ jobs:
           python3 scripts/ci/owned-temp-dir.py validate \
             "$RUNNER_TEMP" "$R_JOB_DIRECTORY" checkmate-rust "$R_JOB_IDENTITY"
           export TMPDIR="$R_JOB_DIRECTORY/r-downloads"
+          # Only the development oracle needs these libraries; the app needs no R.
+          native="$R_JOB_DIRECTORY/native"
+          prefix="$native/prefix"
+          mkdir -m 700 "$native" "$native/src" "$native/build" "$prefix" \
+            "$native/home" "$native/cache" "$native/cache/proj"
+          export HOME="$native/home" XDG_CACHE_HOME="$native/cache"
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export PATH="$prefix/bin:$PATH"
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          # These inspected source archives have no links or escaping paths.
+          while read -r component checksum url; do
+            source_archive="$native/$component.archive"
+            mkdir -m 700 "$native/src/$component"
+            curl --disable --fail --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --connect-timeout 15 --max-time 180 --max-filesize 33554432 \
+              --retry 3 --output "$source_archive" "$url"
+            printf '%s  %s\n' "$checksum" "$source_archive" | shasum -a 256 --check
+            tar --no-same-owner --no-same-permissions -xf "$source_archive" \
+              -C "$native/src/$component" --strip-components=1
+          done <<'NATIVE'
+          expat 1e727b8933ec51a77a9a9d9afcf8e688bce45d907c13e36ab7393fe36e703182 https://github.com/libexpat/libexpat/releases/download/R_2_8_5/expat-2.8.5.tar.xz
+          sqlite 0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          udunits 590baec83161a3fd62c00efa66f6113cec8a7c461e3f61a5182167e0cc5d579e https://downloads.unidata.ucar.edu/udunits/2.2.28/udunits-2.2.28.tar.gz
+          geos d5e5192a686d065eaed082de14dd26244c5c8e02bff16b2c6cce3265f648e00e https://download.osgeo.org/geos/geos-3.15.0.tar.bz2
+          proj 791a0610547eeabb17006cfd49cdbd2034f3240f47ed5e88a1031811f4e2bcf3 https://github.com/OSGeo/PROJ/releases/download/9.9.0/proj-9.9.0.tar.gz
+          gdal 5e0c388d83da2d686cc00a40272882432cdb54edff43d4af173e532844a0a0ea https://github.com/OSGeo/gdal/releases/download/v3.13.3/gdal-3.13.3.tar.gz
+          NATIVE
+          build_native_cmake() {
+            local component="$1"
+            shift
+            cmake -S "$native/src/$component" -B "$native/build/$component" \
+              -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
+              -DCMAKE_PREFIX_PATH="$prefix" \
+              -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+              -DCMAKE_C_FLAGS=-fexceptions -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_INSTALL_NAME_DIR="$prefix/lib" \
+              -DCMAKE_BUILD_WITH_INSTALL_NAME_DIR=ON -DCMAKE_INSTALL_RPATH="$prefix/lib" \
+              -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
+              -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF \
+              -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF "$@"
+            cmake --build "$native/build/$component" --parallel 2
+            cmake --install "$native/build/$component"
+          }
+          build_native_cmake expat -DEXPAT_BUILD_TESTS=OFF -DEXPAT_BUILD_EXAMPLES=OFF \
+            -DEXPAT_BUILD_TOOLS=OFF -DEXPAT_BUILD_DOCS=OFF
+          mkdir -m 700 "$native/build/sqlite" "$native/build/udunits"
+          (
+            cd "$native/build/sqlite"
+            CC=/usr/bin/clang CFLAGS="-O2" \
+              "$native/src/sqlite/configure" --prefix="$prefix" \
+              --disable-readline --disable-static \
+              --enable-rtree --enable-column-metadata
+            make -j2
+            make install
+          )
+          (
+            cd "$native/build/udunits"
+            # R units requires exception propagation through the C library.
+            CC=/usr/bin/clang CFLAGS="-O2 -fexceptions" \
+              CPPFLAGS="-I$prefix/include" LDFLAGS="-L$prefix/lib -Wl,-rpath,$prefix/lib" \
+              "$native/src/udunits/configure" --prefix="$prefix" \
+              --enable-shared --disable-static
+            make -j2 MAKEINFO=true
+            make install MAKEINFO=true
+          )
+          build_native_cmake geos
+          build_native_cmake proj -DBUILD_APPS=OFF -DENABLE_CURL=OFF -DENABLE_TIFF=OFF \
+            -DNLOHMANN_JSON_ORIGIN=internal -DEXE_SQLITE3="$prefix/bin/sqlite3" \
+            -DSQLite3_INCLUDE_DIR="$prefix/include" \
+            -DSQLite3_LIBRARY="$prefix/lib/libsqlite3.dylib"
+          build_native_cmake gdal -DBUILD_APPS=OFF -DBUILD_PYTHON_BINDINGS=OFF \
+            -DBUILD_JAVA_BINDINGS=OFF -DBUILD_CSHARP_BINDINGS=OFF -DUSE_CCACHE=OFF \
+            -DGDAL_BUILD_OPTIONAL_DRIVERS=OFF -DOGR_BUILD_OPTIONAL_DRIVERS=OFF \
+            -DGDAL_USE_EXTERNAL_LIBS=OFF -DGDAL_USE_INTERNAL_LIBS=ON \
+            -DGDAL_USE_GEOS=ON -DGDAL_USE_SQLITE3=ON -DGDAL_USE_EXPAT=ON \
+            -DSQLite3_INCLUDE_DIR="$prefix/include" \
+            -DSQLite3_LIBRARY="$prefix/lib/libsqlite3.dylib"
+          export UDUNITS2_INCLUDE="$prefix/include" UDUNITS2_LIBS="$prefix/lib"
+          export UDUNITS2_XML_PATH="$prefix/share/udunits/udunits2.xml"
+          export GDAL_DATA="$prefix/share/gdal" PROJ_DATA="$prefix/share/proj"
+          export PROJ_USER_WRITABLE_DIRECTORY="$native/cache/proj"
           archive="$TMPDIR/synergyfinder_3.20.0.tar.gz"
           mirror=https://bioconductor.statistik.tu-dortmund.de
           package=packages/3.23/bioc/src/contrib/synergyfinder_3.20.0.tar.gz
@@ -167,6 +250,10 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: "1"
           GIT_SSH_COMMAND: /usr/bin/false
+          UDUNITS2_XML_PATH: ${{ steps.rust_home.outputs.directory }}/native/prefix/share/udunits/udunits2.xml
+          GDAL_DATA: ${{ steps.rust_home.outputs.directory }}/native/prefix/share/gdal
+          PROJ_DATA: ${{ steps.rust_home.outputs.directory }}/native/prefix/share/proj
+          PROJ_USER_WRITABLE_DIRECTORY: ${{ steps.rust_home.outputs.directory }}/native/cache/proj
         run: cargo test --workspace --locked --offline --features local-staging --target aarch64-apple-darwin --manifest-path desktop/src-tauri/Cargo.toml
       - name: Remove this job's Rust directories
         if: always()
