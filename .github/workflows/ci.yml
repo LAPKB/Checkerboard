@@ -104,15 +104,15 @@ jobs:
           .libPaths(c(library, .Library), include.site = FALSE)
           options(repos = c(CRAN = "https://cloud.r-project.org"),
                   timeout = 180)
-          # Use native binaries, not system/compiler installs. All writes stay
-          # in this job's library. The shipped app has no R dependency.
+          # Homebrew R supports source packages, not CRAN macOS binary installs.
+          # All package writes stay in this job's library; the app needs no R.
           dependencies <- c(
             "drc", "reshape2", "tidyverse", "dplyr", "tidyr", "purrr", "furrr",
             "ggplot2", "ggforce", "vegan", "gstat", "sp", "SpatialExtremes",
             "ggrepel", "kriging", "plotly", "stringr", "future", "mice",
             "nleqslv", "magrittr", "pbapply", "metR", "jsonlite"
           )
-          install.packages(dependencies, lib = library, type = "binary",
+          install.packages(dependencies, lib = library, type = "source",
                            Ncpus = 2L,
                            dependencies = c("Depends", "Imports", "LinkingTo"))
           install.packages(args[[2]], repos = NULL, type = "source",
