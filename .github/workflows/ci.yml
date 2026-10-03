@@ -178,10 +178,10 @@ jobs:
           mkdir -m 700 "$native/build/sqlite" "$native/build/udunits"
           (
             cd "$native/build/sqlite"
-            CC=/usr/bin/clang CFLAGS="-O2" \
+            CC=/usr/bin/clang CFLAGS="-O2 -DSQLITE_ENABLE_COLUMN_METADATA" \
               "$native/src/sqlite/configure" --prefix="$prefix" \
               --disable-readline --disable-static \
-              --enable-rtree --enable-column-metadata
+              --enable-rtree
             make -j2
             make install
           )
