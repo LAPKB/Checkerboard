@@ -1,6 +1,6 @@
 [package]
 name = "checkmate-desktop"
-version = "0.8.0"
+version = "0.8.1"
 description = "Desktop interface for drug-interaction analysis and regimen ranking"
 authors = ["Michael Neely"]
 edition = "2024"
@@ -46,11 +46,11 @@ rust_xlsxwriter = "0.96"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "daba4ce5add38c9147f185e9caec6defa65a22a6", features = ["client"] }
+lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "ef542825f4b0b131e0feb5c8579ef4882a072f87", features = ["client"] }
 
 [dev-dependencies]
 ed25519-dalek = "2.1.1"
-lapkb-authorization-protocol = { git = "ssh://git@github.com/LAPKB/desktop-authorization.git", rev = "bcca349d7ea3d448c85a177fed3b1af4d3f941a1" }
+lapkb-authorization-protocol = { git = "ssh://git@github.com/LAPKB/desktop-authorization.git", rev = "b32bcefb244ffba54b9de47b4004939b6a01b0cd" }
 tauri = { version = "2", features = ["test"] }
 
 [patch.crates-io]

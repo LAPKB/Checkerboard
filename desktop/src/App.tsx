@@ -105,7 +105,7 @@ interface ProjectSnapshot {
 }
 
 const BarPlot = lazy(() => import("./BarPlot"));
-const appBuild = "0.8.0";
+const appBuild = "0.8.1";
 
 const roleOptions: ColumnRole[] = ["ignore", "organism", "drugNameA", "drugA", "unitsA", "drugNameB", "drugB", "unitsB", "drugNameC", "drugC", "unitsC", "response"];
 

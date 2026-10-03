@@ -159,6 +159,7 @@ mod broker_fixture {
             app_ids: vec![ProtectedApp::Checkerboard],
             sequence: state.sequence,
             issued_at: state.issued_at,
+            expires_at: state.issued_at + 31 * 86_400,
             origin: OriginBinding::new(
                 "00000000-0000-0000-0000-000000000010"
                     .parse()

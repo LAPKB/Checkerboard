@@ -90,7 +90,7 @@ async function renderGate(strict = false) {
   root = createRoot(container);
   const gate = (
     <AuthGate
-      buildVersion="0.8.0"
+      buildVersion="0.8.1"
       formatError={formatError}
       launcherError={null}
       logo="checkmate-logo.png"
