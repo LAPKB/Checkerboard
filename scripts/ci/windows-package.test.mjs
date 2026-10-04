@@ -67,17 +67,18 @@ test("generated solid NSIS preserves known and unknown-size payloads and reconst
     for (const [name, bytes] of Object.entries(files)) writeFileSync(join(directory, name), bytes);
     writeFileSync(join(directory, "support.bin"), support[supportPath]);
     for (const tail of ["uninstaller", "payload"]) {
-      // Use the stock Unicode plugin's real NSIS command, not a payload copy.
-      // Keep the payload-tail archive free of an uninstaller patch: 7zip can
-      // reorder that patch after the payload regardless of NSIS command order.
-      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\nInitPluginsDir\nSetOutPath "$PLUGINSDIR"\nFile /oname=fixture-support.bin "support.bin"\nStartMenu::Init /autoadd "Listing fixture"\nPop $0\nSetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\n${tail === "payload" ? 'File "last.bin"\n' : 'WriteUninstaller "$INSTDIR\\uninstall.exe"\n'}SectionEnd\n${tail === "uninstaller" ? 'Section "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n' : ""}`);
+      // Keep the previously passing uninstaller construction free of plugins
+      // and support files. Exercise the stock Unicode plugin's real command
+      // only in the payload-tail archive, without an uninstaller patch.
+      const pluginInstructions = tail === "payload" ? 'InitPluginsDir\nSetOutPath "$PLUGINSDIR"\nFile /oname=fixture-support.bin "support.bin"\nStartMenu::Init /autoadd "Listing fixture"\nPop $0\n' : "";
+      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\n${pluginInstructions}SetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\n${tail === "payload" ? 'File "last.bin"\n' : 'WriteUninstaller "$INSTDIR\\uninstall.exe"\n'}SectionEnd\n${tail === "uninstaller" ? 'Section "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n' : ""}`);
       run("/usr/bin/makensis", ["fixture.nsi"]);
       const listing = run("/usr/bin/7z", ["l", "-slt", "--", `${tail}.exe`]);
-      const fixtures = [{ name: "generated", listing }, {
-        name: "positive solid plugin estimate", pluginSize: 20996,
-        listing: listing.replace(/^(Path = \$PLUGINSDIR\/StartMenu\.dll\r?\n)Size = [^\r\n]*/m, "$1Size = 20996"),
-      }];
+      const fixtures = [{ name: "generated", listing }];
       if (tail === "payload") {
+        fixtures.push({ name: "positive solid plugin estimate", pluginSize: 20996,
+          listing: listing.replace(/^(Path = \$PLUGINSDIR\/StartMenu\.dll\r?\n)Size = [^\r\n]*/m, "$1Size = 20996"),
+        });
         // Exercise both permitted Size forms independently of this 7zip build,
         // changing only the final payload's field in its real solid listing.
         for (const size of [files["last.bin"].length, null]) fixtures.push({
@@ -91,12 +92,17 @@ test("generated solid NSIS preserves known and unknown-size payloads and reconst
         for (fixture of fixtures) {
           const entries = parseNsisListing(fixture.listing);
           const lastPath = tail === "payload" ? "last.bin" : "uninstall.exe";
-          assert.deepEqual(entries.map((entry) => entry.path).sort(), ["first.bin", "second.bin", pluginPath, supportPath, lastPath].sort());
+          const expectedPaths = tail === "payload"
+            ? ["first.bin", "second.bin", "last.bin", pluginPath, supportPath]
+            : ["first.bin", "second.bin", "uninstall.exe"];
+          assert.deepEqual(entries.map((entry) => entry.path).sort(), expectedPaths.sort());
           const last = entries.find((entry) => entry.path === lastPath);
           if (fixture.size !== undefined) assert.equal(last.size, fixture.size);
-          const plugin = entries.find((entry) => entry.path === pluginPath);
-          assert.equal(plugin.sizeIsEstimate, true);
-          if (fixture.pluginSize !== undefined) assert.equal(plugin.size, fixture.pluginSize);
+          if (tail === "payload") {
+            const plugin = entries.find((entry) => entry.path === pluginPath);
+            assert.equal(plugin.sizeIsEstimate, true);
+            if (fixture.pluginSize !== undefined) assert.equal(plugin.size, fixture.pluginSize);
+          }
           const extractedSizes = new Map();
           for (const entry of entries) {
             assert(!entry.directory);
