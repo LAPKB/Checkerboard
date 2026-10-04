@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { SPEC, inspectWindowsPackage, parseNsisListing, peInfo, safeArchivePath, validateExtractedSizes, verifyPackageProof } from "./windows-package.mjs";
+import { SPEC, inspectWindowsPackage, nsisApplicationBytes, parseNsisListing, peInfo, safeArchivePath, validateExtractedSizes, validatePayloadImports, verifyPackageProof } from "./windows-package.mjs";
 
 test("solid NSIS listing keeps optional Packed Size separate from logical Size", () => {
   const listing = (size, packed = "", solid = "+") => `Type = Nsis\nSolid = ${solid}\n\n----------\nPath = app.exe\n${size === undefined ? "" : `Size = ${size}\n`}Packed Size = ${packed}\nAttributes = A\nSolid = ${solid}\n`;
@@ -47,6 +47,59 @@ test("extracted NSIS sizes distinguish solid estimates from exact lengths and re
   assert.throws(() => validateExtractedSizes(estimated, new Map()), /Missing extracted NSIS entry/);
   // Non-solid uninstall.exe still describes an encoded patch, not its rebuilt PE.
   validateExtractedSizes(parseNsisListing(listing("-", "-").replace(path, "$INSTDIR/uninstall.exe")), new Map([["$INSTDIR/uninstall.exe", 12288]]));
+});
+
+test("Windows COM base is OS-provided; unknown and third-party DLLs still require root placement", () => {
+  const app = { path: "app.exe", imports: ["combase.dll", "ole32.dll", "vendor.dll"] };
+  const vendor = { path: "vendor.dll", imports: ["combase.dll"] };
+  assert.deepEqual([...validatePayloadImports([app, vendor])].sort(), ["combase.dll", "ole32.dll"]);
+  for (const library of ["unknown.dll", "combase-extra.dll", "vcruntime140.dll"]) {
+    assert.throws(() => validatePayloadImports([{ ...app, imports: [library] }]), /Missing\/root-misplaced DLL dependencies/);
+  }
+  assert.throws(() => validatePayloadImports([app, { ...vendor, path: "lib/vendor.dll" }]), /app\.exe -> vendor\.dll \(bundled at lib\/vendor\.dll\)/);
+  assert.throws(() => validatePayloadImports([app, vendor, { ...vendor, path: "lib/VENDOR.DLL" }]), /Ambiguous bundled DLL name/);
+  // Every missing/misplaced import from both application and bundled DLLs is
+  // reported together. System COM base is never mistaken for a bundled DLL.
+  assert.throws(() => validatePayloadImports([
+    { ...app, imports: [...app.imports, "unknown.dll", "vcruntime140.dll"] },
+    { ...vendor, imports: ["combase.dll", "nested.dll", "vendor-dependency.dll"] },
+    { path: "lib/nested.dll", imports: [] },
+  ]), (error) => {
+    assert(error.message.includes("4 unresolved imports"));
+    for (const entry of ["app.exe -> unknown.dll", "app.exe -> vcruntime140.dll", "vendor.dll -> nested.dll (bundled at lib/nested.dll)", "vendor.dll -> vendor-dependency.dll"]) assert(error.message.includes(entry), entry);
+    assert(!error.message.includes("-> combase.dll") && !error.message.includes("capped"));
+    return true;
+  });
+});
+
+test("DLL diagnostics cap output explicitly without stopping the closure inspection", () => {
+  const imports = Array.from({ length: 40 }, (_, index) => `missing-${index}.dll`);
+  assert.throws(() => validatePayloadImports([
+    { path: "app.exe", imports }, { path: "vendor.dll", imports: ["last-missing.dll"] },
+  ]), (error) => {
+    assert(error.message.includes("41 unresolved imports"));
+    assert(error.message.includes("Diagnostic output capped at 32 of 41; all payload imports were inspected."));
+    assert.equal((error.message.match(/ -> /g) ?? []).length, 32);
+    assert(error.message.includes("app.exe -> missing-31.dll"));
+    assert(!error.message.includes("missing-32.dll") && !error.message.includes("last-missing.dll"));
+    return true;
+  });
+});
+
+test("Tauri NSIS identity patches only the first UNK marker, without changing compiled headers or tail", () => {
+  const unknown = Buffer.from("__TAURI_BUNDLE_TYPE_VAR_UNK"); const nsis = Buffer.from("__TAURI_BUNDLE_TYPE_VAR_NSS");
+  const header = pe(0x8664); const tail = Buffer.concat([Buffer.from([0, 0xe8, 0xff, 0xff, 0xff, 0xff]), unknown, Buffer.from([0x7f])]);
+  const compiled = Buffer.concat([header, unknown, tail]); const saved = Buffer.from(compiled);
+  const expected = Buffer.concat([header, nsis, tail]); const actual = nsisApplicationBytes(compiled);
+  assert.deepEqual(actual, expected); assert.deepEqual(compiled, saved);
+  assert.equal(actual.length, compiled.length);
+  const changedOffsets = [...compiled.keys()].filter((offset) => compiled[offset] !== actual[offset]);
+  assert.deepEqual(changedOffsets, [header.length + unknown.length - 3, header.length + unknown.length - 2, header.length + unknown.length - 1]);
+  assert.deepEqual(actual.subarray(0, header.length), header);
+  assert.deepEqual(actual.subarray(header.length + unknown.length), tail); // The second marker remains UNK.
+  for (const bytes of [header, Buffer.concat([header, nsis]), Buffer.concat([header, unknown.subarray(0, -1)])]) {
+    assert.throws(() => nsisApplicationBytes(bytes), /lacks the unbundled Tauri marker/);
+  }
 });
 
 test("generated solid NSIS preserves known and unknown-size payloads and reconstructs its uninstaller", {
@@ -160,10 +213,30 @@ test("actual generated NSIS has a reproducible payload and source/run provenance
     copyFileSync(join(outputDirectory, args.appName), join(directory, args.appName));
     // Re-extract the actual package. Equality covers every resource, bundled
     // DLL, support entry and imported system library, not just the exported PE.
-    const inspected = inspectWindowsPackage({ appId, target, sourceCommit, outputDirectory: directory,
-      runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, profile });
+    const inspection = { appId, target, sourceCommit, outputDirectory: directory,
+      runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, profile };
+    const inspected = inspectWindowsPackage(inspection);
     assert.deepEqual(inspected, proof);
     assert.deepEqual(verifyPackageProof({ ...args, outputDirectory: directory }), proof);
+    const compiled = readFileSync(join(directory, args.appName));
+    const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    assert.deepEqual(proof.compiledApplication, { filename: spec.exported, size: compiled.length, sha256: digest(compiled) });
+    const installed = proof.windowsPayload.files.find((file) => file.path === spec.executable);
+    assert.equal(installed.sha256, digest(nsisApplicationBytes(compiled)));
+    assert.notEqual(installed.sha256, proof.compiledApplication.sha256);
+    // Neither an arbitrary PE timestamp change nor extra tail bytes is part
+    // of Tauri's marker patch, even though both remain parseable PEs.
+    const timestamp = Buffer.from(compiled); timestamp[timestamp.readUInt32LE(60) + 8] ^= 1;
+    for (const changed of [timestamp, Buffer.concat([compiled, Buffer.from([0x7f])])]) {
+      writeFileSync(join(directory, args.appName), changed);
+      assert.throws(() => verifyPackageProof({ ...args, outputDirectory: directory }), /Compiled application identity differs/);
+      assert.throws(() => inspectWindowsPackage(inspection), /Exported PE differs from installer-contained application/);
+    }
+    writeFileSync(join(directory, args.appName), compiled);
+    const wrongCompiled = structuredClone(proof); wrongCompiled.compiledApplication.sha256 = "0".repeat(64);
+    writeFileSync(join(directory, "windows-package.json"), JSON.stringify(wrongCompiled));
+    assert.throws(() => verifyPackageProof({ ...args, outputDirectory: directory }), /Compiled application identity differs/);
+    writeFileSync(join(directory, "windows-package.json"), JSON.stringify(proof));
     assert.throws(() => verifyPackageProof({ ...args, outputDirectory: directory, sourceCommit: "0".repeat(40) }));
     // These are unsigned packaging bytes; no release signature/native pass is invented.
     assert.equal(proof.nativeRuntime, "not executed");

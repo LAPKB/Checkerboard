@@ -18,8 +18,30 @@ export const SPEC = Object.freeze({
 });
 const MAX_FILE = 256 * 1024 * 1024;
 const MAX_EXPANDED = 1024 * 1024 * 1024;
-const SYSTEM_LIBRARIES = new Set(("kernel32.dll kernelbase.dll ntdll.dll user32.dll advapi32.dll ole32.dll oleaut32.dll shell32.dll shlwapi.dll gdi32.dll gdi32full.dll comdlg32.dll comctl32.dll version.dll winmm.dll ws2_32.dll secur32.dll security.dll crypt32.dll bcrypt.dll bcryptprimitives.dll ncrypt.dll uxtheme.dll dwmapi.dll d3d11.dll dxgi.dll d2d1.dll dwrite.dll imm32.dll winhttp.dll wininet.dll psapi.dll iphlpapi.dll wtsapi32.dll msimg32.dll rpcrt4.dll cfgmgr32.dll setupapi.dll powrprof.dll normaliz.dll propsys.dll mpr.dll msvcrt.dll ucrtbase.dll dbghelp.dll dbgcore.dll dnsapi.dll netapi32.dll userenv.dll windowscodecs.dll opengl32.dll hid.dll cabinet.dll urlmon.dll avrt.dll winspool.drv mswsock.dll dhcpcsvc.dll dcomp.dll shcore.dll gdiplus.dll wintrust.dll win32u.dll d3d12.dll d3dcompiler_47.dll uiautomationcore.dll oleacc.dll").split(" "));
+// Microsoft RoInitialize: ComBase.dll is Windows-provided from Windows 8 /
+// Server 2012 (https://learn.microsoft.com/windows/win32/api/roapi/nf-roapi-roinitialize).
+const SYSTEM_LIBRARIES = new Set(("kernel32.dll kernelbase.dll ntdll.dll user32.dll advapi32.dll ole32.dll oleaut32.dll combase.dll shell32.dll shlwapi.dll gdi32.dll gdi32full.dll comdlg32.dll comctl32.dll version.dll winmm.dll ws2_32.dll secur32.dll security.dll crypt32.dll bcrypt.dll bcryptprimitives.dll ncrypt.dll uxtheme.dll dwmapi.dll d3d11.dll dxgi.dll d2d1.dll dwrite.dll imm32.dll winhttp.dll wininet.dll psapi.dll iphlpapi.dll wtsapi32.dll msimg32.dll rpcrt4.dll cfgmgr32.dll setupapi.dll powrprof.dll normaliz.dll propsys.dll mpr.dll msvcrt.dll ucrtbase.dll dbghelp.dll dbgcore.dll dnsapi.dll netapi32.dll userenv.dll windowscodecs.dll opengl32.dll hid.dll cabinet.dll urlmon.dll avrt.dll winspool.drv mswsock.dll dhcpcsvc.dll dcomp.dll shcore.dll gdiplus.dll wintrust.dll win32u.dll d3d12.dll d3dcompiler_47.dll uiautomationcore.dll oleacc.dll").split(" "));
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const UNBUNDLED_MARKER = Buffer.from("__TAURI_BUNDLE_TYPE_VAR_UNK");
+const NSIS_MARKER = Buffer.from("__TAURI_BUNDLE_TYPE_VAR_NSS");
+export function nsisApplicationBytes(compiled) {
+  // Pinned Tauri CLI 2.11.4 / bundler 2.9.4 patches the first marker for
+  // NSIS, then restores the compiled PE. Derive the expected installed bytes
+  // from that independent PE, never from extraction; change nothing else.
+  const offset = compiled.indexOf(UNBUNDLED_MARKER);
+  assert(offset >= 0, "Compiled application lacks the unbundled Tauri marker");
+  const expected = Buffer.from(compiled);
+  NSIS_MARKER.copy(expected, offset);
+  return expected;
+}
+function applicationMismatch(expected, actual) {
+  let first = 0; let last = Math.max(expected.length, actual.length) - 1;
+  while (first <= last && expected[first] === actual[first]) first++;
+  while (last >= first && expected[last] === actual[last]) last--;
+  return JSON.stringify({ expectedSize: expected.length, installedSize: actual.length,
+    firstDifferingOffset: first, lastDifferingOffset: last,
+    expectedNsisMarkerOffset: expected.indexOf(NSIS_MARKER), installedNsisMarkerOffset: actual.indexOf(NSIS_MARKER) });
+}
 const byteOrder = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
 function readRegular(path, maximum = MAX_FILE) {
   const before = lstatSync(path, { bigint: true });
@@ -187,6 +209,31 @@ export function validateExtractedSizes(entries, extractedSizes) {
     if (entry.size !== null && !entry.sizeIsEstimate && entry.path.replace(/^\$INSTDIR\//, "") !== "uninstall.exe") assert.equal(size, entry.size, `Extracted size mismatch: ${entry.path}`);
   }
 }
+export function validatePayloadImports(payload) {
+  const bundledLibraries = new Map();
+  for (const file of payload.filter((file) => file.path.toLowerCase().endsWith(".dll"))) {
+    const name = basename(file.path).toLowerCase();
+    assert(!bundledLibraries.has(name), "Ambiguous bundled DLL name");
+    bundledLibraries.set(name, file.path);
+  }
+  const importedSystem = new Set(); const unresolved = []; let unresolvedCount = 0;
+  const diagnosticLimit = 32;
+  // Inspect the entire app/DLL closure before failing, but bound the error text.
+  for (const file of payload) {
+    for (const library of file.imports) {
+      if (SYSTEM_LIBRARIES.has(library) || /^(api|ext)-ms-win-[a-z0-9-]+\.dll$/.test(library)) importedSystem.add(library);
+      else {
+        const bundled = bundledLibraries.get(library);
+        if (!bundled || bundled.includes("/")) {
+          unresolvedCount++;
+          if (unresolved.length < diagnosticLimit) unresolved.push(`${file.path} -> ${library}${bundled ? ` (bundled at ${bundled})` : ""}`);
+        }
+      }
+    }
+  }
+  assert.equal(unresolvedCount, 0, `Missing/root-misplaced DLL dependencies (${unresolvedCount} unresolved imports):\n${unresolved.join("\n")}${unresolvedCount > diagnosticLimit ? `\nDiagnostic output capped at ${diagnosticLimit} of ${unresolvedCount}; all payload imports were inspected.` : ""}`);
+  return importedSystem;
+}
 export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirectory, runId, runAttempt, profile, repositoryRoot = process.cwd() }) {
   assert.match(sourceCommit ?? "", /^[0-9a-f]{40}$/); assert.match(runId ?? "", /^[1-9][0-9]{0,19}$/);
   assert.match(runAttempt ?? "", /^[1-9][0-9]{0,3}$/); assert(Number(runAttempt) <= 1000);
@@ -233,21 +280,17 @@ export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirec
     inventory.sort((a, b) => byteOrder(a.path, b.path)); support.sort((a, b) => byteOrder(a.path, b.path));
     assert(inventory.length > 0 && inventory.length <= 4096 && new Set(inventory.map((file) => file.path.toLowerCase())).size === inventory.length, "Payload identity is ambiguous");
     const contained = inventory.find((file) => file.path === spec.executable); assert(contained, "Real installed executable is absent");
-    assert.equal(contained.sha256, sha256(appBytes), "Exported PE differs from installer-contained application");
-    assert.equal(contained.size, appBytes.length);
     const bytesFor = (file) => extracted.get(file.path) ?? extracted.get(`$INSTDIR/${file.path}`);
-    const bundledLibraries = new Map();
+    const expectedAppBytes = nsisApplicationBytes(appBytes); const expectedHash = sha256(expectedAppBytes);
+    const mismatch = contained.sha256 === expectedHash ? "" : `: ${applicationMismatch(expectedAppBytes, bytesFor(contained))}`;
+    assert.equal(contained.sha256, expectedHash, `Exported PE differs from installer-contained application after the exact Tauri NSIS marker patch${mismatch}`);
+    assert.equal(contained.size, expectedAppBytes.length);
+    const payloadImports = [];
     for (const file of inventory.filter((file) => /\.(exe|dll)$/i.test(file.path))) {
       const pe = peInfo(bytesFor(file)); assert.equal(pe.machine, machine, `Wrong architecture inside payload: ${file.path}`);
-      if (file.path.toLowerCase().endsWith(".dll")) { const name = basename(file.path).toLowerCase(); assert(!bundledLibraries.has(name), "Ambiguous bundled DLL name"); bundledLibraries.set(name, file.path); }
+      payloadImports.push({ path: file.path, imports: pe.imports });
     }
-    const importedSystem = new Set();
-    for (const file of inventory.filter((file) => /\.(exe|dll)$/i.test(file.path))) {
-      for (const library of peInfo(bytesFor(file)).imports) {
-        if (SYSTEM_LIBRARIES.has(library) || /^(api|ext)-ms-win-[a-z0-9-]+\.dll$/.test(library)) importedSystem.add(library);
-        else { const bundled = bundledLibraries.get(library); assert(bundled && !bundled.includes("/"), `Missing/root-misplaced DLL dependency: ${file.path} -> ${library}`); }
-      }
-    }
+    const importedSystem = validatePayloadImports(payloadImports);
     const resources = config.bundle.resources ?? {};
     for (const destination of Array.isArray(resources) ? resources.map((path) => path.replace(/^\.\.\//, "")) : Object.values(resources)) {
       safeArchivePath(destination); assert(inventory.some((file) => file.path === destination || file.path.startsWith(`${destination}/`)), `Required resource is absent: ${destination}`);
@@ -256,6 +299,7 @@ export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirec
     const proof = {
       schema: "lapkb-windows-package-v1", app: appId, target: `windows-${machine === 0x8664 ? "x86_64" : "aarch64"}`,
       version, sourceCommit, build: { runId, runAttempt: Number(runAttempt), profile },
+      compiledApplication: { filename: spec.exported, size: appBytes.length, sha256: sha256(appBytes) },
       installer: { filename: installerName, size: installerBytes.length, sha256: sha256(installerBytes), stubMachine: stub.machine, kind: "nsis" },
       windowsPayload: { schema: "lapkb-windows-payload-v1", productName: spec.product, executable: spec.executable,
         architecture: machine === 0x8664 ? "x86_64" : "aarch64", version, installMode: "currentUser", files: inventory },
@@ -299,7 +343,11 @@ export function verifyPackageProof({ appId, target, sourceCommit, outputDirector
     size += file.size; assert(size <= MAX_EXPANDED, "Payload inventory size exceeds bound");
   }
   const app = readRegular(join(outputDirectory, appName)); const record = files.find((file) => file.path === spec.executable);
-  assert(record && record.size === app.length && record.sha256 === sha256(app), "Contained payload digest differs from exported PE");
+  const compiled = proof.compiledApplication;
+  assert(compiled && compiled.filename === spec.exported && appName === spec.exported
+    && compiled.size === app.length && compiled.sha256 === sha256(app), "Compiled application identity differs from exported PE");
+  const expected = nsisApplicationBytes(app);
+  assert(record && record.size === expected.length && record.sha256 === sha256(expected), "Contained payload digest differs from the exact Tauri NSIS marker patch");
   const info = peInfo(app); assert(!info.dll, "Application executable is a DLL");
   assert.equal(info.machine, architecture === "x86_64" ? 0x8664 : 0xaa64); assert.equal(info.version, version);
   assert(info.products.length && info.products.every((name) => name === spec.product));

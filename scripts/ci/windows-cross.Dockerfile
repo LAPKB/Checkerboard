@@ -81,7 +81,13 @@ RUN --network=none cargo xwin test --no-run --locked --offline --features local-
     --manifest-path desktop/src-tauri/Cargo.toml --target "$WINDOWS_TARGET"
 
 
-RUN --network=none cd desktop && npm run tauri -- build --runner cargo-xwin --target "$WINDOWS_TARGET" --features local-staging --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
+# Retain independent compiled bytes before Tauri temporarily patches its NSIS
+# bundle marker. The exported Checkmate alias retains the original compiled PE.
+RUN --network=none cd desktop && npm run tauri -- build --runner cargo-xwin --target "$WINDOWS_TARGET" --features local-staging --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline \
+    && test -s "src-tauri/target/$WINDOWS_TARGET/release/checkmate-desktop.exe" \
+    && install -d /out \
+    && cp "src-tauri/target/$WINDOWS_TARGET/release/checkmate-desktop.exe" /out/checkmate.exe \
+    && chmod 644 /out/checkmate.exe
 # Tauri may download public NSIS helpers; no source credentials remain in this step.
 RUN cd desktop && npm run tauri -- bundle --target "$WINDOWS_TARGET" --bundles nsis --ci --no-sign
 
@@ -93,10 +99,11 @@ RUN set -eu; \
     if [ "$#" -ne 1 ] || [ ! -s "$1" ]; then \
       echo "Expected exactly one non-empty NSIS installer in $nsis_dir" >&2; exit 1; \
     fi; \
-    install -d /out; \
-    cp "$app" /out/checkmate.exe; \
+    if ! cmp -s "$app" /out/checkmate.exe; then \
+      echo "Tauri did not restore the independently captured compiled PE" >&2; exit 1; \
+    fi; \
     cp "$1" /out/checkmate-nsis-installer.exe; \
-    chmod 644 /out/checkmate.exe /out/checkmate-nsis-installer.exe
+    chmod 644 /out/checkmate-nsis-installer.exe
 
 RUN node scripts/ci/windows-package.mjs checkerboard "$WINDOWS_TARGET" /out "$PACKAGE_SOURCE_SHA" "$PACKAGE_RUN_ID" "$PACKAGE_RUN_ATTEMPT" public-staging
 
