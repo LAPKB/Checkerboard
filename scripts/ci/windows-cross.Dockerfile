@@ -21,8 +21,13 @@ COPY --from=cargo-xwin /usr/local/cargo/ /tmp/checkmate-cargo-home/
 COPY --from=cargo-xwin /usr/local/rustup/ /tmp/checkmate-rustup-home/
 RUN chmod 700 "$CARGO_HOME" "$RUSTUP_HOME"
 
+# Debian 7zip supplies /usr/bin/7z; require its NSIS reader before compilation.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y build-essential cmake ca-certificates clang git llvm lld nsis 7zip openssh-client pkg-config \
+    && test -x /usr/bin/7z \
+    && LC_ALL=C /usr/bin/7z i > /tmp/lapkb-7zip-formats \
+    && /usr/bin/grep -Eq '(^|[[:space:]])Nsis([[:space:]]|$)' /tmp/lapkb-7zip-formats \
+    && rm -f /tmp/lapkb-7zip-formats \
     && rm -rf /var/lib/apt/lists/* \
     && cargo xwin --version
 

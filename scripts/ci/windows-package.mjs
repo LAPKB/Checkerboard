@@ -143,7 +143,7 @@ function appDetails(appId, repositoryRoot) {
   return { spec, config, version: pkg.version };
 }
 function command(args) {
-  const result = spawnSync("/usr/bin/7zz", args, { encoding: "utf8", timeout: 120000, maxBuffer: 8 * 1024 * 1024, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+  const result = spawnSync("/usr/bin/7z", args, { encoding: "utf8", timeout: 120000, maxBuffer: 8 * 1024 * 1024, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
   assert(!result.error && result.status === 0, `NSIS inspection failed: ${result.error?.message ?? result.stderr}`);
   return result.stdout;
 }
