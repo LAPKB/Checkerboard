@@ -21,7 +21,7 @@ test("solid NSIS listing keeps optional Packed Size separate from logical Size",
   assert.throws(() => parseNsisListing(listing("37", "not-a-size")), /NSIS Packed Size/);
 });
 
-test("generated solid NSIS exposes an unknown tail size and reconstructs its uninstaller", {
+test("generated solid NSIS preserves known and unknown-size payloads and reconstructs its uninstaller", {
   skip: process.env.LAPKB_NSIS_LISTING_FIXTURE !== "1",
 }, () => {
   const directory = mkdtempSync(join(tmpdir(), "windows-package-listing-"));
@@ -35,24 +35,47 @@ test("generated solid NSIS exposes an unknown tail size and reconstructs its uni
     const files = { "first.bin": Buffer.from("first payload\n"), "second.bin": Buffer.alloc(73, 42), "last.bin": Buffer.from("last payload\n") };
     for (const [name, bytes] of Object.entries(files)) writeFileSync(join(directory, name), bytes);
     for (const tail of ["uninstaller", "payload"]) {
-      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\nSetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\nWriteUninstaller "$INSTDIR\\uninstall.exe"\n${tail === "payload" ? 'File "last.bin"\n' : ""}SectionEnd\nSection "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n`);
+      // Keep the payload-tail archive free of an uninstaller patch: 7zip can
+      // reorder that patch after the payload regardless of NSIS command order.
+      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\nSetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\n${tail === "payload" ? 'File "last.bin"\n' : 'WriteUninstaller "$INSTDIR\\uninstall.exe"\n'}SectionEnd\n${tail === "uninstaller" ? 'Section "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n' : ""}`);
       run("/usr/bin/makensis", ["fixture.nsi"]);
       const listing = run("/usr/bin/7z", ["l", "-slt", "--", `${tail}.exe`]);
-      console.log(`Generated ${tail}-tail NSIS listing:\n${listing}`);
-      const entries = parseNsisListing(listing);
-      const last = entries.find((entry) => entry.path === (tail === "payload" ? "last.bin" : "uninstall.exe"));
-      assert(last && last.size === null, "The fixture must exercise 7zip's explicitly unknown final Size");
-      run("/usr/bin/7z", ["x", "-y", `-o${tail}-extracted`, "--", `${tail}.exe`]);
-      for (const entry of entries) {
-        const bytes = readFileSync(join(directory, `${tail}-extracted`, entry.path));
-        assert(bytes.length <= 1024 * 1024);
-        if (entry.path === "uninstall.exe") {
-          assert.equal(peInfo(bytes).machine, 0x14c);
-          if (entry.size !== null) assert.notEqual(bytes.length, entry.size, "Rebuilt uninstaller is not the encoded patch length");
-        } else {
-          assert.deepEqual(bytes, files[entry.path]);
-          if (entry.size !== null) assert.equal(bytes.length, entry.size);
+      const fixtures = [{ name: "generated", listing }];
+      if (tail === "payload") {
+        // Exercise both permitted Size forms independently of this 7zip build,
+        // changing only the final payload's field in its real solid listing.
+        for (const size of [files["last.bin"].length, null]) fixtures.push({
+          name: size === null ? "explicitly unknown Size" : "known Size", size,
+          listing: listing.replace(/^(Path = last\.bin\r?\n)Size = [^\r\n]*/m, `$1Size = ${size ?? ""}`),
+        });
+      }
+      let fixture = fixtures[0];
+      try {
+        run("/usr/bin/7z", ["x", "-y", `-o${tail}-extracted`, "--", `${tail}.exe`]);
+        for (fixture of fixtures) {
+          const entries = parseNsisListing(fixture.listing);
+          const lastPath = tail === "payload" ? "last.bin" : "uninstall.exe";
+          assert.deepEqual(entries.map((entry) => entry.path).sort(), ["first.bin", "second.bin", lastPath].sort());
+          const last = entries.find((entry) => entry.path === lastPath);
+          if (fixture.size !== undefined) assert.equal(last.size, fixture.size);
+          for (const entry of entries) {
+            assert(!entry.directory);
+            const bytes = readFileSync(join(directory, `${tail}-extracted`, entry.path));
+            assert(bytes.length <= 1024 * 1024);
+            if (entry.path === "uninstall.exe") {
+              assert.equal(peInfo(bytes).machine, 0x14c);
+              if (entry.size !== null) assert.notEqual(bytes.length, entry.size, "Rebuilt uninstaller is not the encoded patch length");
+            } else {
+              assert.deepEqual(bytes, files[entry.path]);
+              assert.equal(bytes.length, files[entry.path].length);
+              assert.equal(createHash("sha256").update(bytes).digest("hex"), createHash("sha256").update(files[entry.path]).digest("hex"));
+              if (entry.size !== null) assert.equal(bytes.length, entry.size);
+            }
+          }
         }
+      } catch (error) {
+        console.error(`Generated ${tail}-tail NSIS listing (${fixture.name}):\n${fixture.listing}`);
+        throw error;
       }
     }
   } finally { rmSync(directory, { recursive: true }); }
