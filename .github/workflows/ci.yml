@@ -1,0 +1,331 @@
+name: Checkmate CI
+
+on:
+  push:
+    branches: [launcher-checkmate-support]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA reachable from launcher-checkmate-support
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CHECKMATE_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
+  CHECKMATE_REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+  CARGO_BUILD_JOBS: "2"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  GIT_TERMINAL_PROMPT: "0"
+  # Existing public staging trust; no issuer or archive-signing secret is embedded.
+  LAPKB_LOCAL_SIGNING_KID: local-staging-1
+  LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64: 0KsmsPwJpk64Iq2RTjYS65RsH_WfE0aMP8K6F7p4FeM
+
+jobs:
+  macos:
+    permissions:
+      contents: read
+      actions: write
+    name: macOS ARM64, then Intel build candidates
+    if: >-
+      github.repository == 'LAPKB/Checkerboard'
+      && github.ref == 'refs/heads/launcher-checkmate-support'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on:
+      group: desktop-macos
+      labels: [self-hosted, macOS, ARM64]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CHECKMATE_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify requested source
+        if: github.event_name == 'workflow_dispatch'
+        run: bash scripts/ci/validate-source.sh "$CHECKMATE_SOURCE_SHA"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Create private Rust build directories
+        id: rust_home
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "$RUNNER_TEMP/checkmate-rust.XXXXXXXXXX")"
+          root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root")"
+          chmod 700 "$root"
+          mkdir -m 700 "$root/cargo" "$root/rustup" "$root/target" \
+            "$root/r-library" "$root/r-downloads"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$root")"
+          printf 'CARGO_HOME=%s/cargo\nRUSTUP_HOME=%s/rustup\nCARGO_TARGET_DIR=%s/target\nR_LIBS_USER=%s/r-library\n' "$root" "$root" "$root" "$root" >> "$GITHUB_ENV"
+          printf 'directory=%s\nidentity=%s\n' "$root" "$identity" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-darwin
+      - name: Build frontend
+        working-directory: desktop
+        run: npm ci && npm test && npm exec -- tsc && npm exec -- vite build
+      - name: Validate public verifier inputs
+        run: node scripts/ci/validate-pilot-inputs.mjs
+      - name: Fetch pinned private dependencies with scoped read-only identities
+        env:
+          LAPKB_SDK_READ_KEY: ${{ secrets.LAPKB_SDK_READ_KEY }}
+          LAPKB_PROTOCOL_READ_KEY: ${{ secrets.LAPKB_PROTOCOL_READ_KEY }}
+        run: bash scripts/ci/with-private-ssh-agent.sh cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Build ARM64 app and install archive
+        run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin app
+      - name: Prune superseded candidate artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/prune-superseded-artifacts.py
+
+      - name: Retain ARM64 artifacts before Intel build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-macos-arm64-build-candidate
+          path: ${{ env.CARGO_TARGET_DIR }}/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Install Intel Rust target
+        run: rustup target add --toolchain 1.97.1 x86_64-apple-darwin
+      - name: Build Intel app and install archive
+        run: bash scripts/ci/build-macos-candidate.sh x86_64-apple-darwin app
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-macos-x64-build-candidate
+          path: ${{ env.CARGO_TARGET_DIR }}/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build ARM64 DMG
+        run: bash scripts/ci/build-macos-candidate.sh aarch64-apple-darwin dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-macos-arm64-dmg-build-candidate
+          path: ${{ env.CARGO_TARGET_DIR }}/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build Intel DMG
+        run: bash scripts/ci/build-macos-candidate.sh x86_64-apple-darwin dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-macos-x64-dmg-build-candidate
+          path: ${{ env.CARGO_TARGET_DIR }}/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+      - name: Install the pinned development-only R parity oracle
+        timeout-minutes: 60
+        env:
+          R_JOB_DIRECTORY: ${{ steps.rust_home.outputs.directory }}
+          R_JOB_IDENTITY: ${{ steps.rust_home.outputs.identity }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/ci/owned-temp-dir.py validate \
+            "$RUNNER_TEMP" "$R_JOB_DIRECTORY" checkmate-rust "$R_JOB_IDENTITY"
+          export TMPDIR="$R_JOB_DIRECTORY/r-downloads"
+          # Only the development oracle needs these libraries; the app needs no R.
+          native="$R_JOB_DIRECTORY/native"
+          prefix="$native/prefix"
+          mkdir -m 700 "$native" "$native/src" "$native/build" "$prefix" \
+            "$native/home" "$native/cache" "$native/cache/proj"
+          export HOME="$native/home" XDG_CACHE_HOME="$native/cache"
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export PATH="$prefix/bin:$PATH"
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          # These inspected source archives have no links or escaping paths.
+          while read -r component checksum url; do
+            source_archive="$native/$component.archive"
+            mkdir -m 700 "$native/src/$component"
+            curl --disable --fail --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --connect-timeout 15 --max-time 180 --max-filesize 33554432 \
+              --retry 3 --output "$source_archive" "$url"
+            printf '%s  %s\n' "$checksum" "$source_archive" | shasum -a 256 --check
+            tar --no-same-owner --no-same-permissions -xf "$source_archive" \
+              -C "$native/src/$component" --strip-components=1
+          done <<'NATIVE'
+          expat 1e727b8933ec51a77a9a9d9afcf8e688bce45d907c13e36ab7393fe36e703182 https://github.com/libexpat/libexpat/releases/download/R_2_8_5/expat-2.8.5.tar.xz
+          sqlite 0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          udunits 590baec83161a3fd62c00efa66f6113cec8a7c461e3f61a5182167e0cc5d579e https://downloads.unidata.ucar.edu/udunits/2.2.28/udunits-2.2.28.tar.gz
+          geos d5e5192a686d065eaed082de14dd26244c5c8e02bff16b2c6cce3265f648e00e https://download.osgeo.org/geos/geos-3.15.0.tar.bz2
+          proj 791a0610547eeabb17006cfd49cdbd2034f3240f47ed5e88a1031811f4e2bcf3 https://github.com/OSGeo/PROJ/releases/download/9.9.0/proj-9.9.0.tar.gz
+          gdal 5e0c388d83da2d686cc00a40272882432cdb54edff43d4af173e532844a0a0ea https://github.com/OSGeo/gdal/releases/download/v3.13.3/gdal-3.13.3.tar.gz
+          NATIVE
+          build_native_cmake() {
+            local component="$1"
+            shift
+            cmake -S "$native/src/$component" -B "$native/build/$component" \
+              -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
+              -DCMAKE_PREFIX_PATH="$prefix" \
+              -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+              -DCMAKE_C_FLAGS=-fexceptions -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_INSTALL_NAME_DIR="$prefix/lib" \
+              -DCMAKE_BUILD_WITH_INSTALL_NAME_DIR=ON -DCMAKE_INSTALL_RPATH="$prefix/lib" \
+              -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
+              -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF \
+              -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF "$@"
+            cmake --build "$native/build/$component" --parallel 2
+            cmake --install "$native/build/$component"
+          }
+          build_native_cmake expat -DEXPAT_BUILD_TESTS=OFF -DEXPAT_BUILD_EXAMPLES=OFF \
+            -DEXPAT_BUILD_TOOLS=OFF -DEXPAT_BUILD_DOCS=OFF
+          mkdir -m 700 "$native/build/sqlite" "$native/build/udunits"
+          (
+            cd "$native/build/sqlite"
+            CC=/usr/bin/clang CFLAGS="-O2 -DSQLITE_ENABLE_COLUMN_METADATA" \
+              "$native/src/sqlite/configure" --prefix="$prefix" \
+              --disable-readline --disable-static \
+              --enable-rtree
+            make -j2
+            make install
+          )
+          (
+            cd "$native/build/udunits"
+            # R units requires exception propagation through the C library.
+            CC=/usr/bin/clang CFLAGS="-O2 -fexceptions" \
+              CPPFLAGS="-I$prefix/include" LDFLAGS="-L$prefix/lib -Wl,-rpath,$prefix/lib" \
+              "$native/src/udunits/configure" --prefix="$prefix" \
+              --enable-shared --disable-static
+            make -j2 MAKEINFO=true
+            make install MAKEINFO=true
+          )
+          build_native_cmake geos
+          build_native_cmake proj -DBUILD_APPS=OFF -DENABLE_CURL=OFF -DENABLE_TIFF=OFF \
+            -DNLOHMANN_JSON_ORIGIN=internal -DEXE_SQLITE3="$prefix/bin/sqlite3" \
+            -DSQLite3_INCLUDE_DIR="$prefix/include" \
+            -DSQLite3_LIBRARY="$prefix/lib/libsqlite3.dylib"
+          build_native_cmake gdal -DBUILD_APPS=OFF -DBUILD_PYTHON_BINDINGS=OFF \
+            -DBUILD_JAVA_BINDINGS=OFF -DBUILD_CSHARP_BINDINGS=OFF -DUSE_CCACHE=OFF \
+            -DGDAL_BUILD_OPTIONAL_DRIVERS=OFF -DOGR_BUILD_OPTIONAL_DRIVERS=OFF \
+            -DGDAL_USE_EXTERNAL_LIBS=OFF -DGDAL_USE_INTERNAL_LIBS=ON \
+            -DGDAL_USE_GEOS=ON -DGDAL_USE_SQLITE3=ON -DGDAL_USE_EXPAT=ON \
+            -DSQLite3_INCLUDE_DIR="$prefix/include" \
+            -DSQLite3_LIBRARY="$prefix/lib/libsqlite3.dylib"
+          export UDUNITS2_INCLUDE="$prefix/include" UDUNITS2_LIBS="$prefix/lib"
+          export UDUNITS2_XML_PATH="$prefix/share/udunits/udunits2.xml"
+          export GDAL_DATA="$prefix/share/gdal" PROJ_DATA="$prefix/share/proj"
+          export PROJ_USER_WRITABLE_DIRECTORY="$native/cache/proj"
+          archive="$TMPDIR/synergyfinder_3.20.0.tar.gz"
+          mirror=https://bioconductor.statistik.tu-dortmund.de
+          package=packages/3.23/bioc/src/contrib/synergyfinder_3.20.0.tar.gz
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 --max-filesize 33554432 \
+            --retry 3 --output "$archive" "$mirror/$package"
+          printf '%s  %s\n' \
+            a23f757272bffeee7d729e1f6d3bfba062e8ecd25a7597dc34421a7409fdb1f1 \
+            "$archive" | shasum -a 256 --check
+          Rscript --vanilla - "$R_LIBS_USER" "$archive" <<'RS'
+          args <- commandArgs(trailingOnly = TRUE)
+          library <- normalizePath(args[[1]], mustWork = TRUE)
+          .libPaths(c(library, .Library), include.site = FALSE)
+          options(repos = c(CRAN = "https://cloud.r-project.org"),
+                  timeout = 180)
+          # Homebrew R supports source packages, not CRAN macOS binary installs.
+          # All package writes stay in this job's library; the app needs no R.
+          dependencies <- c(
+            "drc", "reshape2", "tidyverse", "dplyr", "tidyr", "purrr", "furrr",
+            "ggplot2", "ggforce", "vegan", "gstat", "sp", "SpatialExtremes",
+            "ggrepel", "kriging", "plotly", "stringr", "future", "mice",
+            "nleqslv", "magrittr", "pbapply", "metR", "jsonlite"
+          )
+          install.packages(dependencies, lib = library, type = "source",
+                           Ncpus = 2L,
+                           dependencies = c("Depends", "Imports", "LinkingTo"))
+          install.packages(args[[2]], repos = NULL, type = "source",
+                           lib = library, Ncpus = 2L)
+          stopifnot(requireNamespace("synergyfinder", quietly = TRUE),
+                    requireNamespace("jsonlite", quietly = TRUE),
+                    identical(as.character(packageVersion("synergyfinder")),
+                              "3.20.0"))
+          RS
+      - name: Test native licensing and scientific core offline
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+          GIT_SSH_COMMAND: /usr/bin/false
+          UDUNITS2_XML_PATH: ${{ steps.rust_home.outputs.directory }}/native/prefix/share/udunits/udunits2.xml
+          GDAL_DATA: ${{ steps.rust_home.outputs.directory }}/native/prefix/share/gdal
+          PROJ_DATA: ${{ steps.rust_home.outputs.directory }}/native/prefix/share/proj
+          PROJ_USER_WRITABLE_DIRECTORY: ${{ steps.rust_home.outputs.directory }}/native/cache/proj
+        run: cargo test --workspace --locked --offline --features local-staging --target aarch64-apple-darwin --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Remove this job's Rust directories
+        if: always()
+        env:
+          RUST_HOME_DIR: ${{ steps.rust_home.outputs.directory }}
+          RUST_HOME_IDENTITY: ${{ steps.rust_home.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$RUST_HOME_DIR" checkmate-rust "$RUST_HOME_IDENTITY"
+
+  containers:
+    permissions:
+      contents: read
+      actions: write
+    name: ${{ matrix.target }} build candidate
+    if: >-
+      github.repository == 'LAPKB/Checkerboard'
+      && github.ref == 'refs/heads/launcher-checkmate-support'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on:
+      group: ${{ matrix.runner_group }}
+      labels: [self-hosted, Linux, "${{ matrix.runner_arch }}"]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner_arch: X64
+            runner_group: Default
+          - target: aarch64-pc-windows-msvc
+            runner_arch: X64
+            runner_group: Default
+          - target: x86_64-unknown-linux-gnu
+            runner_arch: X64
+            runner_group: Default
+          - target: aarch64-unknown-linux-gnu
+            runner_arch: ARM64
+            runner_group: rust
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CHECKMATE_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify requested source
+        if: github.event_name == 'workflow_dispatch'
+        run: bash scripts/ci/validate-source.sh "$CHECKMATE_SOURCE_SHA"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Test Windows package parsers without running Windows binaries
+        if: contains(matrix.target, 'windows')
+        run: node --test scripts/ci/windows-package.test.mjs
+      - name: Build and verify packages with credentials confined to fetch
+        id: build
+        env:
+          LAPKB_SDK_READ_KEY: ${{ secrets.LAPKB_SDK_READ_KEY }}
+          LAPKB_PROTOCOL_READ_KEY: ${{ secrets.LAPKB_PROTOCOL_READ_KEY }}
+        run: bash scripts/ci/with-private-ssh-agent.sh bash scripts/ci/build-container-candidate.sh "${{ matrix.target }}"
+      - name: Prune superseded candidate artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/prune-superseded-artifacts.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: checkmate-${{ matrix.target }}-build-candidate
+          path: ${{ steps.build.outputs.artifact_dir }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove this job's artifact directory
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ steps.build.outputs.artifact_dir }}
+          ARTIFACT_IDENTITY: ${{ steps.build.outputs.artifact_identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$ARTIFACT_DIR" checkmate-artifacts "$ARTIFACT_IDENTITY"

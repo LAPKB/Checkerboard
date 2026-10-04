@@ -14,6 +14,12 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .5; }
 
 .app-shell { min-height: 100vh; background: #f3f6f8; }
+.access-gate { min-height: calc(100vh - 58px); display: grid; place-items: center; padding: 24px; }
+.access-card { width: min(520px, 100%); padding: 28px; border: 1px solid #d9e1e8; border-radius: 10px; background: white; box-shadow: 0 8px 30px rgba(35, 55, 75, .1); }
+.access-card h1 { margin: 0 0 12px; color: #235789; font-size: 1.35rem; }
+.access-card p { line-height: 1.5; }
+.access-card .primary-button { margin-top: 8px; }
+.access-error { color: #8c2020; }
 .app-header {
   height: 58px;
   display: grid;
