@@ -9,6 +9,10 @@ on:
         description: Full commit SHA reachable from launcher-checkmate-support
         required: true
         type: string
+      windows_x64_only:
+        description: Build only the Windows x64 candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,6 +34,7 @@ jobs:
       actions: write
     name: macOS ARM64, then Intel build candidates
     if: >-
+      (!inputs.windows_x64_only) &&
       github.repository == 'LAPKB/Checkerboard'
       && github.ref == 'refs/heads/launcher-checkmate-support'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -279,19 +284,13 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            runner_arch: X64
-            runner_group: Default
-          - target: aarch64-pc-windows-msvc
-            runner_arch: X64
-            runner_group: Default
-          - target: x86_64-unknown-linux-gnu
-            runner_arch: X64
-            runner_group: Default
-          - target: aarch64-unknown-linux-gnu
-            runner_arch: ARM64
-            runner_group: rust
+        include: >-
+          ${{ fromJSON(inputs.windows_x64_only &&
+          '[{"target":"x86_64-pc-windows-msvc","runner_arch":"X64","runner_group":"Default"}]' ||
+          '[{"target":"x86_64-pc-windows-msvc","runner_arch":"X64","runner_group":"Default"},
+          {"target":"aarch64-pc-windows-msvc","runner_arch":"X64","runner_group":"Default"},
+          {"target":"x86_64-unknown-linux-gnu","runner_arch":"X64","runner_group":"Default"},
+          {"target":"aarch64-unknown-linux-gnu","runner_arch":"ARM64","runner_group":"rust"}]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

@@ -147,6 +147,34 @@ function command(args) {
   assert(!result.error && result.status === 0, `NSIS inspection failed: ${result.error?.message ?? result.stderr}`);
   return result.stdout;
 }
+export function parseNsisListing(listing) {
+  const separator = listing.indexOf("----------"); assert(separator >= 0, "Missing NSIS entry listing");
+  const header = listing.slice(0, separator);
+  assert(/^Type = Nsis$/m.test(header), "Not an NSIS archive");
+  const solid = /^Solid = \+$/m.test(header);
+  const numeric = (value, maximum, field, path) => {
+    assert(typeof value === "string" && /^[0-9]+$/.test(value), `Invalid NSIS ${field}: ${path}`);
+    const size = Number(value);
+    assert(Number.isSafeInteger(size) && size <= maximum, `Oversized NSIS ${field}: ${path}`);
+    return size;
+  };
+  return listing.slice(separator + 10).trim().split(/\r?\n\r?\n/).filter(Boolean).map((block) => {
+    const fields = Object.create(null);
+    for (const line of block.split(/\r?\n/).filter((line) => line.includes(" = "))) {
+      const at = line.indexOf(" = "); const key = line.slice(0, at);
+      assert(!Object.hasOwn(fields, key), "Duplicate NSIS listing field"); fields[key] = line.slice(at + 3);
+    }
+    safeArchivePath(fields.Path); assert(!fields["Symbolic Link"] && !fields["Hard Link"], "Link inside NSIS archive");
+    const directory = fields.Folder === "+" || Boolean(fields.Attributes?.startsWith("D"));
+    // 7zip estimates solid item sizes from the next item offset. The final
+    // item can explicitly have no estimate; its extracted size is mandatory.
+    const unknownSize = fields.Size === "" && solid && fields.Solid === "+" && !directory;
+    const size = unknownSize ? null : numeric(fields.Size, MAX_EXPANDED, "Size", fields.Path);
+    // Packed Size is optional for shared solid blocks, never a logical size.
+    if (fields["Packed Size"] !== undefined && fields["Packed Size"] !== "") numeric(fields["Packed Size"], MAX_FILE, "Packed Size", fields.Path);
+    return { path: fields.Path, size, directory };
+  });
+}
 export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirectory, runId, runAttempt, profile, repositoryRoot = process.cwd() }) {
   assert.match(sourceCommit ?? "", /^[0-9a-f]{40}$/); assert.match(runId ?? "", /^[1-9][0-9]{0,19}$/);
   assert.match(runAttempt ?? "", /^[1-9][0-9]{0,3}$/); assert(Number(runAttempt) <= 1000);
@@ -160,24 +188,17 @@ export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirec
   const appBytes = readRegular(join(output, spec.exported)); const app = peInfo(appBytes);
   assert(!app.dll, "Application executable is a DLL");
   assert.equal(app.machine, machine); assert.equal(app.version, version); assert(app.products.length > 0 && app.products.every((name) => name === spec.product), "Wrong PE product");
-  const listing = command(["l", "-slt", "--", installerPath]); assert(/^Type = Nsis$/m.test(listing), "Not an NSIS archive");
-  const separator = listing.indexOf("----------"); assert(separator >= 0, "Missing NSIS entry listing");
-  const entries = listing.slice(separator + 10).trim().split(/\r?\n\r?\n/).filter(Boolean).map((block) => {
-    const fields = Object.fromEntries(block.split(/\r?\n/).filter((line) => line.includes(" = ")).map((line) => { const at = line.indexOf(" = "); return [line.slice(0, at), line.slice(at + 3)]; }));
-    safeArchivePath(fields.Path); assert(!fields["Symbolic Link"] && !fields["Hard Link"], "Link inside NSIS archive");
-    assert.match(fields.Size ?? "", /^[0-9]+$/); const size = Number(fields.Size); assert(Number.isSafeInteger(size) && size <= MAX_EXPANDED, "Oversized NSIS entry");
-    return { path: fields.Path, size, directory: fields.Folder === "+" || fields.Attributes?.startsWith("D") };
-  });
+  const entries = parseNsisListing(command(["l", "-slt", "--", installerPath]));
   assert(entries.length > 0 && entries.length <= 8192, "NSIS entry bound exceeded");
   const seen = new Set(); let total = 0;
-  for (const entry of entries) { const name = entry.path.toLowerCase(); assert(!seen.has(name), "Duplicate/case-colliding NSIS entry"); seen.add(name); total += entry.size; assert(total <= MAX_EXPANDED, "Expanded NSIS size exceeded"); }
+  for (const entry of entries) { const name = entry.path.toLowerCase(); assert(!seen.has(name), "Duplicate/case-colliding NSIS entry"); seen.add(name); if (entry.size !== null) total += entry.size; assert(total <= MAX_EXPANDED, "Expanded NSIS size exceeded"); }
   const scratchRoot = resolve("/tmp/lapkb-windows-package");
   try { mkdirSync(scratchRoot, { mode: 0o700 }); } catch (e) { if (e.code !== "EEXIST") throw e; }
   const rootInfo = lstatSync(scratchRoot); assert(rootInfo.isDirectory() && !rootInfo.isSymbolicLink() && (rootInfo.mode & 0o777) === 0o700, "Unsafe inspection root");
   const scratch = mkdtempSync(join(scratchRoot, "nsis-")); chmodSync(scratch, 0o700); const scratchInfo = lstatSync(scratch);
   try {
     command(["x", "-y", `-o${scratch}`, "--", installerPath]);
-    const inventory = []; const support = []; const extracted = new Map(); const pending = [scratch];
+    const inventory = []; const support = []; const extracted = new Map(); const pending = [scratch]; let extractedTotal = 0;
     while (pending.length) {
       const directory = pending.pop();
       for (const name of readdirSync(directory)) {
@@ -186,7 +207,11 @@ export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirec
         assert(info.isFile(), "Special extracted object");
         const relative = path.slice(scratch.length + 1).split(/[\\/]/).join("/"); safeArchivePath(relative);
         const listEntry = entries.find((entry) => entry.path === relative); assert(listEntry && !listEntry.directory, "Unexpected extracted entry");
-        const bytes = readRegular(path, MAX_EXPANDED); assert.equal(bytes.length, listEntry.size, "Extracted size mismatch");
+        extractedTotal += info.size; assert(Number.isSafeInteger(extractedTotal) && extractedTotal <= MAX_EXPANDED, "Extracted NSIS size exceeded");
+        const bytes = readRegular(path, MAX_EXPANDED);
+        // 7zip reconstructs the uninstaller from the stub and its patch; its
+        // listed encoded length is not the reconstructed executable length.
+        if (listEntry.size !== null && relative.replace(/^\$INSTDIR\//, "") !== "uninstall.exe") assert.equal(bytes.length, listEntry.size, `Extracted size mismatch: ${relative}`);
         extracted.set(relative, bytes);
         const record = { path: relative, size: bytes.length, sha256: sha256(bytes) };
         // NSIS plugins/bootstrap files are installer support, not x64 payload.

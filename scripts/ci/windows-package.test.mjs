@@ -7,7 +7,56 @@ import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, rmSync, linkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { SPEC, inspectWindowsPackage, peInfo, safeArchivePath, verifyPackageProof } from "./windows-package.mjs";
+import { spawnSync } from "node:child_process";
+import { SPEC, inspectWindowsPackage, parseNsisListing, peInfo, safeArchivePath, verifyPackageProof } from "./windows-package.mjs";
+
+test("solid NSIS listing keeps optional Packed Size separate from logical Size", () => {
+  const listing = (size, packed = "", solid = "+") => `Type = Nsis\nSolid = ${solid}\n\n----------\nPath = app.exe\n${size === undefined ? "" : `Size = ${size}\n`}Packed Size = ${packed}\nAttributes = A\nSolid = ${solid}\n`;
+  assert.equal(parseNsisListing(listing("37"))[0].size, 37);
+  assert.equal(parseNsisListing(listing("0"))[0].size, 0);
+  assert.equal(parseNsisListing(listing(""))[0].size, null);
+  assert.throws(() => parseNsisListing(listing(undefined)), /Invalid NSIS Size/);
+  assert.throws(() => parseNsisListing(listing("", "", "-")), /Invalid NSIS Size/);
+  for (const size of ["-1", "1.5", "1e3", "NaN", " ", "1073741825", "9007199254740993"]) assert.throws(() => parseNsisListing(listing(size)), /NSIS Size/);
+  assert.throws(() => parseNsisListing(listing("37", "not-a-size")), /NSIS Packed Size/);
+});
+
+test("generated solid NSIS exposes an unknown tail size and reconstructs its uninstaller", {
+  skip: process.env.LAPKB_NSIS_LISTING_FIXTURE !== "1",
+}, () => {
+  const directory = mkdtempSync(join(tmpdir(), "windows-package-listing-"));
+  const run = (binary, args) => {
+    const result = spawnSync(binary, args, { cwd: directory, encoding: "utf8", timeout: 120000,
+      maxBuffer: 8 * 1024 * 1024, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+    assert(!result.error && result.status === 0, result.error?.message ?? result.stderr);
+    return result.stdout;
+  };
+  try {
+    const files = { "first.bin": Buffer.from("first payload\n"), "second.bin": Buffer.alloc(73, 42), "last.bin": Buffer.from("last payload\n") };
+    for (const [name, bytes] of Object.entries(files)) writeFileSync(join(directory, name), bytes);
+    for (const tail of ["uninstaller", "payload"]) {
+      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\nSetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\nWriteUninstaller "$INSTDIR\\uninstall.exe"\n${tail === "payload" ? 'File "last.bin"\n' : ""}SectionEnd\nSection "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n`);
+      run("/usr/bin/makensis", ["fixture.nsi"]);
+      const listing = run("/usr/bin/7z", ["l", "-slt", "--", `${tail}.exe`]);
+      console.log(`Generated ${tail}-tail NSIS listing:\n${listing}`);
+      const entries = parseNsisListing(listing);
+      const last = entries.find((entry) => entry.path === (tail === "payload" ? "last.bin" : "uninstall.exe"));
+      assert(last && last.size === null, "The fixture must exercise 7zip's explicitly unknown final Size");
+      run("/usr/bin/7z", ["x", "-y", `-o${tail}-extracted`, "--", `${tail}.exe`]);
+      for (const entry of entries) {
+        const bytes = readFileSync(join(directory, `${tail}-extracted`, entry.path));
+        assert(bytes.length <= 1024 * 1024);
+        if (entry.path === "uninstall.exe") {
+          assert.equal(peInfo(bytes).machine, 0x14c);
+          if (entry.size !== null) assert.notEqual(bytes.length, entry.size, "Rebuilt uninstaller is not the encoded patch length");
+        } else {
+          assert.deepEqual(bytes, files[entry.path]);
+          if (entry.size !== null) assert.equal(bytes.length, entry.size);
+        }
+      }
+    }
+  } finally { rmSync(directory, { recursive: true }); }
+});
 
 test("actual generated NSIS has a reproducible payload and source/run provenance", {
   skip: !process.env.LAPKB_WINDOWS_PACKAGE_OUTPUT,

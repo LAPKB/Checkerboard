@@ -42,6 +42,9 @@ RUN case "$WINDOWS_TARGET" in \
 WORKDIR /workspace
 COPY . .
 
+# Check real solid-archive listing semantics before compiling any application.
+RUN --network=none LAPKB_NSIS_LISTING_FIXTURE=1 node --test scripts/ci/windows-package.test.mjs
+
 RUN node scripts/ci/validate-pilot-inputs.mjs \
     && cd desktop && npm ci && npm exec -- tsc && npm exec -- vite build
 
