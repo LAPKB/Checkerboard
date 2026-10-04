@@ -16,6 +16,7 @@ use lapkb_desktop_session::{client::Client as LauncherSessionClient, client_stor
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime, State};
 
+#[cfg(not(all(windows, target_arch = "x86_64")))]
 const LAUNCHER_BUNDLE_ID: &str = "org.lapkb.launcher";
 const ACCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TRUST_CONFIGURATION_MESSAGE: &str = "Checkmate could not initialize shared access. Check this build's trusted configuration and OS secure storage, then reopen Checkmate.";
@@ -24,9 +25,9 @@ const ACCESS_LOCKED_MESSAGE: &str =
     "Checkmate access is locked. Open LAPKB Launcher to restore access.";
 const ACCOUNT_SWITCHED_MESSAGE: &str =
     "The LAPKB account changed. Checkmate is locked until the new account is verified.";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(windows, target_arch = "x86_64")))]
 const LAUNCHER_OPEN_ERROR: &str = "Could not open LAPKB Launcher.";
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", all(windows, target_arch = "x86_64"))))]
 const LAUNCHER_OPEN_UNSUPPORTED_MESSAGE: &str =
     "Opening LAPKB Launcher from Checkmate is not supported on this platform.";
 
@@ -521,13 +522,21 @@ impl AuthState {
                 Err(LAUNCHER_OPEN_ERROR.into())
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        {
+            windows_launcher::open_launcher(startup).map_err(|_| LAUNCHER_OPEN_ERROR.to_string())
+        }
+        #[cfg(not(any(target_os = "macos", all(windows, target_arch = "x86_64"))))]
         {
             let _ = (startup, LAUNCHER_BUNDLE_ID);
             Err(LAUNCHER_OPEN_UNSUPPORTED_MESSAGE.into())
         }
     }
 }
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "windows_launcher.rs"]
+mod windows_launcher;
 
 #[cfg(any(unix, windows))]
 fn account_id_string(client: &LauncherSessionClient) -> Option<String> {
@@ -540,7 +549,10 @@ fn account_id_string(client: &LauncherSessionClient) -> Option<String> {
 fn prepare_app_data_directory(path: &std::path::Path) -> Result<(), ()> {
     if !path.is_absolute()
         || path.components().any(|component| {
-            matches!(component, std::path::Component::CurDir | std::path::Component::ParentDir)
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
         })
     {
         return Err(());

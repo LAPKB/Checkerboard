@@ -211,6 +211,11 @@ builder_creation_started=1
 "${docker_argv[@]}" buildx create --name "$builder" --driver docker-container >/dev/null
 "${docker_argv[@]}" buildx inspect "$builder" --bootstrap >/dev/null
 artifact_may_be_root=1
+package_arguments=()
+if [[ "$kind" == windows ]]; then
+  package_arguments=(--build-arg "PACKAGE_SOURCE_SHA=$(git rev-parse HEAD)"
+    --build-arg "PACKAGE_RUN_ID=$GITHUB_RUN_ID" --build-arg "PACKAGE_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT")
+fi
 "${docker_argv[@]}" buildx build \
   --builder "$builder" \
   --platform "$platform" \
@@ -218,6 +223,7 @@ artifact_may_be_root=1
   --secret "id=sdk-public,src=$sdk_public_key_file" \
   --secret "id=protocol-public,src=$protocol_public_key_file" \
   --build-arg "$target_argument=$target" \
+  "${package_arguments[@]}" \
   --build-arg CARGO_BUILD_JOBS=2 \
   --build-arg "LAPKB_LOCAL_SIGNING_KID=$LAPKB_LOCAL_SIGNING_KID" \
   --build-arg "LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64=$LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64" \
@@ -230,7 +236,7 @@ if [[ "$docker_mode" == sudo ]]; then
   restore_private_dir_owner "$artifact_dir" "$artifact_prefix" "$artifact_identity"
 fi
 if [[ "$kind" == windows ]]; then
-  node scripts/ci/verify-windows-artifacts.mjs "$target" "$artifact_dir"
+  LAPKB_PACKAGE_SOURCE_SHA="$(git rev-parse HEAD)" node scripts/ci/verify-windows-artifacts.mjs "$target" "$artifact_dir"
 else
   node scripts/ci/verify-linux-artifacts.mjs "$target" "$artifact_dir" --receipt
 fi

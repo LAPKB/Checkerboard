@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "checkmate-desktop"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "calamine",
@@ -695,6 +695,7 @@ dependencies = [
  "tauri-plugin-store",
  "thiserror 2.0.20",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

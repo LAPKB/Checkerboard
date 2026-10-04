@@ -1,0 +1,131 @@
+// Structural fixtures are not release packages or signatures. The packaging
+// container also supplies its actual generated NSIS for the positive round trip.
+// Neither kind of check establishes native Windows runtime acceptance. CI only.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, rmSync, linkSync, symlinkSync, lstatSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { SPEC, inspectWindowsPackage, peInfo, safeArchivePath, verifyPackageProof } from "./windows-package.mjs";
+
+test("actual generated NSIS has a reproducible payload and source/run provenance", {
+  skip: !process.env.LAPKB_WINDOWS_PACKAGE_OUTPUT,
+}, () => {
+  const outputDirectory = process.env.LAPKB_WINDOWS_PACKAGE_OUTPUT;
+  const appId = process.env.LAPKB_WINDOWS_PACKAGE_APP;
+  const target = process.env.LAPKB_WINDOWS_PACKAGE_TARGET;
+  const sourceCommit = process.env.LAPKB_WINDOWS_PACKAGE_SOURCE;
+  const profile = process.env.LAPKB_WINDOWS_PACKAGE_PROFILE;
+  const spec = SPEC[appId]; assert(spec);
+  const proof = JSON.parse(readFileSync(join(outputDirectory, "windows-package.json"), "utf8"));
+  const args = { appId, target, sourceCommit, outputDirectory, profile, version: proof.version,
+    installerName: proof.installer.filename, appName: spec.exported };
+  assert.equal(proof.build.runId, process.env.GITHUB_RUN_ID);
+  assert.equal(proof.build.runAttempt, Number(process.env.GITHUB_RUN_ATTEMPT));
+  assert.equal(proof.build.profile, profile);
+  if (appId !== "launcher") {
+    const config = JSON.parse(readFileSync(join(spec.prefix, "tauri.conf.json"), "utf8"));
+    assert.equal(config.bundle.windows.nsis.installerHooks, "windows-install-hooks.nsh");
+    const hooks = readFileSync(join(spec.prefix, "windows-install-hooks.nsh"), "utf8");
+    assert(hooks.includes("!macro NSIS_HOOK_PREINSTALL"));
+    assert(hooks.includes('$INSTDIR != "$LOCALAPPDATA\\${PRODUCTNAME}"'));
+    assert(hooks.includes("    Abort"));
+  }
+  assert.deepEqual(verifyPackageProof(args), proof);
+  const directory = mkdtempSync(join(tmpdir(), "windows-package-actual-"));
+  const owned = lstatSync(directory);
+  try {
+    copyFileSync(join(outputDirectory, args.installerName), join(directory, args.installerName));
+    copyFileSync(join(outputDirectory, args.appName), join(directory, args.appName));
+    // Re-extract the actual package. Equality covers every resource, bundled
+    // DLL, support entry and imported system library, not just the exported PE.
+    const inspected = inspectWindowsPackage({ appId, target, sourceCommit, outputDirectory: directory,
+      runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, profile });
+    assert.deepEqual(inspected, proof);
+    assert.deepEqual(verifyPackageProof({ ...args, outputDirectory: directory }), proof);
+    assert.throws(() => verifyPackageProof({ ...args, outputDirectory: directory, sourceCommit: "0".repeat(40) }));
+    // These are unsigned packaging bytes; no release signature/native pass is invented.
+    assert.equal(proof.nativeRuntime, "not executed");
+    assert.equal(proof.updaterSignature, "not signed");
+  } finally {
+    const after = lstatSync(directory);
+    assert(after.isDirectory() && !after.isSymbolicLink() && after.dev === owned.dev && after.ino === owned.ino);
+    rmSync(directory, { recursive: true });
+  }
+});
+
+function pe(machine) {
+  const bytes = Buffer.alloc(512);
+  bytes.writeUInt16LE(0x5a4d, 0); bytes.writeUInt32LE(64, 60); bytes.writeUInt32LE(0x4550, 64);
+  const optionalSize = machine === 0x14c ? 112 : 128;
+  bytes.writeUInt16LE(machine, 68); bytes.writeUInt16LE(1, 70); bytes.writeUInt16LE(optionalSize, 84);
+  bytes.writeUInt16LE(0x2, 86);
+  bytes.writeUInt16LE(machine === 0x14c ? 0x10b : 0x20b, 88); // no resources/import directories: cannot qualify as an app
+  const section = 88 + optionalSize;
+  bytes.writeUInt32LE(0x1000, section + 12); bytes.writeUInt32LE(256, section + 16); bytes.writeUInt32LE(256, section + 20);
+  return bytes;
+}
+test("NSIS x86 stub is not x64 contained-app identity/version evidence", () => {
+  const stub = peInfo(pe(0x14c)); assert.equal(stub.machine, 0x14c); assert.equal(stub.version, null); assert.deepEqual(stub.products, []);
+  assert.equal(peInfo(pe(0x8664)).machine, 0x8664);
+  const mislabeled = pe(0x14c); mislabeled.writeUInt16LE(0x8664, 68);
+  assert.throws(() => peInfo(mislabeled), /architecture mismatch/);
+  for (const bytes of [Buffer.from("MZ"), Buffer.alloc(64), pe(0x8664).subarray(0, 70)]) assert.throws(() => peInfo(bytes));
+});
+test("NSIS inventory rejects traversal, drive/ADS/device and reparse-style paths", () => {
+  for (const name of ["../app.exe", "/app.exe", "C:/app.exe", "a\\app.exe", "app.exe:stream", "CON", "LPT1.txt", "folder/../app", "name.", "a//b"]) assert.throws(() => safeArchivePath(name), name);
+  assert.equal(safeArchivePath("data/model.txt"), "data/model.txt");
+});
+test("missing package proof is not a nonempty-installer pass", () => {
+  const directory = mkdtempSync(join(tmpdir(), "windows-package-test-"));
+  try {
+    writeFileSync(join(directory, "launcher-nsis-installer.exe"), pe(0x14c));
+    assert.throws(() => verifyPackageProof({ appId: "launcher", target: "x86_64-pc-windows-msvc", sourceCommit: "a".repeat(40), outputDirectory: directory, version: "0.1.9", installerName: "launcher-nsis-installer.exe", appName: "lapkb-launcher.exe" }), /ENOENT/);
+  } finally { rmSync(directory, { recursive: true }); }
+});
+test("proof selection rejects wrong app, source, target, version, scope, digest and missing payload", () => {
+  const directory = mkdtempSync(join(tmpdir(), "windows-package-test-"));
+  const installer = pe(0x14c); const app = pe(0x8664);
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const args = { appId: "launcher", target: "x86_64-pc-windows-msvc", sourceCommit: "a".repeat(40),
+    outputDirectory: directory, version: "0.1.9", installerName: "launcher-nsis-installer.exe", appName: "lapkb-launcher.exe" };
+  // Shape fixtures have NO version resource, actual archive or signature and
+  // intentionally cannot qualify even when their structural fields match.
+  const shape = { schema: "lapkb-windows-package-v1", app: "launcher", target: "windows-x86_64",
+    version: "0.1.9", sourceCommit: "a".repeat(40),
+    build: { runId: process.env.GITHUB_RUN_ID ?? "123", runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? "1"), profile: "public-staging" },
+    installer: { kind: "nsis", filename: args.installerName, size: installer.length, sha256: digest(installer), stubMachine: 0x14c },
+    windowsPayload: { schema: "lapkb-windows-payload-v1", productName: "LAPKB Launcher", executable: "lapkb-launcher.exe",
+      architecture: "x86_64", version: "0.1.9", installMode: "currentUser",
+      files: [{ path: "lapkb-launcher.exe", size: app.length, sha256: digest(app) }] } };
+  try {
+    writeFileSync(join(directory, args.installerName), installer); writeFileSync(join(directory, args.appName), app);
+    for (const change of [
+      (p) => { p.app = "papir"; }, (p) => { p.sourceCommit = "b".repeat(40); },
+      (p) => { p.target = "windows-aarch64"; }, (p) => { p.version = "0.1.8"; },
+      (p) => { p.build.profile = "unconfigured"; }, (p) => { p.build.runAttempt = 0; },
+      (p) => { p.installer.sha256 = "b".repeat(64); }, (p) => { p.windowsPayload.installMode = "perMachine"; },
+      (p) => { p.windowsPayload.files = []; }, (p) => { p.windowsPayload.files[0].sha256 = "b".repeat(64); },
+    ]) {
+      const proof = structuredClone(shape); change(proof);
+      writeFileSync(join(directory, "windows-package.json"), JSON.stringify(proof));
+      assert.throws(() => verifyPackageProof(args));
+    }
+    writeFileSync(join(directory, "windows-package.json"), JSON.stringify(shape));
+    assert.throws(() => verifyPackageProof({ ...args, target: "darwin-aarch64" }), /Unknown Windows target/);
+    assert.throws(() => verifyPackageProof(args)); // absent authenticated payload/version evidence
+  } finally { rmSync(directory, { recursive: true }); }
+});
+
+test("substituted/hardlinked proof is rejected before consuming identity", () => {
+  const directory = mkdtempSync(join(tmpdir(), "windows-package-test-"));
+  const args = { appId: "launcher", target: "x86_64-pc-windows-msvc", sourceCommit: "a".repeat(40), outputDirectory: directory, version: "0.1.9", installerName: "launcher-nsis-installer.exe", appName: "lapkb-launcher.exe" };
+  try {
+    writeFileSync(join(directory, "other.json"), "{}"); linkSync(join(directory, "other.json"), join(directory, "windows-package.json"));
+    assert.throws(() => verifyPackageProof(args), /Unsafe/);
+    rmSync(join(directory, "windows-package.json"));
+    symlinkSync(join(directory, "other.json"), join(directory, "windows-package.json"));
+    assert.throws(() => verifyPackageProof(args), /Unsafe/);
+  } finally { rmSync(directory, { recursive: true }); }
+});

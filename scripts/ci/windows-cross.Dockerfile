@@ -3,6 +3,9 @@ FROM messense/cargo-xwin@sha256:9856b895265d4966f212228ba64802cf89337e2a2a537aa2
 FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS windows-builder
 
 ARG WINDOWS_TARGET
+ARG PACKAGE_SOURCE_SHA
+ARG PACKAGE_RUN_ID
+ARG PACKAGE_RUN_ATTEMPT
 ARG CARGO_BUILD_JOBS=2
 ARG LAPKB_LOCAL_SIGNING_KID
 ARG LAPKB_LOCAL_SIGNING_PUBLIC_KEY_B64
@@ -19,7 +22,7 @@ COPY --from=cargo-xwin /usr/local/rustup/ /tmp/checkmate-rustup-home/
 RUN chmod 700 "$CARGO_HOME" "$RUSTUP_HOME"
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y build-essential cmake ca-certificates clang git llvm lld nsis openssh-client pkg-config \
+    && apt-get install --no-install-recommends -y build-essential cmake ca-certificates clang git llvm lld nsis 7zip openssh-client pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && cargo xwin --version
 
@@ -65,6 +68,9 @@ ENV CARGO_NET_OFFLINE=true \
 
 # Public CRT/SDK downloads happen without an SSH mount, before offline compilation.
 RUN cargo xwin cache xwin
+# Compile native Windows regression sources; this is NOT a Windows test pass.
+RUN --network=none cargo xwin test --no-run --locked --offline --features local-staging \
+    --manifest-path desktop/src-tauri/Cargo.toml --target "$WINDOWS_TARGET"
 
 
 RUN --network=none cd desktop && npm run tauri -- build --runner cargo-xwin --target "$WINDOWS_TARGET" --features local-staging --no-bundle --config '{"build":{"beforeBuildCommand":""}}' -- --locked --offline
@@ -83,6 +89,13 @@ RUN set -eu; \
     cp "$app" /out/checkmate.exe; \
     cp "$1" /out/checkmate-nsis-installer.exe; \
     chmod 644 /out/checkmate.exe /out/checkmate-nsis-installer.exe
+
+RUN node scripts/ci/windows-package.mjs checkerboard "$WINDOWS_TARGET" /out "$PACKAGE_SOURCE_SHA" "$PACKAGE_RUN_ID" "$PACKAGE_RUN_ATTEMPT" public-staging
+
+RUN --network=none GITHUB_RUN_ID="$PACKAGE_RUN_ID" GITHUB_RUN_ATTEMPT="$PACKAGE_RUN_ATTEMPT" \
+    LAPKB_WINDOWS_PACKAGE_APP=checkerboard LAPKB_WINDOWS_PACKAGE_TARGET="$WINDOWS_TARGET" \
+    LAPKB_WINDOWS_PACKAGE_OUTPUT=/out LAPKB_WINDOWS_PACKAGE_SOURCE="$PACKAGE_SOURCE_SHA" LAPKB_WINDOWS_PACKAGE_PROFILE=public-staging \
+    node --test --test-name-pattern='actual generated NSIS' scripts/ci/windows-package.test.mjs
 
 FROM scratch AS ci-artifacts
 COPY --from=windows-builder /out/ /
