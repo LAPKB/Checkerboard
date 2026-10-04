@@ -166,14 +166,26 @@ export function parseNsisListing(listing) {
     }
     safeArchivePath(fields.Path); assert(!fields["Symbolic Link"] && !fields["Hard Link"], "Link inside NSIS archive");
     const directory = fields.Folder === "+" || Boolean(fields.Attributes?.startsWith("D"));
-    // 7zip estimates solid item sizes from the next item offset. The final
-    // item can explicitly have no estimate; its extracted size is mandatory.
-    const unknownSize = fields.Size === "" && solid && fields.Solid === "+" && !directory;
-    const size = unknownSize ? null : numeric(fields.Size, MAX_EXPANDED, "Size", fields.Path);
+    // 7zip estimates solid item sizes from the next item offset. Preserve
+    // that distinction even for positive estimates; the final can be blank.
+    const sizeIsEstimate = solid && fields.Solid === "+" && !directory;
+    const size = fields.Size === "" && sizeIsEstimate ? null : numeric(fields.Size, MAX_EXPANDED, "Size", fields.Path);
     // Packed Size is optional for shared solid blocks, never a logical size.
     if (fields["Packed Size"] !== undefined && fields["Packed Size"] !== "") numeric(fields["Packed Size"], MAX_FILE, "Packed Size", fields.Path);
-    return { path: fields.Path, size, directory };
+    return { path: fields.Path, size, sizeIsEstimate, directory };
   });
+}
+export function validateExtractedSizes(entries, extractedSizes) {
+  let total = 0;
+  for (const entry of entries.filter((entry) => !entry.directory)) {
+    assert(extractedSizes.has(entry.path), "Missing extracted NSIS entry");
+    const size = extractedSizes.get(entry.path);
+    assert(Number.isSafeInteger(size) && size >= 0 && size <= MAX_EXPANDED, `Unsafe/oversized extracted NSIS size: ${entry.path}`);
+    total += size; assert(Number.isSafeInteger(total) && total <= MAX_EXPANDED, "Extracted NSIS size exceeded");
+    // Extracted bytes are authoritative for solid-offset estimates. 7zip
+    // also reconstructs uninstall.exe from the stub and its encoded patch.
+    if (entry.size !== null && !entry.sizeIsEstimate && entry.path.replace(/^\$INSTDIR\//, "") !== "uninstall.exe") assert.equal(size, entry.size, `Extracted size mismatch: ${entry.path}`);
+  }
 }
 export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirectory, runId, runAttempt, profile, repositoryRoot = process.cwd() }) {
   assert.match(sourceCommit ?? "", /^[0-9a-f]{40}$/); assert.match(runId ?? "", /^[1-9][0-9]{0,19}$/);
@@ -209,9 +221,6 @@ export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirec
         const listEntry = entries.find((entry) => entry.path === relative); assert(listEntry && !listEntry.directory, "Unexpected extracted entry");
         extractedTotal += info.size; assert(Number.isSafeInteger(extractedTotal) && extractedTotal <= MAX_EXPANDED, "Extracted NSIS size exceeded");
         const bytes = readRegular(path, MAX_EXPANDED);
-        // 7zip reconstructs the uninstaller from the stub and its patch; its
-        // listed encoded length is not the reconstructed executable length.
-        if (listEntry.size !== null && relative.replace(/^\$INSTDIR\//, "") !== "uninstall.exe") assert.equal(bytes.length, listEntry.size, `Extracted size mismatch: ${relative}`);
         extracted.set(relative, bytes);
         const record = { path: relative, size: bytes.length, sha256: sha256(bytes) };
         // NSIS plugins/bootstrap files are installer support, not x64 payload.
@@ -220,7 +229,7 @@ export function inspectWindowsPackage({ appId, target, sourceCommit, outputDirec
       }
       assert(inventory.length + support.length <= 8192, "Extracted file count exceeded");
     }
-    assert(entries.filter((entry) => !entry.directory).every((entry) => extracted.has(entry.path)), "Missing extracted NSIS entry");
+    validateExtractedSizes(entries, new Map([...extracted].map(([path, bytes]) => [path, bytes.length])));
     inventory.sort((a, b) => byteOrder(a.path, b.path)); support.sort((a, b) => byteOrder(a.path, b.path));
     assert(inventory.length > 0 && inventory.length <= 4096 && new Set(inventory.map((file) => file.path.toLowerCase())).size === inventory.length, "Payload identity is ambiguous");
     const contained = inventory.find((file) => file.path === spec.executable); assert(contained, "Real installed executable is absent");

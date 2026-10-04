@@ -8,17 +8,45 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { SPEC, inspectWindowsPackage, parseNsisListing, peInfo, safeArchivePath, verifyPackageProof } from "./windows-package.mjs";
+import { SPEC, inspectWindowsPackage, parseNsisListing, peInfo, safeArchivePath, validateExtractedSizes, verifyPackageProof } from "./windows-package.mjs";
 
 test("solid NSIS listing keeps optional Packed Size separate from logical Size", () => {
   const listing = (size, packed = "", solid = "+") => `Type = Nsis\nSolid = ${solid}\n\n----------\nPath = app.exe\n${size === undefined ? "" : `Size = ${size}\n`}Packed Size = ${packed}\nAttributes = A\nSolid = ${solid}\n`;
   assert.equal(parseNsisListing(listing("37"))[0].size, 37);
+  assert.equal(parseNsisListing(listing("37"))[0].sizeIsEstimate, true);
+  assert.equal(parseNsisListing(listing("37", "", "-"))[0].sizeIsEstimate, false);
   assert.equal(parseNsisListing(listing("0"))[0].size, 0);
   assert.equal(parseNsisListing(listing(""))[0].size, null);
   assert.throws(() => parseNsisListing(listing(undefined)), /Invalid NSIS Size/);
   assert.throws(() => parseNsisListing(listing("", "", "-")), /Invalid NSIS Size/);
   for (const size of ["-1", "1.5", "1e3", "NaN", " ", "1073741825", "9007199254740993"]) assert.throws(() => parseNsisListing(listing(size)), /NSIS Size/);
   assert.throws(() => parseNsisListing(listing("37", "not-a-size")), /NSIS Packed Size/);
+});
+
+test("extracted NSIS sizes distinguish solid estimates from exact lengths and retain bounds/closure", () => {
+  const path = "$PLUGINSDIR/StartMenu.dll";
+  const listing = (archiveSolid, itemSolid, size = "20996") => `Type = Nsis\nSolid = ${archiveSolid}\n\n----------\nPath = ${path}\nSize = ${size}\nAttributes = A\nSolid = ${itemSolid}\n`;
+  const estimated = parseNsisListing(listing("+", "+"));
+  const actual = new Map([[path, 12288]]);
+  assert.equal(estimated[0].size, 20996);
+  assert.equal(estimated[0].sizeIsEstimate, true);
+  validateExtractedSizes(estimated, actual); // The concrete StartMenu.dll failure.
+  validateExtractedSizes(parseNsisListing(listing("+", "+", "")), actual);
+  validateExtractedSizes(parseNsisListing(listing("-", "-", "12288")), actual);
+  for (const [archiveSolid, itemSolid] of [["-", "-"], ["-", "+"], ["+", "-"], ["+", ""]]) {
+    const exact = parseNsisListing(listing(archiveSolid, itemSolid));
+    assert.equal(exact[0].sizeIsEstimate, false);
+    assert.throws(() => validateExtractedSizes(exact, actual), /Extracted size mismatch/);
+    assert.throws(() => parseNsisListing(listing(archiveSolid, itemSolid, "")), /Invalid NSIS Size/);
+  }
+  for (const size of [-1, 1.5, NaN, 1073741825, 9007199254740992]) {
+    assert.throws(() => validateExtractedSizes(estimated, new Map([[path, size]])), /Unsafe\/oversized extracted NSIS size/);
+  }
+  const two = [...estimated, { ...estimated[0], path: "support.bin" }];
+  assert.throws(() => validateExtractedSizes(two, new Map([[path, 536870913], ["support.bin", 536870913]])), /Extracted NSIS size exceeded/);
+  assert.throws(() => validateExtractedSizes(estimated, new Map()), /Missing extracted NSIS entry/);
+  // Non-solid uninstall.exe still describes an encoded patch, not its rebuilt PE.
+  validateExtractedSizes(parseNsisListing(listing("-", "-").replace(path, "$INSTDIR/uninstall.exe")), new Map([["$INSTDIR/uninstall.exe", 12288]]));
 });
 
 test("generated solid NSIS preserves known and unknown-size payloads and reconstructs its uninstaller", {
@@ -33,14 +61,22 @@ test("generated solid NSIS preserves known and unknown-size payloads and reconst
   };
   try {
     const files = { "first.bin": Buffer.from("first payload\n"), "second.bin": Buffer.alloc(73, 42), "last.bin": Buffer.from("last payload\n") };
+    const pluginPath = "$PLUGINSDIR/StartMenu.dll"; const supportPath = "$PLUGINSDIR/fixture-support.bin";
+    const support = { [pluginPath]: readFileSync("/usr/share/nsis/Plugins/x86-unicode/StartMenu.dll"),
+      [supportPath]: Buffer.from("genuine installer support fixture\n") };
     for (const [name, bytes] of Object.entries(files)) writeFileSync(join(directory, name), bytes);
+    writeFileSync(join(directory, "support.bin"), support[supportPath]);
     for (const tail of ["uninstaller", "payload"]) {
+      // Use the stock Unicode plugin's real NSIS command, not a payload copy.
       // Keep the payload-tail archive free of an uninstaller patch: 7zip can
       // reorder that patch after the payload regardless of NSIS command order.
-      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\nSetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\n${tail === "payload" ? 'File "last.bin"\n' : 'WriteUninstaller "$INSTDIR\\uninstall.exe"\n'}SectionEnd\n${tail === "uninstaller" ? 'Section "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n' : ""}`);
+      writeFileSync(join(directory, "fixture.nsi"), `Unicode true\nName "Listing fixture"\nOutFile "${tail}.exe"\nRequestExecutionLevel user\nSetCompressor /SOLID lzma\nInstallDir "$LOCALAPPDATA\\Listing fixture"\nSection\nInitPluginsDir\nSetOutPath "$PLUGINSDIR"\nFile /oname=fixture-support.bin "support.bin"\nStartMenu::Init /autoadd "Listing fixture"\nPop $0\nSetOutPath "$INSTDIR"\nFile "first.bin"\nFile "second.bin"\n${tail === "payload" ? 'File "last.bin"\n' : 'WriteUninstaller "$INSTDIR\\uninstall.exe"\n'}SectionEnd\n${tail === "uninstaller" ? 'Section "Uninstall"\nDelete "$INSTDIR\\first.bin"\nSectionEnd\n' : ""}`);
       run("/usr/bin/makensis", ["fixture.nsi"]);
       const listing = run("/usr/bin/7z", ["l", "-slt", "--", `${tail}.exe`]);
-      const fixtures = [{ name: "generated", listing }];
+      const fixtures = [{ name: "generated", listing }, {
+        name: "positive solid plugin estimate", pluginSize: 20996,
+        listing: listing.replace(/^(Path = \$PLUGINSDIR\/StartMenu\.dll\r?\n)Size = [^\r\n]*/m, "$1Size = 20996"),
+      }];
       if (tail === "payload") {
         // Exercise both permitted Size forms independently of this 7zip build,
         // changing only the final payload's field in its real solid listing.
@@ -55,23 +91,29 @@ test("generated solid NSIS preserves known and unknown-size payloads and reconst
         for (fixture of fixtures) {
           const entries = parseNsisListing(fixture.listing);
           const lastPath = tail === "payload" ? "last.bin" : "uninstall.exe";
-          assert.deepEqual(entries.map((entry) => entry.path).sort(), ["first.bin", "second.bin", lastPath].sort());
+          assert.deepEqual(entries.map((entry) => entry.path).sort(), ["first.bin", "second.bin", pluginPath, supportPath, lastPath].sort());
           const last = entries.find((entry) => entry.path === lastPath);
           if (fixture.size !== undefined) assert.equal(last.size, fixture.size);
+          const plugin = entries.find((entry) => entry.path === pluginPath);
+          assert.equal(plugin.sizeIsEstimate, true);
+          if (fixture.pluginSize !== undefined) assert.equal(plugin.size, fixture.pluginSize);
+          const extractedSizes = new Map();
           for (const entry of entries) {
             assert(!entry.directory);
             const bytes = readFileSync(join(directory, `${tail}-extracted`, entry.path));
             assert(bytes.length <= 1024 * 1024);
+            extractedSizes.set(entry.path, bytes.length);
             if (entry.path === "uninstall.exe") {
               assert.equal(peInfo(bytes).machine, 0x14c);
               if (entry.size !== null) assert.notEqual(bytes.length, entry.size, "Rebuilt uninstaller is not the encoded patch length");
             } else {
-              assert.deepEqual(bytes, files[entry.path]);
-              assert.equal(bytes.length, files[entry.path].length);
-              assert.equal(createHash("sha256").update(bytes).digest("hex"), createHash("sha256").update(files[entry.path]).digest("hex"));
-              if (entry.size !== null) assert.equal(bytes.length, entry.size);
+              const input = files[entry.path] ?? support[entry.path]; assert(input, "Missing genuine fixture input");
+              assert.deepEqual(bytes, input);
+              assert.equal(bytes.length, input.length);
+              assert.equal(createHash("sha256").update(bytes).digest("hex"), createHash("sha256").update(input).digest("hex"));
             }
           }
+          validateExtractedSizes(entries, extractedSizes);
         }
       } catch (error) {
         console.error(`Generated ${tail}-tail NSIS listing (${fixture.name}):\n${fixture.listing}`);
