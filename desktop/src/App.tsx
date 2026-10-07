@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
+import { AuthGate } from "./AuthGate";
 import { aggregateBliss, buildMapping, compareRegimens, concentrationRangeFor, exceedanceDomain, formatNumber, formatPValue, groupAnalysisUnits, hasConcentrationRanges, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, propagateSharedDrugConcentrations, roleLabel, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
 import { DrusanoComparisonWorkspace, DrusanoFitWorkspace, DrusanoRegimenWorkspace, InputTypeControls, ProjectWorkspace } from "./DrusanoGreco";
 import { MusycComparisonWorkspace, MusycFitWorkspace } from "./Musyc";
@@ -104,7 +105,7 @@ interface ProjectSnapshot {
 }
 
 const BarPlot = lazy(() => import("./BarPlot"));
-const appBuild = "0.8.0";
+const appBuild = "0.8.1";
 
 const roleOptions: ColumnRole[] = ["ignore", "organism", "drugNameA", "drugA", "unitsA", "drugNameB", "drugB", "unitsB", "drugNameC", "drugC", "unitsC", "response"];
 
@@ -149,6 +150,31 @@ const initialMusycModelSettings: MusycModelSettings = {
 };
 
 function App() {
+  const [launcherError, setLauncherError] = useState<string | null>(null);
+
+  async function openLauncher() {
+    setLauncherError(null);
+    try {
+      await invoke("auth_open_launcher", { startup: false });
+    } catch (reason) {
+      setLauncherError(errorMessage(reason));
+    }
+  }
+
+  return (
+    <AuthGate
+      buildVersion={appBuild}
+      formatError={errorMessage}
+      launcherError={launcherError}
+      logo={logo}
+      openLauncher={openLauncher}
+    >
+      {() => <ProtectedWorkspace />}
+    </AuthGate>
+  );
+}
+
+function ProtectedWorkspace() {
   const [page, setPage] = useState<Page>("project");
   const [analysisType, setAnalysisType] = useState<AnalysisType>("bliss");
   const [inputSettings, setInputSettings] = useState<InputSettings>(initialInputSettings);

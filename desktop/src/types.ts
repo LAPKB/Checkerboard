@@ -1,3 +1,47 @@
+export type AuthPhase = "unconfigured" | "restoring" | "signed_out" | "authenticated" | "suspended";
+
+export interface AuthUser {
+  subject: string;
+  displayName: string;
+  email: string | null;
+}
+
+export type SeatConflictReason = "seat_unavailable" | "seat_moved";
+
+export interface SeatHolder {
+  reservationId: string;
+  generation: number;
+  deviceLabel: string;
+}
+
+export interface SeatConflict {
+  appId: string;
+  capacity: number;
+  holders: SeatHolder[];
+  totalHolders: number;
+  holdersTruncated: boolean;
+}
+
+export type SeatStatus =
+  | { state: "acquiring" }
+  | { state: "pending"; not_before: number | null }
+  | { state: "granted" }
+  | { state: "conflict"; reason: SeatConflictReason; detail: SeatConflict }
+  | { state: "locked" };
+
+export interface SeatReference {
+  reservation_id: string;
+  generation: number;
+}
+
+export interface AuthView {
+  phase: AuthPhase;
+  user: AuthUser | null;
+  accountId: string | null;
+  seat: SeatStatus | null;
+  message: string | null;
+}
+
 export type ColumnRole =
   | "ignore"
   | "drugNameA" | "drugNameB" | "drugNameC"
