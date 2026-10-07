@@ -159,6 +159,7 @@ fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R
         Box::new(tauri::generate_handler![
             auth::auth_status,
             auth::auth_open_launcher,
+            auth::auth_use_here,
         ]);
 
     builder.invoke_handler(move |invoke| {

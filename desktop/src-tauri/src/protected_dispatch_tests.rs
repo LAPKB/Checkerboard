@@ -45,11 +45,12 @@ fn invoke(
 mod broker_fixture {
     use ed25519_dalek::{Signer, SigningKey};
     use lapkb_authorization_protocol::{
-        EnvelopeSigner, LeaseIssue, OriginBinding, SigningError, issue_online_lease,
+        EnvelopeSigner, LeaseIssue, OriginBinding, SeatAuthority, SigningError, issue_online_lease,
     };
     use lapkb_desktop_session::{
-        Challenge, DeviceKey, LeaseVerifier, Nonce, OpaqueId, Proof, ProtectedApp, Reply,
-        VerificationKeySet, client::Client, client_store::ClientStore, transport,
+        DeviceKey, LeaseVerifier, LicenseRequest, Nonce, OpaqueId, Proof, ProofAuthority,
+        ProtectedApp, Reply, VerificationKeySet, client::Client, client_store::ClientStore,
+        transport,
     };
     use std::{
         fs, io,
@@ -141,7 +142,7 @@ mod broker_fixture {
         }
     }
 
-    fn signed_reply(state: &BrokerState, challenge: Challenge) -> Reply {
+    fn signed_reply(state: &BrokerState, request: LicenseRequest) -> Reply {
         let device = DeviceKey::from_seed(DEVICE_SEED);
         let lease_id = match (state.account_id.as_str(), state.sequence) {
             ("account-a", 1) => "00000000-0000-0000-0000-000000000001",
@@ -167,18 +168,30 @@ mod broker_fixture {
                 Nonce::from_bytes([8; 32]),
             )
             .expect("origin binding"),
+            seat: Some(
+                SeatAuthority::new(
+                    "00000000-0000-0000-0000-000000000041"
+                        .parse()
+                        .expect("reservation id"),
+                    1,
+                    state.issued_at,
+                    Some(state.issued_at + 30),
+                )
+                .expect("seat authority"),
+            ),
         };
         let signer = TestSigner(SigningKey::from_bytes(&SERVICE_SEED));
         let Ok((envelope, _)) = issue_online_lease(&signer, &issue) else {
             return Reply::Locked;
         };
         let Ok(proof) = Proof::issue(
-            challenge,
+            request,
             &envelope,
             &device,
             BROKER_INSTANCE,
             GENERATION,
             state.issued_at,
+            ProofAuthority::Connected,
         ) else {
             return Reply::Locked;
         };
@@ -215,13 +228,14 @@ mod broker_fixture {
                         break;
                     };
                     loop {
-                        let Ok(challenge) = transport::read_frame::<Challenge>(&mut stream).await
+                        let Ok(request) =
+                            transport::read_frame::<LicenseRequest>(&mut stream).await
                         else {
                             break;
                         };
                         let reply = {
                             let state = state_for_task.lock().expect("broker state lock");
-                            signed_reply(&state, challenge)
+                            signed_reply(&state, request)
                         };
                         if transport::write_frame(&mut stream, &reply).await.is_err() {
                             break;
@@ -299,11 +313,13 @@ fn locked_dispatch_allows_only_auth_controls_and_preserves_known_command_names()
     }
     assert!(!is_protected_command("auth_status"));
     assert!(!is_protected_command("auth_open_launcher"));
+    assert!(!is_protected_command("auth_use_here"));
     assert!(!is_protected_command("unknown_command"));
     assert!(invoke(&webview, "unknown_command", json!({})).is_err());
     let status = invoke(&webview, "auth_status", json!({})).expect("auth status is allowed");
     assert_eq!(status["phase"], "unconfigured");
     assert!(status["user"].is_null());
+    assert!(status["seat"].is_null());
     drop(app);
 }
 

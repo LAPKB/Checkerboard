@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Checkmate",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "identifier": "org.lapkb.checkmate",
   "build": {
     "beforeDevCommand": "npm run dev",

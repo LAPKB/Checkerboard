@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "checkmate-desktop"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "calamine",
@@ -2895,8 +2895,8 @@ dependencies = [
 
 [[package]]
 name = "lapkb-authorization-protocol"
-version = "0.2.7"
-source = "git+ssh://git@github.com/LAPKB/desktop-authorization.git?rev=b32bcefb244ffba54b9de47b4004939b6a01b0cd#b32bcefb244ffba54b9de47b4004939b6a01b0cd"
+version = "0.2.10"
+source = "git+ssh://git@github.com/LAPKB/desktop-authorization.git?rev=7bfdaa456a9dfac900618d80d7cc374fc4c3e4d3#7bfdaa456a9dfac900618d80d7cc374fc4c3e4d3"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2912,7 +2912,7 @@ dependencies = [
 [[package]]
 name = "lapkb-desktop-session"
 version = "0.1.0"
-source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=ef542825f4b0b131e0feb5c8579ef4882a072f87#ef542825f4b0b131e0feb5c8579ef4882a072f87"
+source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=238b96237dd658d5ca16fa3261787ce64c1e8509#238b96237dd658d5ca16fa3261787ce64c1e8509"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

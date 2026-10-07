@@ -20,6 +20,13 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .access-card p { line-height: 1.5; }
 .access-card .primary-button { margin-top: 8px; }
 .access-error { color: #8c2020; }
+.seat-panel { margin-top: 14px; text-align: left; }
+.seat-status { margin: 10px 0 0; }
+.seat-holders { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.seat-holders li { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid #d9e1e8; border-radius: 6px; }
+.seat-holder-label { font-weight: 600; }
+.seat-holder-detail { color: #667582; font-size: .8rem; }
+.seat-panel .primary-button { margin-top: 0; }
 .app-header {
   height: 58px;
   display: grid;

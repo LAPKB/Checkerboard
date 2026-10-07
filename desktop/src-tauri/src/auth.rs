@@ -6,11 +6,11 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
-use lapkb_desktop_session::Permit;
 #[cfg(all(feature = "local-staging", any(unix, windows)))]
 use lapkb_desktop_session::VerificationKeySet;
 #[cfg(any(unix, windows))]
 use lapkb_desktop_session::{LeaseVerifier, ProtectedApp};
+use lapkb_desktop_session::{Permit, SeatReference, SeatStatus};
 #[cfg(any(unix, windows))]
 use lapkb_desktop_session::{client::Client as LauncherSessionClient, client_store::ClientStore};
 use serde::Serialize;
@@ -30,6 +30,8 @@ const LAUNCHER_OPEN_ERROR: &str = "Could not open LAPKB Launcher.";
 #[cfg(not(any(target_os = "macos", all(windows, target_arch = "x86_64"))))]
 const LAUNCHER_OPEN_UNSUPPORTED_MESSAGE: &str =
     "Opening LAPKB Launcher from Checkmate is not supported on this platform.";
+const SEAT_REQUEST_FAILED_MESSAGE: &str =
+    "Checkmate could not request access on this computer. Open LAPKB Launcher and try again.";
 
 #[cfg(all(feature = "local-staging", any(unix, windows)))]
 mod local_staging {
@@ -166,6 +168,7 @@ pub struct AuthView {
     phase: AuthPhase,
     user: Option<AuthUser>,
     account_id: Option<String>,
+    seat: Option<SeatStatus>,
     message: Option<String>,
 }
 
@@ -396,6 +399,43 @@ impl AuthState {
         }
     }
 
+    /// Latest safe seat display state from the shared client. This is display
+    /// data only and never authorizes a command.
+    fn seat_status(&self) -> Option<SeatStatus> {
+        #[cfg(any(unix, windows))]
+        {
+            match self.runtime.as_ref() {
+                SessionRuntime::Ready(client) => Some(client.seat_status()),
+                SessionRuntime::Locked => None,
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
+    }
+
+    /// Queue one explicit Use here request through the shared client. Ok means
+    /// the request was accepted for review, not that access was granted; the
+    /// normal refresh afterwards independently verifies any resulting permit.
+    async fn use_here(&self, target: Option<SeatReference>) -> Result<(), String> {
+        #[cfg(any(unix, windows))]
+        {
+            let client = match self.runtime.as_ref() {
+                SessionRuntime::Ready(client) => Arc::clone(client),
+                SessionRuntime::Locked => return Err(TRUST_CONFIGURATION_MESSAGE.to_owned()),
+            };
+            let result = client.use_here(target).await;
+            self.refresh_once().await;
+            result.map_err(|_| SEAT_REQUEST_FAILED_MESSAGE.to_owned())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = target;
+            Err(TRUST_CONFIGURATION_MESSAGE.to_owned())
+        }
+    }
+
     #[cfg(any(unix, windows))]
     async fn refresh_once(&self) {
         let client = match self.runtime.as_ref() {
@@ -493,6 +533,7 @@ impl AuthState {
             phase,
             user,
             account_id,
+            seat: self.seat_status(),
             message: if self.runtime.is_ready() {
                 inner.message.map(str::to_owned)
             } else {
@@ -634,6 +675,15 @@ pub fn auth_open_launcher(
     state.open_launcher(startup.unwrap_or(false))
 }
 
+#[tauri::command]
+pub async fn auth_use_here(
+    state: State<'_, AuthState>,
+    target: Option<SeatReference>,
+) -> Result<AuthView, String> {
+    state.use_here(target).await?;
+    Ok(state.view())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +694,14 @@ mod tests {
         let state = AuthState::test_locked();
         assert!(state.acquire_permit().is_none());
         assert_eq!(state.denial_message(), TRUST_CONFIGURATION_MESSAGE);
+        assert!(state.view().seat.is_none());
+    }
+
+    #[test]
+    fn locked_runtime_rejects_seat_requests() {
+        let state = AuthState::test_locked();
+        let error = tauri::async_runtime::block_on(state.use_here(None)).unwrap_err();
+        assert_eq!(error, TRUST_CONFIGURATION_MESSAGE);
     }
 
     #[test]
