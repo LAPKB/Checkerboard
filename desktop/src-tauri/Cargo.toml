@@ -1,6 +1,6 @@
 [package]
 name = "checkmate-desktop"
-version = "0.8.4"
+version = "0.8.5"
 description = "Desktop interface for drug-interaction analysis and regimen ranking"
 authors = ["Michael Neely"]
 edition = "2024"
