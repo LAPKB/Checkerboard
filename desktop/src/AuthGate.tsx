@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type { AuthView, SeatReference, SeatStatus } from "./types";
 const AUTH_STATUS_POLL_INTERVAL_MS = 1000;
@@ -34,6 +35,7 @@ export function AuthGate({
     let pending = false;
     let requestGeneration = 0;
     let pendingDeadline: number | undefined;
+    let unlisten: (() => void) | undefined;
 
     const applyStatus = (view: AuthView) => {
       const nextAccountId = view.accountId;
@@ -96,7 +98,39 @@ export function AuthGate({
         });
     };
 
+    const invalidateInFlight = () => {
+      requestGeneration += 1;
+      pending = false;
+      if (pendingDeadline !== undefined) {
+        window.clearTimeout(pendingDeadline);
+        pendingDeadline = undefined;
+      }
+    };
+
+    // The event is a wakeup only. It never carries authorization or status, so
+    // an in-flight reply must be abandoned before a fresh status read starts.
+    const onStatusChanged = () => {
+      if (!active) return;
+      invalidateInFlight();
+      refreshStatus();
+    };
+
     refreshStatus();
+    void listen("auth-status-changed", onStatusChanged)
+      .then((stopListening) => {
+        if (!active) {
+          stopListening();
+          return;
+        }
+        unlisten = stopListening;
+        // Close the registration race where the permit completed before the
+        // listener existed. A pending first read already covers this.
+        refreshStatus();
+      })
+      .catch(() => {
+        // Polling remains the fallback when event registration is unavailable.
+      });
+
     const timer = window.setInterval(
       refreshStatus,
       AUTH_STATUS_POLL_INTERVAL_MS,
@@ -108,6 +142,7 @@ export function AuthGate({
       if (pendingDeadline !== undefined) {
         window.clearTimeout(pendingDeadline);
       }
+      unlisten?.();
     };
   }, [formatError]);
 
@@ -144,19 +179,57 @@ export function AuthGate({
     </div>
   ) : null;
 
+  const checkingPhase = authView === null || authView.phase === "restoring";
+  const showStartupShell =
+    !unlocked &&
+    mountedAccountId === null &&
+    (checkingPhase || authStatusError !== null);
+  const showLock = !unlocked && !showStartupShell;
+  const header = (
+    <header className="app-header">
+      <div className="brand">
+        <img className="brand-mark" src={logo} alt="Checkmate logo" />
+        <span>
+          Checkmate <small>v{buildVersion}</small>
+        </span>
+      </div>
+    </header>
+  );
+
   return (
     <>
       {workspace}
-      {!unlocked && (
+      {showStartupShell && (
         <div className="app-shell access-locked">
-          <header className="app-header">
-            <div className="brand">
-              <img className="brand-mark" src={logo} alt="Checkmate logo" />
-              <span>
-                Checkmate <small>v{buildVersion}</small>
-              </span>
-            </div>
-          </header>
+          {header}
+          <main className="access-gate" aria-live="polite">
+            <section className="access-card startup-card">
+              <h1>Preparing Checkmate</h1>
+              <p role="status">
+                {authStatusError
+                  ? `Could not check LAPKB access: ${authStatusError}`
+                  : "Checking shared LAPKB access…"}
+              </p>
+              {authStatusError && (
+                <button
+                  className="primary-button"
+                  onClick={() => void openLauncher()}
+                >
+                  Open Launcher
+                </button>
+              )}
+              {launcherError && (
+                <p className="access-error" role="alert">
+                  {launcherError}
+                </p>
+              )}
+            </section>
+          </main>
+        </div>
+      )}
+      {showLock && (
+        <div className="app-shell access-locked">
+          {header}
           <main className="access-gate" aria-live="polite">
             <section className="access-card">
               <h1>Checkmate access is locked</h1>

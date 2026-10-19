@@ -11,15 +11,21 @@ import {
   type Mock,
 } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import { AuthGate } from "./AuthGate";
 import type { AuthView } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 const statusMock = vi.mocked(invoke) as unknown as Mock<
   (...args: unknown[]) => Promise<AuthView>
 >;
+const listenMock = vi.mocked(listen) as unknown as Mock<
+  (event: string, handler: () => void) => Promise<() => void>
+>;
+let statusChanged: (() => void) | null = null;
 const launcherMock = vi.fn<() => Promise<void>>();
 const mountedAccounts: string[] = [];
 const unmountedAccounts: string[] = [];
@@ -143,6 +149,11 @@ async function unmountGate() {
 beforeEach(() => {
   vi.useFakeTimers();
   statusMock.mockReset();
+  listenMock.mockReset().mockImplementation((_event, handler) => {
+    statusChanged = handler;
+    return Promise.resolve(() => {});
+  });
+  statusChanged = null;
   launcherMock.mockReset().mockResolvedValue(undefined);
   mountedAccounts.length = 0;
   unmountedAccounts.length = 0;
@@ -162,6 +173,80 @@ afterEach(async () => {
 });
 
 describe("Checkmate AuthGate rendered behavior", () => {
+  it("renders the startup shell instead of a lock screen before the first status arrives", async () => {
+    statusMock.mockReturnValue(new Promise<AuthView>(() => undefined));
+
+    await renderGate();
+
+    expect(container?.textContent).toContain("Preparing Checkmate");
+    expect(container?.textContent).toContain("Checking shared LAPKB access…");
+    expect(container?.textContent).not.toContain("Checkmate access is locked");
+    expect(container?.querySelector(".help-text")).toBeNull();
+    expect(container?.querySelector("[data-account]")).toBeNull();
+  });
+
+  it("reads status immediately after auth-status-changed and drops an in-flight positive reply", async () => {
+    const initialStatus = deferred<AuthView>();
+    statusMock
+      .mockReturnValueOnce(initialStatus.promise)
+      .mockResolvedValueOnce(signedOut());
+
+    await renderGate();
+    expect(statusMock).toHaveBeenCalledTimes(1);
+    expect(statusChanged).not.toBeNull();
+
+    await act(async () => {
+      statusChanged?.();
+    });
+    expect(statusMock).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(container?.textContent).toContain("Checkmate access is locked");
+
+    initialStatus.resolve(authenticated("late-account"));
+    await settle();
+
+    expect(container?.querySelector("[data-account]")).toBeNull();
+    expect(mountedAccounts).toEqual([]);
+    expect(container?.textContent).toContain("Checkmate access is locked");
+  });
+
+  it("shows the startup shell with Open Launcher when the first status check times out", async () => {
+    statusMock.mockReturnValue(new Promise<AuthView>(() => undefined));
+
+    await renderGate();
+    await advance(2000);
+
+    expect(container?.textContent).toContain("Preparing Checkmate");
+    expect(container?.textContent).toContain("access check timed out");
+    expect(container?.textContent).not.toContain("Checkmate access is locked");
+    const button = Array.from(
+      container?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((candidate) => candidate.textContent === "Open Launcher");
+    if (!button) throw new Error("Open Launcher button is not rendered");
+    await act(async () => button.click());
+    expect(launcherMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a mounted workspace hidden and inert under the lock card when a later check times out", async () => {
+    statusMock
+      .mockReturnValueOnce(Promise.resolve(authenticated("account-a")))
+      .mockImplementation(() => new Promise<AuthView>(() => undefined));
+
+    await renderGate();
+    await editDraft("unsaved account-a work");
+    await advance(3000);
+
+    const protectedTree = container?.querySelector<HTMLElement>("[aria-hidden]");
+    expect(protectedTree?.getAttribute("aria-hidden")).toBe("true");
+    expect(protectedTree?.hasAttribute("inert")).toBe(true);
+    expect(protectedTree?.style.display).toBe("none");
+    expect(getInput().value).toBe("unsaved account-a work");
+    expect(unmountedAccounts).toEqual([]);
+    expect(container?.textContent).toContain("Checkmate access is locked");
+    expect(container?.textContent).toContain("access check timed out");
+    expect(container?.textContent).not.toContain("Preparing Checkmate");
+  });
+
   it("locks a verified workspace hidden and inert when status rejects", async () => {
     const rejectedStatus = deferred<AuthView>();
     statusMock

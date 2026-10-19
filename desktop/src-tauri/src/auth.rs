@@ -14,7 +14,7 @@ use lapkb_desktop_session::{Permit, SeatReference, SeatStatus};
 #[cfg(any(unix, windows))]
 use lapkb_desktop_session::{client::Client as LauncherSessionClient, client_store::ClientStore};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 const LAUNCHER_BUNDLE_ID: &str = "org.lapkb.launcher";
@@ -111,6 +111,7 @@ pub struct AuthState {
     runtime: Arc<SessionRuntime>,
     inner: Arc<Mutex<AuthInner>>,
     access_revoked: AccessRevokedHook,
+    status_changed: Arc<dyn Fn() + Send + Sync>,
     #[cfg(target_os = "macos")]
     startup_launcher_attempted: Arc<AtomicBool>,
     #[cfg(test)]
@@ -217,6 +218,7 @@ impl AuthState {
             runtime: Arc::new(SessionRuntime::Locked),
             inner: Arc::new(Mutex::new(AuthInner::default())),
             access_revoked: Arc::new(|| {}),
+            status_changed: Arc::new(|| {}),
             #[cfg(target_os = "macos")]
             startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
@@ -236,6 +238,7 @@ impl AuthState {
                 ..AuthInner::default()
             })),
             access_revoked: Arc::new(|| {}),
+            status_changed: Arc::new(|| {}),
             #[cfg(target_os = "macos")]
             startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
@@ -259,6 +262,7 @@ impl AuthState {
     ) -> Self {
         let runtime = Arc::new(SessionRuntime::new(app));
         let ready = runtime.is_ready();
+        let status_app = app.clone();
         let state = Self {
             runtime,
             inner: Arc::new(Mutex::new(AuthInner {
@@ -267,6 +271,9 @@ impl AuthState {
                 ..AuthInner::default()
             })),
             access_revoked: Arc::new(access_revoked),
+            status_changed: Arc::new(move || {
+                let _ = status_app.emit("auth-status-changed", ());
+            }),
             #[cfg(target_os = "macos")]
             startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -496,6 +503,7 @@ impl AuthState {
         if revoke {
             (self.access_revoked)();
         }
+        (self.status_changed)();
         accepted
     }
 
@@ -714,6 +722,7 @@ mod tests {
             access_revoked: Arc::new(move || {
                 calls.fetch_add(1, Ordering::SeqCst);
             }),
+            status_changed: Arc::new(|| {}),
             #[cfg(target_os = "macos")]
             startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
@@ -722,6 +731,28 @@ mod tests {
         assert!(!state.record_access(true, Some("account-b".into())));
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert!(state.record_access(true, Some("account-b".into())));
+        assert!(!state.record_access(false, None));
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn record_access_notifies_status_listeners_on_grant_and_denial() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&count);
+        let state = AuthState {
+            runtime: Arc::new(SessionRuntime::Locked),
+            inner: Arc::new(Mutex::new(AuthInner::default())),
+            access_revoked: Arc::new(|| {}),
+            status_changed: Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }),
+            #[cfg(target_os = "macos")]
+            startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
+            dispatch_pause: Arc::new(Mutex::new(None)),
+        };
+
+        assert!(state.record_access(true, Some("account-a".into())));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
         assert!(!state.record_access(false, None));
         assert_eq!(count.load(Ordering::SeqCst), 2);
     }
