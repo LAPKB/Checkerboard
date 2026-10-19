@@ -34,7 +34,7 @@ export function AuthGate({
     let active = true;
     let pending = false;
     let requestGeneration = 0;
-    let pendingDeadline: number | undefined;
+    let watchdog: number | undefined;
     let unlisten: (() => void) | undefined;
 
     const applyStatus = (view: AuthView) => {
@@ -65,35 +65,43 @@ export function AuthGate({
       setAuthView(view);
     };
 
+    const clearWatchdog = () => {
+      if (watchdog !== undefined) {
+        window.clearTimeout(watchdog);
+        watchdog = undefined;
+      }
+    };
+
     const refreshStatus = () => {
       if (!active || pending) return;
 
+      if (watchdog === undefined) {
+        watchdog = window.setTimeout(() => {
+          if (!active) return;
+          requestGeneration += 1;
+          pending = false;
+          watchdog = undefined;
+          setAuthView(null);
+          setAuthStatusError("The LAPKB access check timed out.");
+        }, AUTH_STATUS_TIMEOUT_MS);
+      }
+
       pending = true;
       const requestId = ++requestGeneration;
-      const deadline = window.setTimeout(() => {
-        if (!active || requestId !== requestGeneration) return;
-        requestGeneration += 1;
-        pending = false;
-        pendingDeadline = undefined;
-        setAuthView(null);
-        setAuthStatusError("The LAPKB access check timed out.");
-      }, AUTH_STATUS_TIMEOUT_MS);
-      pendingDeadline = deadline;
-
       void invoke<AuthView>("auth_status")
         .then((view) => {
           if (!active || requestId !== requestGeneration) return;
           applyStatus(view);
           setAuthStatusError(null);
+          clearWatchdog();
         })
         .catch((reason: unknown) => {
           if (!active || requestId !== requestGeneration) return;
           setAuthView(null);
           setAuthStatusError(formatError(reason));
+          clearWatchdog();
         })
         .finally(() => {
-          window.clearTimeout(deadline);
-          if (pendingDeadline === deadline) pendingDeadline = undefined;
           if (requestId === requestGeneration) pending = false;
         });
     };
@@ -101,10 +109,6 @@ export function AuthGate({
     const invalidateInFlight = () => {
       requestGeneration += 1;
       pending = false;
-      if (pendingDeadline !== undefined) {
-        window.clearTimeout(pendingDeadline);
-        pendingDeadline = undefined;
-      }
     };
 
     // The event is a wakeup only. It never carries authorization or status, so
@@ -139,8 +143,8 @@ export function AuthGate({
       active = false;
       requestGeneration += 1;
       window.clearInterval(timer);
-      if (pendingDeadline !== undefined) {
-        window.clearTimeout(pendingDeadline);
+      if (watchdog !== undefined) {
+        window.clearTimeout(watchdog);
       }
       unlisten?.();
     };

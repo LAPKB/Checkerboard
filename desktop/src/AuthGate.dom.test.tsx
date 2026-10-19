@@ -729,4 +729,70 @@ describe("Checkmate AuthGate rendered behavior", () => {
     expect(statusMock.mock.calls.length).toBe(statusCalls);
     expect(container?.textContent).toContain("Checkmate access is locked.");
   });
+
+  it("does not let repeated status events extend the startup timeout", async () => {
+    statusMock.mockReturnValue(new Promise<AuthView>(() => undefined));
+
+    await renderGate();
+    expect(statusMock).toHaveBeenCalledTimes(1);
+
+    await advance(1000);
+    await act(async () => statusChanged?.());
+    await advance(1000);
+    await act(async () => statusChanged?.());
+
+    expect(container?.textContent).toContain("Preparing Checkmate");
+    expect(container?.textContent).toContain("access check timed out");
+    expect(container?.textContent).not.toContain("Checkmate access is locked");
+    expect(container?.querySelector("[data-account]")).toBeNull();
+  });
+
+  it("hides a mounted workspace when repeated events keep status responses stalled", async () => {
+    statusMock
+      .mockReturnValueOnce(Promise.resolve(authenticated("account-a")))
+      .mockImplementation(() => new Promise<AuthView>(() => undefined));
+
+    await renderGate();
+    await editDraft("unsaved account-a work");
+
+    await advance(1000);
+    await act(async () => statusChanged?.());
+    await advance(1000);
+    await act(async () => statusChanged?.());
+    await advance(1000);
+
+    const protectedTree = container?.querySelector<HTMLElement>("[aria-hidden]");
+    expect(protectedTree?.getAttribute("aria-hidden")).toBe("true");
+    expect(protectedTree?.hasAttribute("inert")).toBe(true);
+    expect(protectedTree?.style.display).toBe("none");
+    expect(getInput().value).toBe("unsaved account-a work");
+    expect(unmountedAccounts).toEqual([]);
+    expect(container?.textContent).toContain("Checkmate access is locked");
+    expect(container?.textContent).toContain("access check timed out");
+    expect(container?.textContent).not.toContain("Preparing Checkmate");
+  });
+
+  it("does not let a superseded positive reply unlock after the timeout", async () => {
+    const late = deferred<AuthView>();
+    statusMock
+      .mockReturnValueOnce(Promise.resolve(authenticated("account-a")))
+      .mockReturnValueOnce(late.promise)
+      .mockImplementation(() => new Promise<AuthView>(() => undefined));
+
+    await renderGate();
+    await editDraft("unsaved account-a work");
+
+    await advance(1000);
+    await act(async () => statusChanged?.());
+    await advance(2000);
+    late.resolve(authenticated("late-account"));
+    await settle();
+
+    expect(container?.textContent).toContain("access check timed out");
+    expect(container?.querySelector("[data-account='late-account']")).toBeNull();
+    const protectedTree = container?.querySelector<HTMLElement>("[aria-hidden]");
+    expect(protectedTree?.getAttribute("aria-hidden")).toBe("true");
+    expect(getInput().value).toBe("unsaved account-a work");
+    expect(unmountedAccounts).toEqual([]);
+  });
 });
