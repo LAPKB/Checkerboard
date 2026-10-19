@@ -94,6 +94,24 @@ it does not use the bacterial growth ODE or `get_e2()`. Subsequent regimen
 simulation/results stages, embedding static plot images in exported workbooks,
 installer signing, and desktop end-to-end automation remain later migration phases.
 
+## LAPKB Launcher
+
+The repository-root `lapkb-app.json` supplies Checkmate's discovery metadata to
+LAPKB Launcher. Launcher takes the displayed name and bundle identifier from
+`desktop/src-tauri/tauri.conf.json`: **Checkmate** and `org.lapkb.checkmate`.
+The native executable is `checkmate-desktop`.
+
+Checkmate is public: neither opening it directly nor opening it through Launcher
+requires a LAPKB sign-in or a product role. The stable Launcher logical ID remains
+`checkerboard`; this preserves the catalog identity across the desktop rename,
+not a second app entry or an alias for the old bundle identifier.
+
+A Launcher build must include the regenerated Checkmate catalog entry to discover
+the renamed app. This metadata does not supply an installer or an update feed.
+Install/Update support requires a separately verified release archive and trusted
+update source; until then, install Checkmate independently and use Launcher to
+open the discovered installation.
+
 ## Commands
 
 ```sh

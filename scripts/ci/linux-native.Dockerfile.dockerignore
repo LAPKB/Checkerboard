@@ -1,0 +1,6 @@
+.git
+.pi
+.worktrees
+**/node_modules
+**/dist
+**/target

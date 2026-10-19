@@ -11,6 +11,7 @@ pub fn export_results(
     path: &str,
     analysis: &AnalysisResult,
     stratify_index: Option<usize>,
+    authorized: &dyn Fn() -> bool,
 ) -> Result<(), AppError> {
     if analysis.mic_values.len() != analysis.drug_names.len()
         || analysis
@@ -121,10 +122,19 @@ pub fn export_results(
                             .map(|unit| format!(" {unit}"))
                             .unwrap_or_default();
                         if let Some(range) = analysis.concentration_ranges.get(index) {
-                            let minimum = range.minimum.map_or_else(|| "unbounded".into(), |value| value.to_string());
-                            let maximum = range.maximum.map_or_else(|| "unbounded".into(), |value| value.to_string());
+                            let minimum = range
+                                .minimum
+                                .map_or_else(|| "unbounded".into(), |value| value.to_string());
+                            let maximum = range
+                                .maximum
+                                .map_or_else(|| "unbounded".into(), |value| value.to_string());
                             format!("{drug}={minimum}–{maximum}{unit}")
-                        } else if let Some(target) = analysis.clinically_relevant_concentrations.get(index).copied().flatten() {
+                        } else if let Some(target) = analysis
+                            .clinically_relevant_concentrations
+                            .get(index)
+                            .copied()
+                            .flatten()
+                        {
                             format!("{drug}={}–{}{unit}", target / 4.0, target * 4.0)
                         } else {
                             format!("{drug}=unrestricted")
@@ -335,7 +345,9 @@ pub fn export_results(
             .map_err(xlsx_error)?;
     }
     worksheet.set_freeze_panes(1, 0).map_err(xlsx_error)?;
-    workbook.save(path).map_err(xlsx_error)
+    let contents = workbook.save_to_buffer().map_err(xlsx_error)?;
+    super::atomic_file::write_authorized(Path::new(path), &contents, authorized)
+        .map_err(|error| AppError::new("workbookExportError", error.to_string()))
 }
 
 fn write_aggregate_interpretation(
@@ -440,7 +452,7 @@ mod tests {
             "checkerboard-workbook-test-{}.xlsx",
             std::process::id()
         ));
-        export_results(path.to_string_lossy().as_ref(), &analysis, None).unwrap();
+        export_results(path.to_string_lossy().as_ref(), &analysis, None, &|| true).unwrap();
         assert!(std::fs::metadata(&path).unwrap().len() > 1_000);
         std::fs::remove_file(path).unwrap();
     }
