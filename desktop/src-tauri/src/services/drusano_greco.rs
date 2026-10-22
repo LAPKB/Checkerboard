@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MODEL_SOURCE: &str = r#"# Numerical Drusano-Greco Equation 2 prediction model
 # d1 and d2 are dimensionless concentration/maximum-tested-concentration covariates.
-# E and XM0 are dimensionless; absorbance remains on the imported response scale.
+# E and XM0 are dimensionless; counts remain on the imported response scale.
 u = d1 / ec50_1
 v = d2 / ec50_2
 w = alpha_12 * u * v
@@ -34,12 +34,12 @@ solve XM0 > 0 such that:
     1 = u / XM0^h_1 + v / XM0^h_2 + w / XM0^h_12
 
 predicted_effect = XM0 / (1 + XM0)
-predicted_absorbance = blank + response_span * (1 - predicted_effect)
+predicted_response = response_span * (1 - predicted_effect)
 
 error_sd = sqrt(lambda^2 + (
-    C0 + C1*predicted_absorbance
-       + C2*predicted_absorbance^2
-       + C3*predicted_absorbance^3
+    C0 + C1*predicted_response
+       + C2*predicted_response^2
+       + C3*predicted_response^3
 )^2)
 "#;
 

@@ -38,7 +38,7 @@ export function DiamondSetupWorkspace({
   </aside><section className="content-card stage-card">
     <div className="card-heading"><div><h1>DiaMOND analysis</h1><p>Fit the single-agent and equipotent combination diagonals, then calculate Loewe FIC50 and FIC90. Off-diagonal wells do not enter the primary fits; complete checkerboards additionally receive full-isobole diagnostics.</p></div></div>
     <div className="stage-content">
-      <div className="method-card"><strong>Dose layout requirement</strong><p>Use the assigned MIC/IC dose anchors to align drug potency. At each combination dose, concentration ÷ anchor should be equal for every active drug. For example, a two-drug total dose of 1 contains 0.5 anchor units of each drug.</p></div>
+      <div className="method-card"><strong>Dose layout requirement</strong><p>The assigned anchors default to the tested concentrations nearest the fitted single-agent IC50 values. At each combination dose, concentration ÷ anchor should be equal for every active drug. For example, a two-drug total dose of 1 contains 0.5 anchor units of each drug.</p></div>
       <div className="method-card"><strong>Normalized response scale</strong><p>Control-normalized viability may be supplied as a fraction or percentage. DiaMOND detects the scale from the all-zero drug controls: a mean near 1 is fractional and a mean near 100 is percentage. Response censoring is not applied to normalized viability; it is used only for raw instrument measurements.</p></div>
       <button className="success-button calculate-button" disabled={busy || !settingsComplete} onClick={calculate}>{busy ? "Calculating…" : "Calculate DiaMOND"}</button>
       {progress && <ProgressBar progress={progress} />}

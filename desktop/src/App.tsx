@@ -2,8 +2,8 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
-import { aggregateBliss, buildMapping, compareRegimens, concentrationRangeFor, exceedanceDomain, formatNumber, formatPValue, groupAnalysisUnits, hasConcentrationRanges, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, propagateSharedDrugConcentrations, roleLabel, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
-import { DrusanoComparisonWorkspace, DrusanoFitWorkspace, DrusanoRegimenWorkspace, InputTypeControls, ProjectWorkspace } from "./DrusanoGreco";
+import { aggregateBliss, buildMapping, compareRegimens, concentrationRangeFor, exceedanceDomain, formatNumber, formatPValue, groupAnalysisUnits, hasConcentrationRanges, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, propagateSharedDrugConcentrations, regimenMicAssignmentKey, roleLabel, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
+import { DrusanoComparisonWorkspace, DrusanoFitWorkspace, DrusanoRegimenWorkspace, DrusanoSamplingWorkspace, InputTypeControls, ProjectWorkspace } from "./DrusanoGreco";
 import { MusycComparisonWorkspace, MusycFitWorkspace } from "./Musyc";
 import { DiamondComparisonWorkspace, DiamondResultsWorkspace, DiamondSetupWorkspace } from "./Diamond";
 import { RegimenNavigator } from "./RegimenNavigator";
@@ -25,6 +25,8 @@ import type {
   ComparisonSettings,
   ConcentrationRange,
   DrusanoCensorLimitSuggestion,
+  DrusanoFitEntry,
+  DiamondDoseAnchorSuggestion,
   DiamondPolicy,
   DiamondRegimen,
   DiamondResult,
@@ -34,6 +36,8 @@ import type {
   DrusanoFitResult,
   DrusanoModelSettings,
   DrusanoRegimenSimulationResult,
+  DrusanoSamplingMode,
+  DrusanoSamplingSummary,
   MusycFitResult,
   MusycModelSettings,
   MicEstimate,
@@ -44,7 +48,25 @@ import type {
 } from "./types";
 import "./App.css";
 
-type Page = "project" | "import" | "mic" | "analyze" | "regimen" | "results" | "compare";
+type Page = "project" | "import" | "mic" | "sampling" | "analyze" | "regimen" | "results" | "compare";
+
+interface MicAssignment {
+  key: string;
+  legacyKey: string;
+  organism: string | null;
+  name: string;
+  unit: string;
+  regimenLabel?: string;
+}
+
+interface ImportedMicStratum {
+  key: string;
+  regimenLabel: string;
+  organism: string | null;
+  drugNames: string[];
+  units: string[];
+  micValues: number[];
+}
 type ResultTab = "summary" | "heatmap" | "bar" | "processed";
 type AnalysisProgress = { completedIterations: number; totalIterations: number; regimenLabel?: string };
 type DrusanoFitProgress = { phase: "reference" | "bootstrap"; cycle: number; objectiveFunction: number; completedBootstraps: number; totalBootstraps: number; regimenLabel?: string };
@@ -59,16 +81,19 @@ interface ProjectSnapshot {
   page: Page;
   analysisType: AnalysisType;
   inputSettings: InputSettings;
-  drusanoFits: Array<{ id: string; label: string; regimenLabel?: string; organism?: string | null; fit: DrusanoFitResult }>;
+  drusanoFits: DrusanoFitEntry[];
   drusanoSimulations: Record<string, DrusanoRegimenSimulationResult>;
   drusanoSimulationConcentrations: Record<string, Array<number | null>>;
   drusanoModelSettings: DrusanoModelSettings;
   drusanoCensorSuggestion: DrusanoCensorLimitSuggestion | null;
+  drusanoSamplingMode?: DrusanoSamplingMode;
+  drusanoSamplingSummaries?: Record<string, DrusanoSamplingSummary>;
   blissResponseCensorLimit?: number | null;
   diamondRegimens?: DiamondRegimen[];
   diamondComparisonRegimens?: DiamondRegimen[];
   selectedDiamondId?: string | null;
   diamondToleranceLog2?: number;
+  diamondAnchorEstimatesByRegimen?: Record<string, DiamondDoseAnchorSuggestion[]>;
   musycFits: Array<{ id: string; label: string; regimenLabel?: string; organism?: string | null; fit: MusycFitResult }>;
   musycModelSettings: MusycModelSettings;
   tab: ResultTab;
@@ -106,7 +131,7 @@ interface ProjectSnapshot {
 const BarPlot = lazy(() => import("./BarPlot"));
 const appBuild = "0.8.0";
 
-const roleOptions: ColumnRole[] = ["ignore", "organism", "drugNameA", "drugA", "unitsA", "drugNameB", "drugB", "unitsB", "drugNameC", "drugC", "unitsC", "response"];
+const roleOptions: ColumnRole[] = ["ignore", "organism", "drugNameA", "drugA", "unitsA", "micA", "drugNameB", "drugB", "unitsB", "micB", "drugNameC", "drugC", "unitsC", "response"];
 
 const initialImport: ImportRequest = {
   path: "",
@@ -152,17 +177,22 @@ function App() {
   const [page, setPage] = useState<Page>("project");
   const [analysisType, setAnalysisType] = useState<AnalysisType>("bliss");
   const [inputSettings, setInputSettings] = useState<InputSettings>(initialInputSettings);
-  const [drusanoFits, setDrusanoFits] = useState<{ id: string; label: string; regimenLabel?: string; organism?: string | null; fit: DrusanoFitResult }[]>([]);
+  const [drusanoFits, setDrusanoFits] = useState<DrusanoFitEntry[]>([]);
   const [drusanoSimulations, setDrusanoSimulations] = useState<Record<string, DrusanoRegimenSimulationResult>>({});
   const [drusanoSimulationConcentrations, setDrusanoSimulationConcentrations] = useState<Record<string, Array<number | null>>>({});
   const [drusanoProgress, setDrusanoProgress] = useState<DrusanoFitProgress | null>(null);
   const [drusanoModelSettings, setDrusanoModelSettings] = useState<DrusanoModelSettings>(initialDrusanoModelSettings);
   const [drusanoCensorSuggestion, setDrusanoCensorSuggestion] = useState<DrusanoCensorLimitSuggestion | null>(null);
+  const [drusanoSamplingMode, setDrusanoSamplingMode] = useState<DrusanoSamplingMode>("allImported");
+  const [drusanoSamplingSummaries, setDrusanoSamplingSummaries] = useState<Record<string, DrusanoSamplingSummary>>({});
+  const [drusanoSamplingBusy, setDrusanoSamplingBusy] = useState(false);
+  const [drusanoSamplingError, setDrusanoSamplingError] = useState<string | null>(null);
   const [blissResponseCensorLimit, setBlissResponseCensorLimit] = useState<number | null>(null);
   const [diamondRegimens, setDiamondRegimens] = useState<DiamondRegimen[]>([]);
   const [diamondComparisonRegimens, setDiamondComparisonRegimens] = useState<DiamondRegimen[]>([]);
   const [selectedDiamondId, setSelectedDiamondId] = useState<string | null>(null);
   const [diamondToleranceLog2, setDiamondToleranceLog2] = useState(0.5);
+  const [diamondAnchorEstimatesByRegimen, setDiamondAnchorEstimatesByRegimen] = useState<Record<string, DiamondDoseAnchorSuggestion[]>>({});
   const [drusanoSuggestionBusy, setDrusanoSuggestionBusy] = useState(false);
   const [drusanoSuggestionError, setDrusanoSuggestionError] = useState<string | null>(null);
   const [musycFits, setMusycFits] = useState<{ id: string; label: string; regimenLabel?: string; organism?: string | null; fit: MusycFitResult }[]>([]);
@@ -228,6 +258,13 @@ function App() {
 
   const mappingErrors = useMemo(() => validateRoles(roles), [roles]);
   const mappedOrganismColumn = roles.indexOf("organism") >= 0 ? roles.indexOf("organism") : null;
+  const drusanoMicColumnA = roles.indexOf("micA");
+  const drusanoMicColumnB = roles.indexOf("micB");
+  const usesImportedDrusanoMics = analysisType === "drusanoGreco"
+    && drusanoMicColumnA >= 0 && drusanoMicColumnB >= 0;
+  const drusanoMicColumns = usesImportedDrusanoMics
+    ? [drusanoMicColumnA, drusanoMicColumnB]
+    : null;
   const importedRegimenOptions = useMemo(() => uniqueBy(
     (preview?.regimens ?? []).map((regimen) => ({ key: regimenKeyOf(regimen), label: regimenLabelOf(regimen) })),
     (item) => item.key,
@@ -253,33 +290,72 @@ function App() {
     return [...drugs.values()].sort((left, right) => left.name.localeCompare(right.name));
   }, [activeRegimens]);
   const micAssignments = useMemo(() => {
-    const assignments = new Map<string, { key: string; organism: string | null; name: string; unit: string }>();
+    const assignments = new Map<string, MicAssignment>();
     for (const regimen of activeRegimens) {
       regimen.drugNames.forEach((name, index) => {
-        const key = micAssignmentKey(regimen.organism, name);
+        const legacyKey = micAssignmentKey(regimen.organism, name);
+        const key = analysisType === "drusanoGreco"
+          ? regimenMicAssignmentKey(regimen.id, name)
+          : legacyKey;
         const existing = assignments.get(key);
         const unit = regimen.concentrationUnits[index] ?? "";
-        if (!existing) assignments.set(key, { key, organism: regimen.organism, name, unit });
+        if (!existing) assignments.set(key, {
+          key, legacyKey, organism: regimen.organism, name, unit,
+          regimenLabel: analysisType === "drusanoGreco" ? regimen.label : undefined,
+        });
         else if (!existing.unit && unit) assignments.set(key, { ...existing, unit });
       });
     }
     return [...assignments.values()].sort((left, right) =>
-      (left.organism ?? "").localeCompare(right.organism ?? "") || left.name.localeCompare(right.name));
-  }, [activeRegimens]);
+      (left.regimenLabel ?? left.organism ?? "").localeCompare(right.regimenLabel ?? right.organism ?? "")
+      || left.name.localeCompare(right.name));
+  }, [activeRegimens, analysisType, usesImportedDrusanoMics]);
+  const diamondAnchorEstimates = useMemo(() => aggregateDiamondAnchorEstimates(
+    activeRegimens.flatMap((regimen) => (diamondAnchorEstimatesByRegimen[regimen.id] ?? [])
+      .map((estimate) => ({ organism: regimen.organism, estimate }))),
+  ), [activeRegimens, diamondAnchorEstimatesByRegimen]);
+  const drusanoMicDetails = useMemo(() => {
+    return Object.fromEntries(activeRegimens.flatMap((regimen) =>
+      (micEstimatesByRegimen[regimen.id] ?? []).map((estimate) => [
+        regimenMicAssignmentKey(regimen.id, estimate.drugName),
+        estimate,
+      ])));
+  }, [activeRegimens, micEstimatesByRegimen]);
+  const importedDrusanoMicStrata = useMemo(() => activeRegimens.flatMap((regimen) => {
+    const seen = new Set<string>();
+    return (drusanoSamplingSummaries[regimen.id]?.locations ?? []).flatMap((location) => {
+      const micValues = location.micValues ?? [];
+      const pairKey = JSON.stringify(micValues);
+      if (seen.has(pairKey)) return [];
+      seen.add(pairKey);
+      return [{
+        key: `${regimen.id}:${pairKey}`,
+        regimenLabel: regimen.label,
+        organism: regimen.organism,
+        drugNames: regimen.drugNames,
+        units: regimen.concentrationUnits,
+        micValues,
+      }];
+    });
+  }), [activeRegimens, drusanoSamplingSummaries]);
   const importReady = Boolean(inputSettings.inputType && preview && mappingErrors.length === 0 && activeRegimens.length > 0
     && activeRegimens.every((regimen) => buildMapping(preview, roles, regimen.drugNames) !== null));
-  const micComplete = importReady && micAssignments.length > 0 && micAssignments.every((assignment) => {
-    const value = micRecordValue(drugMicValues, assignment.key, assignment.name);
+  const micComplete = importReady && (drusanoMicColumns != null || micAssignments.length > 0 && micAssignments.every((assignment) => {
+    const value = micRecordValue(drugMicValues, assignment.key, assignment.name, assignment.legacyKey);
     return value != null && Number.isFinite(value) && value > 0;
-  });
-  const micAnalysis = analysisType === "bliss" || analysisType === "diamond";
+  }));
+  const standardMicAnalysis = analysisType === "bliss" || analysisType === "diamond";
+  const drusanoNeedsMic = analysisType === "drusanoGreco" && drusanoSamplingMode !== "allImported";
+  const micAnalysis = standardMicAnalysis || drusanoNeedsMic;
+  const drusanoSamplingComplete = !drusanoNeedsMic || (micComplete && activeRegimens.length > 0
+    && activeRegimens.every((regimen) => Boolean(drusanoSamplingSummaries[regimen.id])));
   const resultsReady = micComplete && (analysisType === "bliss" ? analysisRegimens.length > 0 : analysisType === "diamond" && diamondRegimens.length > 0);
   const showCompare = analysisType === "bliss" ? comparisonRegimens.length > 1 : analysisType === "diamond" && diamondComparisonRegimens.length > 1;
   const drusanoComparisonEntries = useMemo(() => drusanoFits.flatMap((entry) => {
     const simulation = drusanoSimulations[entry.id];
     const entered = drusanoSimulationConcentrations[entry.id];
     return simulation && entered && simulation.concentrations.every((value, index) => value === entered[index])
-      ? [{ id: entry.id, label: entry.label, regimenLabel: entry.regimenLabel, organism: entry.organism, simulation }]
+      ? [{ id: entry.id, label: entry.label, baseLabel: entry.baseLabel, baseRegimenId: entry.baseRegimenId, sampling: entry.sampling, regimenLabel: entry.regimenLabel, organism: entry.organism, simulation }]
       : [];
   }), [drusanoFits, drusanoSimulations, drusanoSimulationConcentrations]);
   const orderedDrusanoFits = useMemo(() => [...drusanoFits].sort((left, right) => compareAnalysisUnits(left, right, resultOrder)), [drusanoFits, resultOrder]);
@@ -294,6 +370,7 @@ function App() {
     && validResponseCensorLimit(inputSettings.inputType, blissResponseCensorLimit);
   const diamondSettingsComplete = blissSettingsComplete && diamondToleranceLog2 >= 0;
   const drusanoSettingsComplete = validBlankValue
+    && inputSettings.inputType === "count"
     && validResponseCensorLimit(inputSettings.inputType, drusanoModelSettings.responseCensorLimit)
     && drusanoModelSettings.errorCoefficients.every((value) => value != null && Number.isFinite(value))
     && drusanoModelSettings.lambda != null
@@ -327,70 +404,170 @@ function App() {
   useEffect(() => {
     if (page === "project") return;
     if (page !== "import" && !importReady) setPage("import");
-    else if (micAnalysis && ["analyze", "results", "compare", "regimen"].includes(page) && !micComplete) setPage("mic");
-    else if (!micAnalysis && (page === "mic" || page === "results")) setPage("analyze");
-    else if (micAnalysis && page === "results" && !resultsReady) setPage("analyze");
-    else if (micAnalysis && page === "compare" && !showCompare) setPage(resultsReady ? "results" : "analyze");
-    else if (micAnalysis && page === "regimen") setPage(micComplete ? "analyze" : "mic");
+    else if (micAnalysis && ["sampling", "analyze", "results", "compare", "regimen"].includes(page) && !micComplete) setPage("mic");
+    else if (drusanoNeedsMic && ["analyze", "regimen", "compare"].includes(page) && !drusanoSamplingComplete) setPage("sampling");
+    else if (!micAnalysis && (page === "mic" || page === "sampling" || page === "results")) setPage("analyze");
+    else if (!drusanoNeedsMic && page === "sampling") setPage("analyze");
+    else if (standardMicAnalysis && page === "results" && !resultsReady) setPage("analyze");
+    else if (standardMicAnalysis && page === "compare" && !showCompare) setPage(resultsReady ? "results" : "analyze");
+    else if (standardMicAnalysis && page === "regimen") setPage(micComplete ? "analyze" : "mic");
     else if (analysisType === "drusanoGreco" && page === "regimen" && drusanoFits.length === 0) setPage("analyze");
     else if (analysisType === "drusanoGreco" && page === "compare" && drusanoComparisonEntries.length < 2) setPage(drusanoFits.length ? "regimen" : "analyze");
     else if (analysisType === "musyc" && page === "regimen") setPage("analyze");
     else if (analysisType === "musyc" && page === "compare" && musycFits.length < 2) setPage("analyze");
-  }, [page, analysisType, micAnalysis, importReady, micComplete, resultsReady, showCompare, drusanoFits.length, drusanoComparisonEntries.length, musycFits.length]);
+  }, [page, analysisType, micAnalysis, standardMicAnalysis, drusanoNeedsMic, drusanoSamplingComplete, importReady, micComplete, resultsReady, showCompare, drusanoFits.length, drusanoComparisonEntries.length, musycFits.length]);
 
   useEffect(() => {
     if (restoredSnapshot) return;
     if (!preview || mappingErrors.length > 0) {
       setDrugMicSuggestions({});
       setMicEstimatesByRegimen({});
+      setDiamondAnchorEstimatesByRegimen({});
       return;
     }
     if (!micAnalysis) {
       setDrugMicSuggestions({});
       setMicEstimatesByRegimen({});
+      setDiamondAnchorEstimatesByRegimen({});
       setMicBusy(false);
       setMicError(null);
       setDrugMicValues((current) => Object.fromEntries(micAssignments.map((assignment) => [
         assignment.key,
-        micRecordValue(current, assignment.key, assignment.name) ?? null,
+        micRecordValue(current, assignment.key, assignment.name, assignment.legacyKey) ?? null,
       ])));
       return;
     }
     let cancelled = false;
     setMicBusy(true);
     setMicError(null);
+    if (analysisType === "diamond") {
+      Promise.all(activeRegimens.map(async (regimen) => {
+        const mapping = buildMapping(preview, roles, regimen.drugNames);
+        if (!mapping) throw new Error(`${regimen.label}: invalid mapping`);
+        const estimates = await invoke<DiamondDoseAnchorSuggestion[]>("suggest_diamond_anchors", { request: {
+          import: importRequest, mapping,
+          policy: {
+            responseType: responseTypes[regimen.id] ?? regimen.suggestedResponseType,
+            blankValue: inputSettings.inputType === "count" ? 0 : inputSettings.blankValue ?? 0,
+            responseCensorThreshold: usesResponseCensoring(inputSettings.inputType) ? blissResponseCensorLimit ?? 0 : 0,
+            bootstrapIterations: 2,
+            randomSeed: 0,
+            diagonalToleranceLog2: 0.5,
+          },
+          regimenDrugNames: regimen.drugNames,
+          organism: regimen.organism,
+          organismColumn: mappedOrganismColumn,
+        } });
+        return { regimen, estimates };
+      })).then((results) => {
+        if (cancelled) return;
+        const byRegimen = Object.fromEntries(results.map(({ regimen, estimates }) => [regimen.id, estimates]));
+        const aggregated = aggregateDiamondAnchorEstimates(results.flatMap(({ regimen, estimates }) =>
+          estimates.map((estimate) => ({ organism: regimen.organism, estimate }))));
+        const suggestions = Object.fromEntries(micAssignments.map((assignment) => [
+          assignment.key,
+          aggregated[assignment.key]?.suggestedAnchor ?? null,
+        ]));
+        setDiamondAnchorEstimatesByRegimen(byRegimen);
+        setMicEstimatesByRegimen({});
+        setDrugMicSuggestions(suggestions);
+        setDrugMicValues((current) => Object.fromEntries(micAssignments.map((assignment) => [
+          assignment.key,
+          micRecordValue(current, assignment.key, assignment.name, assignment.legacyKey) ?? suggestions[assignment.key] ?? null,
+        ])));
+      }).catch((reason) => {
+        if (!cancelled) setMicError(errorMessage(reason));
+      }).finally(() => { if (!cancelled) setMicBusy(false); });
+      return () => { cancelled = true; };
+    }
     Promise.all(activeRegimens.map(async (regimen) => {
       const mapping = buildMapping(preview, roles, regimen.drugNames);
       if (!mapping) throw new Error(`${regimen.label}: invalid mapping`);
       const estimates = await invoke<MicEstimate[]>("infer_mics", { request: {
         import: importRequest, mapping,
-        responseType: responseTypes[regimen.id] ?? regimen.suggestedResponseType,
+        responseType: analysisType === "drusanoGreco" ? "rawOd" : responseTypes[regimen.id] ?? regimen.suggestedResponseType,
         blankValue: inputSettings.inputType === "count" ? 0 : inputSettings.blankValue,
-        zeroTolerance: micZeroTolerance, regimenDrugNames: regimen.drugNames,
+        zeroTolerance: analysisType === "drusanoGreco" ? 10 : micZeroTolerance,
+        strictBelow: analysisType === "drusanoGreco", regimenDrugNames: regimen.drugNames,
         organism: regimen.organism, organismColumn: mappedOrganismColumn,
       } });
       return { regimen, estimates };
     })).then((results) => {
       if (cancelled) return;
       const byRegimen = Object.fromEntries(results.map(({ regimen, estimates }) => [regimen.id, estimates]));
-      const groupedSuggestions = suggestMicsByOrganismDrug(results.flatMap(({ regimen, estimates }) =>
-        estimates.map((estimate) => ({ organism: regimen.organism, ...estimate }))));
-      const suggestions = Object.fromEntries(micAssignments.map((assignment) => [
-        assignment.key,
-        groupedSuggestions[assignment.key] ?? null,
-      ]));
+      const suggestions = analysisType === "drusanoGreco"
+        ? Object.fromEntries(results.flatMap(({ regimen, estimates }) => estimates.map((estimate) => [
+          regimenMicAssignmentKey(regimen.id, estimate.drugName),
+          estimate.mic,
+        ])))
+        : (() => {
+          const groupedSuggestions = suggestMicsByOrganismDrug(results.flatMap(({ regimen, estimates }) =>
+            estimates.map((estimate) => ({ organism: regimen.organism, ...estimate }))));
+          return Object.fromEntries(micAssignments.map((assignment) => [
+            assignment.key,
+            groupedSuggestions[assignment.key] ?? null,
+          ]));
+        })();
       setMicEstimatesByRegimen(byRegimen);
+      setDiamondAnchorEstimatesByRegimen({});
       setDrugMicSuggestions(suggestions);
       setDrugMicValues((current) => Object.fromEntries(micAssignments.map((assignment) => [
         assignment.key,
-        micRecordValue(current, assignment.key, assignment.name) ?? suggestions[assignment.key] ?? null,
+        micRecordValue(current, assignment.key, assignment.name, assignment.legacyKey) ?? suggestions[assignment.key] ?? null,
       ])));
       setDrugConcentrationRanges((current) => Object.fromEntries(uploadedDrugs.map((drug) => [drug.name, current[drug.name] ?? { minimum: null, maximum: null }])));
     }).catch((reason) => {
       if (!cancelled) setMicError(errorMessage(reason));
     }).finally(() => { if (!cancelled) setMicBusy(false); });
     return () => { cancelled = true; };
-  }, [analysisType, micAnalysis, preview, activeRegimens, roles, importRequest, inputSettings.inputType, inputSettings.blankValue, micZeroTolerance, responseTypes, uploadedDrugs, micAssignments, restoredSnapshot]);
+  }, [analysisType, micAnalysis, usesImportedDrusanoMics, preview, activeRegimens, roles, importRequest, inputSettings.inputType, inputSettings.blankValue, micZeroTolerance, responseTypes, uploadedDrugs, micAssignments, restoredSnapshot, blissResponseCensorLimit]);
+
+  useEffect(() => {
+    if (restoredSnapshot || !drusanoNeedsMic || !preview || !micComplete) {
+      if (!drusanoNeedsMic) setDrusanoSamplingSummaries({});
+      setDrusanoSamplingBusy(false);
+      setDrusanoSamplingError(null);
+      return;
+    }
+    let cancelled = false;
+    setDrusanoSamplingBusy(true);
+    setDrusanoSamplingError(null);
+    Promise.all(activeRegimens.map(async (regimen) => {
+      const mapping = buildMapping(preview, roles, regimen.drugNames);
+      if (!mapping) throw new Error(`${regimen.label}: invalid mapping`);
+      const assignedMicValues = regimen.drugNames.map((name) => micRecordValue(
+        drugMicValues,
+        regimenMicAssignmentKey(regimen.id, name),
+        name,
+        micAssignmentKey(regimen.organism, name),
+      ));
+      const assignedMicsComplete = assignedMicValues.every((value) => value != null && Number.isFinite(value) && value > 0);
+      if (!usesImportedDrusanoMics && !assignedMicsComplete) {
+        throw new Error(`${regimen.label}: complete both MIC assignments`);
+      }
+      const micValues = assignedMicsComplete ? assignedMicValues as number[] : [];
+      const summary = await invoke<DrusanoSamplingSummary>("preview_drusano_sampling", { request: {
+        import: importRequest,
+        mapping,
+        regimenDrugNames: regimen.drugNames,
+        organism: regimen.organism,
+        organismColumn: mappedOrganismColumn,
+        micValues,
+        micColumns: drusanoMicColumns,
+      } });
+      return [regimen.id, summary] as const;
+    })).then((entries) => {
+      if (!cancelled) setDrusanoSamplingSummaries(Object.fromEntries(entries));
+    }).catch((reason) => {
+      if (!cancelled) {
+        setDrusanoSamplingSummaries({});
+        setDrusanoSamplingError(errorMessage(reason));
+      }
+    }).finally(() => {
+      if (!cancelled) setDrusanoSamplingBusy(false);
+    });
+    return () => { cancelled = true; };
+  }, [restoredSnapshot, drusanoNeedsMic, preview, micComplete, activeRegimens, roles, importRequest, mappedOrganismColumn, drugMicValues, usesImportedDrusanoMics, drusanoMicColumnA, drusanoMicColumnB]);
 
   useEffect(() => {
     if (restoredSnapshot) return;
@@ -420,14 +597,14 @@ function App() {
         setDrusanoCensorSuggestion(suggestion);
         if (suggestion && analysisType === "drusanoGreco") setDrusanoModelSettings((current) => current.responseCensorLimit == null ? { ...current, responseCensorLimit: suggestion.responseCensorLimit } : current);
         if (suggestion && analysisType === "musyc") setMusycModelSettings((current) => current.responseCensorLimit == null ? { ...current, responseCensorLimit: suggestion.responseCensorLimit } : current);
-        if (suggestion && micAnalysis) setBlissResponseCensorLimit((current) => current ?? suggestion.responseCensorLimit);
+        if (suggestion && standardMicAnalysis) setBlissResponseCensorLimit((current) => current ?? suggestion.responseCensorLimit);
     }).catch((reason) => {
       if (!cancelled) setDrusanoSuggestionError(errorMessage(reason));
     }).finally(() => {
       if (!cancelled) setDrusanoSuggestionBusy(false);
     });
     return () => { cancelled = true; };
-  }, [analysisType, inputSettings.inputType, inputSettings.blankValue, preview, selectedImportRegimen, roles, importRequest, restoredSnapshot]);
+  }, [analysisType, standardMicAnalysis, inputSettings.inputType, inputSettings.blankValue, preview, selectedImportRegimen, roles, importRequest, restoredSnapshot]);
 
   async function chooseFile() {
     const selected = await open({
@@ -453,6 +630,7 @@ function App() {
     setDrusanoFits([]);
     setMusycFits([]);
     setDrusanoSimulations({});
+    setDrusanoSamplingSummaries({});
     setDrusanoSimulationConcentrations({});
     setDrusanoModelSettings((current) => ({ ...current, responseCensorLimit: null }));
     setMusycModelSettings((current) => ({ ...current, responseCensorLimit: null }));
@@ -461,6 +639,7 @@ function App() {
     setDrugMicValues({});
     setDrugMicSuggestions({});
     setMicEstimatesByRegimen({});
+    setDiamondAnchorEstimatesByRegimen({});
     setDrugConcentrationRanges({});
     setResponseTypes({});
     setSelectedImportRegimenId(null);
@@ -499,6 +678,7 @@ function App() {
       setDrugMicValues({});
       setDrugMicSuggestions({});
       setMicEstimatesByRegimen({});
+      setDiamondAnchorEstimatesByRegimen({});
       setDrugConcentrationRanges({});
       setAnalysis(null);
       setAnalysisRegimens([]);
@@ -638,7 +818,7 @@ function App() {
             regimenDrugNames: regimen.drugNames, organism: regimen.organism,
             organismColumn: mappedOrganismColumn, concentrationUnits: regimen.concentrationUnits,
           }, onProgress });
-          const source = { importRequest: { ...importRequest }, preview, roles: [...roles], worksheets: [...worksheets], micEstimates: (micEstimatesByRegimen[regimen.id] ?? []).map((estimate) => ({ ...estimate })), regimenId: regimen.id };
+          const source = { importRequest: { ...importRequest }, preview, roles: [...roles], worksheets: [...worksheets], micEstimates: [], regimenId: regimen.id };
           completed.push({ id: `${importRequest.path}:${importRequest.worksheet ?? ""}:${regimen.id}:diamond`, label: regimen.label, regimenLabel: regimenLabelOf(regimen), organism: regimen.organism, result, source });
         } catch (reason) { failures.push(`${regimen.label}: ${errorMessage(reason)}`); }
       }
@@ -689,12 +869,14 @@ function App() {
     setAnalysisRegimens([]);
     setDrusanoFits([]);
     setDrusanoSimulations({});
+    setDrusanoSamplingSummaries({});
     setMusycFits([]);
     setDiamondRegimens([]);
     setSelectedDiamondId(null);
     setDrugMicValues({});
     setDrugMicSuggestions({});
     setMicEstimatesByRegimen({});
+    setDiamondAnchorEstimatesByRegimen({});
   }
 
   function selectImportRegimen(id: string) {
@@ -717,10 +899,29 @@ function App() {
   }
 
   function changeAnalysisType(value: AnalysisType) {
+    if (value !== analysisType) {
+      setDrugMicValues({});
+      setDrugMicSuggestions({});
+      setMicEstimatesByRegimen({});
+      setDiamondAnchorEstimatesByRegimen({});
+    }
+    if (value === "drusanoGreco" && inputSettings.inputType !== "count") {
+      updateInputSettings({ ...inputSettings, inputType: "count", blankAdjustment: false, blankValue: 0 });
+    }
     setAnalysisType(value);
     setPage("project");
     setError(null);
     setBatchWarning(null);
+  }
+
+  function updateDrusanoSamplingMode(value: DrusanoSamplingMode) {
+    setRestoredSnapshot(false);
+    setDrusanoSamplingMode(value);
+    setDrusanoSamplingSummaries({});
+    setDrusanoFits([]);
+    setDrusanoSimulations({});
+    setDrusanoSimulationConcentrations({});
+    setError(null);
   }
 
   function updateInputSettings(next: InputSettings) {
@@ -732,6 +933,7 @@ function App() {
     setInputSettings(next);
     setDrusanoFits([]);
     setDrusanoSimulations({});
+    setDrusanoSamplingSummaries({});
     setMusycFits([]);
     setDiamondRegimens([]);
     setSelectedDiamondId(null);
@@ -821,8 +1023,8 @@ function App() {
   }
 
   async function runDrusanoFit() {
-    if (!preview || !importReady || !drusanoSettingsComplete) {
-      setError("Complete the import, blank response, censor limit, and assay error model before fitting the model.");
+    if (!preview || !importReady || !drusanoSettingsComplete || inputSettings.inputType !== "count" || !drusanoSamplingComplete) {
+      setError("Complete the count-data import, any required MIC-based sampling coverage, censor limit, and assay error model before fitting Drusano–Greco.");
       return;
     }
     setBusy(true);
@@ -830,36 +1032,54 @@ function App() {
     setBatchWarning(null);
     setDrusanoProgress({ phase: "reference", cycle: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: drusanoModelSettings.bootstrapIterations ?? 0, regimenLabel: activeRegimens[0]?.label });
     try {
-      const completed: { id: string; label: string; regimenLabel?: string; organism?: string | null; fit: DrusanoFitResult }[] = [];
+      const completed: DrusanoFitEntry[] = [];
       const failures: string[] = [];
       for (const regimen of activeRegimens) {
         const mapping = buildMapping(preview, roles, regimen.drugNames);
         if (!mapping) { failures.push(`${regimen.label}: invalid column mapping`); continue; }
-        try {
-          setDrusanoProgress({ phase: "reference", cycle: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: drusanoModelSettings.bootstrapIterations ?? 0, regimenLabel: regimen.label });
-          const onProgress = new Channel<DrusanoFitProgress>();
-          onProgress.onmessage = (progress) => setDrusanoProgress({ ...progress, regimenLabel: regimen.label });
-          const fit = await invoke<DrusanoFitResult>("fit_drusano_greco", { request: {
-            import: importRequest,
-            mapping,
-            regimenDrugNames: regimen.drugNames,
-            organism: regimen.organism,
-            organismColumn: mappedOrganismColumn,
-            settings: {
-              blankValue: inputSettings.inputType === "count" ? 0 : inputSettings.blankValue,
-              responseCensorLimit: usesResponseCensoring(inputSettings.inputType) ? drusanoModelSettings.responseCensorLimit : null,
-            },
-            assayError: {
-              coefficients: drusanoModelSettings.errorCoefficients as [number, number, number, number],
-              lambda: drusanoModelSettings.lambda,
-            },
-            maxCycles: drusanoModelSettings.maxCycles,
-            bootstrapIterations: drusanoModelSettings.bootstrapIterations,
-            bootstrapSeed: drusanoModelSettings.bootstrapSeed,
-          }, onProgress });
-          completed.push({ id: regimen.id, label: regimen.label, regimenLabel: regimenLabelOf(regimen), organism: regimen.organism, fit });
-        } catch (reason) {
-          failures.push(`${regimen.label}: ${errorMessage(reason)}`);
+        const variants = drusanoSamplingMode === "compare" ? ["all", "micBased"] as const
+          : drusanoSamplingMode === "micBased" ? ["micBased"] as const : ["all"] as const;
+        for (const sampling of variants) {
+          const samplingLabel = sampling === "micBased" ? "MIC LSS" : "All imported wells";
+          const label = drusanoSamplingMode === "allImported" ? regimen.label : `${regimen.label} · ${samplingLabel}`;
+          const assignedMicValues = regimen.drugNames.map((name) => micRecordValue(
+            drugMicValues,
+            regimenMicAssignmentKey(regimen.id, name),
+            name,
+            micAssignmentKey(regimen.organism, name),
+          ));
+          const assignedMicsComplete = assignedMicValues.every((value) => value != null && Number.isFinite(value) && value > 0);
+          const micValues = sampling === "micBased"
+            ? assignedMicsComplete ? assignedMicValues as number[] : usesImportedDrusanoMics ? [] : assignedMicValues as number[]
+            : null;
+          try {
+            setDrusanoProgress({ phase: "reference", cycle: 0, objectiveFunction: Number.NaN, completedBootstraps: 0, totalBootstraps: drusanoModelSettings.bootstrapIterations ?? 0, regimenLabel: label });
+            const onProgress = new Channel<DrusanoFitProgress>();
+            onProgress.onmessage = (progress) => setDrusanoProgress({ ...progress, regimenLabel: label });
+            const fit = await invoke<DrusanoFitResult>("fit_drusano_greco", { request: {
+              import: importRequest,
+              mapping,
+              regimenDrugNames: regimen.drugNames,
+              organism: regimen.organism,
+              organismColumn: mappedOrganismColumn,
+              sampling: micValues ? { micValues, micColumns: usesImportedDrusanoMics ? drusanoMicColumns : null } : null,
+              settings: {
+                blankValue: 0,
+                responseCensorLimit: usesResponseCensoring(inputSettings.inputType) ? drusanoModelSettings.responseCensorLimit : null,
+              },
+              countData: true,
+              assayError: {
+                coefficients: drusanoModelSettings.errorCoefficients as [number, number, number, number],
+                lambda: drusanoModelSettings.lambda,
+              },
+              maxCycles: drusanoModelSettings.maxCycles,
+              bootstrapIterations: drusanoModelSettings.bootstrapIterations,
+              bootstrapSeed: drusanoModelSettings.bootstrapSeed,
+            }, onProgress });
+            completed.push({ id: sampling === "all" ? regimen.id : `${regimen.id}::mic-lss`, baseRegimenId: regimen.id, label, baseLabel: regimen.label, sampling, micValues: micValues ?? undefined, micColumns: sampling === "micBased" ? drusanoMicColumns ?? undefined : undefined, regimenLabel: regimenLabelOf(regimen), organism: regimen.organism, fit });
+          } catch (reason) {
+            failures.push(`${label}: ${errorMessage(reason)}`);
+          }
         }
       }
       if (!completed.length) throw new Error(`No regimens could be fitted. ${failures.join(" ")}`);
@@ -879,7 +1099,7 @@ function App() {
   async function continueDrusanoFit(id: string) {
     if (!preview || !drusanoSettingsComplete) return;
     const previous = drusanoFits.find((entry) => entry.id === id);
-    const regimen = preview.regimens.find((entry) => entry.id === id);
+    const regimen = preview.regimens.find((entry) => entry.id === previous?.baseRegimenId);
     if (!previous || !regimen || previous.fit.converged || previous.fit.runCycles < previous.fit.maxCycles) return;
     const mapping = buildMapping(preview, roles, regimen.drugNames);
     if (!mapping) return;
@@ -895,10 +1115,17 @@ function App() {
         regimenDrugNames: regimen.drugNames,
         organism: regimen.organism,
         organismColumn: mappedOrganismColumn,
+        sampling: previous.sampling === "micBased" ? { micValues: previous.micValues ?? regimen.drugNames.map((name) => micRecordValue(
+          drugMicValues,
+          regimenMicAssignmentKey(regimen.id, name),
+          name,
+          micAssignmentKey(regimen.organism, name),
+        ) as number), micColumns: previous.micColumns ?? (usesImportedDrusanoMics ? drusanoMicColumns : null) } : null,
         settings: {
-          blankValue: inputSettings.inputType === "count" ? 0 : inputSettings.blankValue,
+          blankValue: 0,
           responseCensorLimit: usesResponseCensoring(inputSettings.inputType) ? drusanoModelSettings.responseCensorLimit : null,
         },
+        countData: true,
         assayError: {
           coefficients: previous.fit.assayError.coefficients,
           lambda: previous.fit.assayError.fittedLambda,
@@ -927,17 +1154,24 @@ function App() {
     if (!entry) throw new Error("Select a completed NPAG fit before simulation.");
     setError(null);
     try {
-      const result = await invoke<DrusanoRegimenSimulationResult>("simulate_drusano_regimen", { request: {
-        drugNames: entry.fit.data.drugNames,
-        parameterNames: entry.fit.parameterNames,
-        supportPoints: entry.fit.supportPoints,
-        maxConcentrations: entry.fit.data.maxConcentrations,
-        concentrations,
-        simulationCount: 1000,
-        seed: 17,
-      } });
-      setDrusanoSimulations((current) => ({ ...current, [id]: result }));
-      return result;
+      const targets = drusanoSamplingMode === "compare"
+        ? drusanoFits.filter((candidate) => candidate.baseRegimenId === entry.baseRegimenId)
+        : [entry];
+      const completed: Array<[string, DrusanoRegimenSimulationResult]> = [];
+      for (const target of targets) {
+        const result = await invoke<DrusanoRegimenSimulationResult>("simulate_drusano_regimen", { request: {
+          drugNames: target.fit.data.drugNames,
+          parameterNames: target.fit.parameterNames,
+          supportPoints: target.fit.supportPoints,
+          maxConcentrations: target.fit.data.maxConcentrations,
+          concentrations,
+          simulationCount: 1000,
+          seed: 17,
+        } });
+        completed.push([target.id, result]);
+      }
+      setDrusanoSimulations((current) => ({ ...current, ...Object.fromEntries(completed) }));
+      return completed.find(([targetId]) => targetId === id)?.[1] ?? completed[0][1];
     } catch (reason) {
       setError(errorMessage(reason));
       throw reason;
@@ -980,8 +1214,8 @@ function App() {
       savedAt: new Date().toISOString(),
       page, analysisType, inputSettings,
       drusanoFits, drusanoSimulations, drusanoSimulationConcentrations,
-      drusanoModelSettings, drusanoCensorSuggestion, blissResponseCensorLimit,
-      diamondRegimens, diamondComparisonRegimens, selectedDiamondId, diamondToleranceLog2,
+      drusanoModelSettings, drusanoCensorSuggestion, drusanoSamplingMode, drusanoSamplingSummaries, blissResponseCensorLimit,
+      diamondRegimens, diamondComparisonRegimens, selectedDiamondId, diamondToleranceLog2, diamondAnchorEstimatesByRegimen,
       musycFits, musycModelSettings,
       tab, importRequest, worksheets, preview, roles, analysis,
       stratifyIndex, stratificationOverrides, sharedStratificationDrugs,
@@ -1023,14 +1257,24 @@ function App() {
       const restoredInputType = (snapshot.inputSettings.inputType as string) === "cfu"
         ? "count"
         : snapshot.inputSettings.inputType;
-      setInputSettings(restoredInputType === "count"
+      const incompatibleDrusanoSnapshot = snapshot.analysisType === "drusanoGreco" && restoredInputType !== "count";
+      setInputSettings(snapshot.analysisType === "drusanoGreco" || restoredInputType === "count"
         ? { ...snapshot.inputSettings, inputType: "count", blankAdjustment: false, blankValue: 0 }
         : snapshot.inputSettings);
-      setDrusanoFits(snapshot.drusanoFits);
-      setDrusanoSimulations(snapshot.drusanoSimulations);
-      setDrusanoSimulationConcentrations(snapshot.drusanoSimulationConcentrations);
-      setDrusanoModelSettings(snapshot.drusanoModelSettings);
-      setDrusanoCensorSuggestion(snapshot.drusanoCensorSuggestion);
+      setDrusanoFits(incompatibleDrusanoSnapshot ? [] : snapshot.drusanoFits.map((entry) => ({
+        ...entry,
+        baseRegimenId: entry.baseRegimenId ?? entry.id,
+        baseLabel: entry.baseLabel ?? entry.label,
+        sampling: entry.sampling ?? "all",
+      })));
+      setDrusanoSimulations(incompatibleDrusanoSnapshot ? {} : snapshot.drusanoSimulations);
+      setDrusanoSimulationConcentrations(incompatibleDrusanoSnapshot ? {} : snapshot.drusanoSimulationConcentrations ?? {});
+      setDrusanoModelSettings(incompatibleDrusanoSnapshot
+        ? { ...snapshot.drusanoModelSettings, responseCensorLimit: null }
+        : snapshot.drusanoModelSettings);
+      setDrusanoCensorSuggestion(incompatibleDrusanoSnapshot ? null : snapshot.drusanoCensorSuggestion);
+      setDrusanoSamplingMode(snapshot.drusanoSamplingMode ?? "allImported");
+      setDrusanoSamplingSummaries(incompatibleDrusanoSnapshot ? {} : snapshot.drusanoSamplingSummaries ?? {});
       setBlissResponseCensorLimit(snapshot.blissResponseCensorLimit ?? null);
       setDiamondRegimens(snapshot.diamondRegimens ?? []);
       setDiamondComparisonRegimens(snapshot.diamondComparisonRegimens ?? snapshot.diamondRegimens ?? []);
@@ -1055,6 +1299,7 @@ function App() {
       setDrugMicValues(snapshot.drugMicValues);
       setDrugMicSuggestions(snapshot.drugMicSuggestions);
       setMicEstimatesByRegimen(snapshot.micEstimatesByRegimen);
+      setDiamondAnchorEstimatesByRegimen(snapshot.diamondAnchorEstimatesByRegimen ?? {});
       setDrugConcentrationRanges(snapshot.drugConcentrationRanges ?? Object.fromEntries(
         Object.entries(snapshot.drugClinicalValues ?? {}).map(([drug, target]) => [drug, target == null
           ? { minimum: null, maximum: null }
@@ -1079,7 +1324,9 @@ function App() {
       setMusycProgress(null);
       setBatchWarning(null);
       setPage(snapshot.page);
-      setProjectNotice(`Loaded saved results from ${String(selected)}.`);
+      setProjectNotice(incompatibleDrusanoSnapshot
+        ? `Loaded ${String(selected)}. Previous non-count Drusano–Greco fits were cleared because this workflow now requires count responses.`
+        : `Loaded saved results from ${String(selected)}.`);
     } catch (reason) {
       setError(errorMessage(reason));
     }
@@ -1110,14 +1357,19 @@ function App() {
             disabled={!importReady}
             onClick={() => setPage("mic")}
           >
-            MIC
+            {analysisType === "diamond" ? "Dose anchors" : "MIC"}
           </button>}
+          {drusanoNeedsMic && <button
+            className={page === "sampling" ? "nav-active" : page === "mic" && micComplete ? "nav-ready" : ""}
+            disabled={!micComplete}
+            onClick={() => setPage("sampling")}
+          >Sampling</button>}
           <button
             className={page === "analyze" ? "nav-active" : ""}
-            disabled={micAnalysis ? !micComplete : !importReady}
+            disabled={standardMicAnalysis ? !micComplete : analysisType === "drusanoGreco" ? !drusanoSamplingComplete : !importReady}
             onClick={() => setPage("analyze")}
           >
-            {micAnalysis ? "Analyze" : "Fit"}
+            {standardMicAnalysis ? "Analyze" : "Fit"}
           </button>
           {analysisType === "drusanoGreco" && <button className={page === "regimen" ? "nav-active" : ""} disabled={drusanoFits.length === 0} onClick={() => setPage("regimen")}>Simulate</button>}
           {micAnalysis && <button className={page === "results" ? "nav-active" : ""} disabled={!resultsReady} onClick={() => setPage("results")}>Results</button>}
@@ -1192,6 +1444,13 @@ function App() {
             </div>
             <p className="help-text">“All” reads every remaining row or column. The start row is the header row.</p>
             <InputTypeControls settings={inputSettings} setSettings={updateInputSettings} analysisType={analysisType} />
+            {analysisType === "drusanoGreco" && <fieldset className="radio-field sampling-mode-field">
+              <legend>Sampling analysis</legend>
+              <label><input type="radio" name="drusano-sampling" checked={drusanoSamplingMode === "allImported"} onChange={() => updateDrusanoSamplingMode("allImported")} />All imported wells</label>
+              <label><input type="radio" name="drusano-sampling" checked={drusanoSamplingMode === "micBased"} onChange={() => updateDrusanoSamplingMode("micBased")} />MIC-based limited sampling</label>
+              <label><input type="radio" name="drusano-sampling" checked={drusanoSamplingMode === "compare"} onChange={() => updateDrusanoSamplingMode("compare")} />Compare all wells with MIC-based sampling</label>
+              <span className="field-help">Limited sampling requires an editable MIC pair for every regimen. The nearest tested combination is accepted when each absolute concentration difference is at most 0.1; missing targets are reported but do not block fitting.</span>
+            </fieldset>}
             <button className="secondary-button full-width" disabled={!importRequest.path || busy} onClick={() => loadPreview()}>
               {busy ? "Reading…" : "Refresh selected range"}
             </button>
@@ -1270,7 +1529,7 @@ function App() {
                   </table>
                 </div>
                 <div className={mappingErrors.length || !inputSettings.inputType || activeRegimens.length === 0 ? "mapping-status warning" : "mapping-status ready"}>
-                  {mappingErrors.length ? mappingErrors.join(" ") : !inputSettings.inputType ? "Choose the input response type to complete import." : activeRegimens.length === 0 ? "Select at least one regimen and one organism for analysis." : !micAnalysis ? "Import, selection, and mapping are complete. Continue to the Fit tab." : "Import, selection, and mapping are complete. Continue to the MIC tab."}
+                  {mappingErrors.length ? mappingErrors.join(" ") : !inputSettings.inputType ? "Choose the input response type to complete import." : activeRegimens.length === 0 ? "Select at least one regimen and one organism for analysis." : !micAnalysis ? "Import, selection, and mapping are complete. Continue to the Fit tab." : analysisType === "diamond" ? "Import and mapping are complete. Continue to Dose anchors." : "Import, selection, and mapping are complete. Continue to the MIC tab."}
                 </div>
               </>
             )}
@@ -1281,8 +1540,16 @@ function App() {
           assignments={micAssignments}
           values={drugMicValues}
           suggestions={drugMicSuggestions}
+          anchorEstimates={diamondAnchorEstimates}
+          countEstimates={drusanoMicDetails}
           setValue={(key, value) => {
+            setRestoredSnapshot(false);
             setDrugMicValues((current) => ({ ...current, [key]: value }));
+            if (analysisType === "drusanoGreco") {
+              setDrusanoSamplingSummaries({});
+              setDrusanoFits([]);
+              setDrusanoSimulations({});
+            }
           }}
           zeroTolerance={micZeroTolerance}
           setZeroTolerance={(value) => { setRestoredSnapshot(false); setMicZeroTolerance(value); }}
@@ -1290,6 +1557,16 @@ function App() {
           error={micError}
           complete={micComplete}
           diamond={analysisType === "diamond"}
+          drusano={analysisType === "drusanoGreco"}
+          importedDrusanoMics={usesImportedDrusanoMics}
+          importedMicStrata={importedDrusanoMicStrata}
+        />
+      ) : page === "sampling" ? (
+        <DrusanoSamplingWorkspace
+          regimens={activeRegimens}
+          summaries={drusanoSamplingSummaries}
+          busy={drusanoSamplingBusy}
+          error={drusanoSamplingError}
         />
       ) : page === "analyze" ? (
         analysisType === "drusanoGreco" ? <DrusanoFitWorkspace
@@ -1304,7 +1581,7 @@ function App() {
           suggestion={drusanoCensorSuggestion}
           suggestionBusy={drusanoSuggestionBusy}
           suggestionError={drusanoSuggestionError}
-          settingsComplete={drusanoSettingsComplete}
+          settingsComplete={drusanoSettingsComplete && drusanoSamplingComplete}
           regimens={preview?.regimens ?? []}
         /> : analysisType === "musyc" ? <MusycFitWorkspace
           fits={orderedMusycFits}
@@ -1407,10 +1684,12 @@ function App() {
 
 function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType; close: () => void }) {
   const workflowSteps = analysisType === "drusanoGreco"
-    ? [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "Fit", "Fit Equation 2 and review diagnostics"], ["4", "Simulate", "Simulate constant concentrations"], ["5", "Compare", "Rank simulated efficacy"]]
+    ? [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose a sampling mode and map count data"], ["3", "MIC", "Required for MIC-based sampling"], ["4", "Sampling", "Review limited-grid coverage"], ["5", "Fit", "Fit full and/or limited models"], ["6", "Simulate", "Simulate the same concentrations"], ["7", "Compare", "Compare efficacy and rank shifts"]]
     : analysisType === "musyc"
       ? [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "Fit", "Fit and bootstrap MuSyC"], ["4", "Compare", "Rank bootstrap efficacy"]]
-    : [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "MIC", "Review suggested MICs"], ["4", "Analyze", "Choose policy and calculate"], ["5", "Results", "Inspect tables and plots"], ["6", "Compare", "Rank multiple regimens"]];
+    : analysisType === "diamond"
+      ? [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "Dose anchors", "Review fitted IC50 suggestions"], ["4", "Analyze", "Choose policy and calculate"], ["5", "Results", "Inspect tables and plots"], ["6", "Compare", "Rank multiple regimens"]]
+      : [["1", "Algorithm", "Choose the analysis framework"], ["2", "Import", "Choose data, input type, and mapping"], ["3", "MIC", "Review suggested MICs"], ["4", "Analyze", "Choose policy and calculate"], ["5", "Results", "Inspect tables and plots"], ["6", "Compare", "Rank multiple regimens"]];
   return (
     <div className="instructions-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
       <section className="instructions-modal" role="dialog" aria-modal="true" aria-labelledby="instructions-title">
@@ -1425,11 +1704,11 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
             <a href="#instructions-data">Data format</a>
             <a href="#instructions-import">Import</a>
             {analysisType === "bliss" || analysisType === "diamond" ? <>
-              <a href="#instructions-mic">MIC</a>
+              <a href="#instructions-mic">{analysisType === "diamond" ? "Dose anchors" : "MIC"}</a>
               <a href={analysisType === "diamond" ? "#instructions-diamond" : "#instructions-analyze"}>Analyze</a>
               <a href="#instructions-results">Results</a>
               <a href="#instructions-compare">Compare</a>
-            </> : analysisType === "musyc" ? <a href="#instructions-musyc">MuSyC fit</a> : <a href="#instructions-drusano">Fit, simulate, and compare</a>}
+            </> : analysisType === "musyc" ? <a href="#instructions-musyc">MuSyC fit</a> : <><a href="#instructions-mic">MIC-based sampling</a><a href="#instructions-drusano">Fit, simulate, and compare</a></>}
             <a href="#instructions-troubleshooting">Troubleshooting</a>
             <p>Press Esc or use either Close button to exit.</p>
           </nav>
@@ -1453,13 +1732,14 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
                   <tr><td>Drug A, Drug B</td><td>Optional metadata</td><td>Drug names repeated on every row, or inferred from concentration headers such as “Amikacin (mg/L)”.</td></tr>
                   <tr><td>Conc A, Conc B</td><td>Required</td><td>Numeric concentrations; use 0 for untreated or absent drug.</td></tr>
                   <tr><td>Units A, Units B</td><td>Optional metadata</td><td>Separate unit columns, or units inferred from concentration headers; keep units consistent within each regimen.</td></tr>
+                  {analysisType === "drusanoGreco" && <tr><td>MIC_A, MIC_B</td><td>Optional pair</td><td>Positive MICs repeated on every row. When supplied, each distinct MIC pair defines a replicate stratum within its regimen and replaces MIC inference for limited sampling.</td></tr>}
                   <tr><td>Drug C, Conc C, Units C</td><td>Optional</td><td>For three-drug assays. Conc C is required when Drug C or Units C is assigned.</td></tr>
                   <tr><td>Response</td><td>Required</td><td>Absorbance, fluorescence, count, or percent/fractional viability or inhibition, matching the selected input policy.</td></tr>
                 </tbody>
               </table></div>
               <ul>
                 <li>Unique ordered combinations of Drug A, Drug B, and Drug C are assigned numerical regimen IDs automatically.</li>
-                <li>Include untreated controls and the single-agent wells needed for Bliss and MIC inference. Do not silently fill missing wells.</li>
+                <li>Include untreated controls and the single-agent wells needed for MIC inference or IC50 curve fitting. Do not silently fill missing wells.</li>
                 <li>Choose absorbance, fluorescence, or Count explicitly. Count inputs do not use blank adjustment; reported values of 0 or 1 are treated as censored.</li>
               </ul>
             </section>
@@ -1475,7 +1755,7 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
                     <li>For multiple regimens, use the previous/next controls or regimen menu to inspect each preview.</li>
                     <li>Choose the input type. For absorbance or fluorescence, enter 0 when responses are already blank-adjusted or enter the assay blank on the imported response scale. For control-normalized viability, the all-zero drug controls automatically distinguish fractional values near 1 from percentages near 100.</li>
                   </ol>
-                  <p>{analysisType === "bliss" || analysisType === "diamond" ? "The MIC tab activates only when the import and mapping are valid for every regimen." : "The Fit tab activates when the import and mapping are valid for every regimen."}</p>
+                  <p>{analysisType === "diamond" ? "The Dose anchors tab activates when the import and mapping are valid for every regimen." : analysisType === "bliss" ? "The MIC tab activates only when the import and mapping are valid for every regimen." : analysisType === "drusanoGreco" ? "Choose all imported wells, MIC-based limited sampling, or a paired comparison. MIC and Sampling appear only when the selected mode requires them." : "The Fit tab activates when the import and mapping are valid for every regimen."}</p>
                 </div>
                 <div className="instruction-ui-preview mapping-preview" aria-label="Import mapping interface preview">
                   <div className="preview-title">Selected range and column assignments</div>
@@ -1488,13 +1768,23 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
             </section>
 
             <section id="instructions-mic">
-              <h2>3. Assign MICs</h2>
-              <p>This tab is used by Bliss and DiaMOND. For Bliss, values are MICs used for normalized comparison coordinates. For DiaMOND, they are dose-centering anchors—normally IC90, or the common MIC/IC reference used to prepare the assay. Drusano–Greco and MuSyC derive their concentration scales from tested maxima.</p>
+              <h2>{analysisType === "diamond" ? "3. Review IC50 dose anchors" : "3. Assign MICs"}</h2>
+              {analysisType === "diamond" && <>
+                <p>The app fits each single-agent concentration–inhibition curve and suggests the tested concentration nearest the fitted IC50. This provides an equipotent coordinate system without requiring MIC values.</p>
+                <ul>
+                  <li>Review the continuous fitted IC50 and its nearest tested concentration for every organism–drug pair.</li>
+                  <li>Override an anchor when the combination plate was prepared using a different fixed-ratio reference. The assigned anchors determine which wells satisfy the diagonal tolerance.</li>
+                  <li>At least three positive single-agent dose levels are required for an automatic IC50 suggestion. A missing suggestion can still be completed manually.</li>
+                </ul>
+              </>}
+              {analysisType !== "diamond" && <>
+              <p>{analysisType === "drusanoGreco" ? "For MIC-based Drusano sampling, the app suggests a separate MIC pair for every regimen from that regimen's single-agent wells. Each suggestion is the lowest tested concentration whose replicate mean count is strictly below 10% of that regimen's untreated-control growth, and remains user editable." : "Bliss uses MIC assignments for normalized comparison coordinates. Suggested values may be overwritten independently for each organism."}</p>
               <ul>
                 <li>Enter one finite positive MIC for every organism–drug pair. Suggested values may be overwritten independently for each organism.</li>
-                <li><strong>MIC zero tolerance</strong> defines how close a single-agent response must be to zero viability for automatic inference.</li>
-                <li>The green completion message indicates that Analyze is ready.</li>
+                {analysisType === "drusanoGreco" ? <li>Sampling retains controls, all single-agent wells, the 3×3 ¼×/1×/4× MIC combination grid, the maximum–maximum well, and every replicate. A measured well is accepted when each concentration/MIC coordinate is within ±0.1 of its target. Missing targets are reported but do not block fitting, and no response is imputed.</li> : <li><strong>MIC zero tolerance</strong> defines how close a single-agent response must be to zero viability for automatic inference.</li>}
+                <li>The green completion message indicates that {analysisType === "drusanoGreco" ? "Sampling" : "Analyze"} is ready.</li>
               </ul>
+              </>}
             </section>
 
             <section id="instructions-analyze">
@@ -1554,7 +1844,7 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
               <h2>4. Configure and calculate DiaMOND</h2>
               <p>DiaMOND uses the same imported rows as the other pathways, but fits only untreated controls, single-agent dose responses, and equipotent combination diagonals. It never fills missing doses or uses off-diagonal wells in a fit.</p>
               <ul>
-                <li>Lay out each drug on the same dose-position scale by centering its single-agent series at a shared endpoint, normally IC90. Enter those centering concentrations as the dose anchors.</li>
+                <li>The app centers each drug on the tested concentration nearest its fitted single-agent IC50. Override that suggestion only when the experiment used a different fixed-ratio reference.</li>
                 <li>At a combination position, each active drug must have the same concentration divided by its anchor. The diagonal tolerance accommodates small dispensing/rounding differences.</li>
                 <li>A native three-parameter Hill curve yields IC50 and IC90. The Loewe expectation is the harmonic intersection of component ICs; observed dose divided by expected dose is FIC.</li>
                 <li>FIC below 1 is synergistic, FIC above 1 is antagonistic, and FIC equal to 1 is additive. When a bootstrap 95% confidence interval is available, an interval spanning 1 is labeled additive.</li>
@@ -1577,18 +1867,19 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
             </section>
 
             <section id="instructions-drusano">
-              <h2>3. Drusano–Greco Equation 2 fit</h2>
-              <p>This workflow currently supports two-drug checkerboards. For absorbance or fluorescence, supply the assay blank on the same scale as the imported response. Count inputs do not use blank adjustment.</p>
+              <h2>Drusano–Greco Equation 2 fit</h2>
+              <p>This workflow supports two-drug checkerboards with count responses only. Count inputs do not use blank adjustment.</p>
               <ul>
-                <li>The mean of all untreated wells is the growth control. Effect is calculated as <code>E = 1 − (observation − blank) / (mean growth control − blank)</code>.</li>
+                <li>The mean of all untreated wells is the growth control. Effect is calculated as <code>E = 1 − count / mean growth-control count</code>.</li>
                 <li>Each concentration is divided by that drug’s maximum tested concentration in the imported regimen. All eligible drug-exposed wells, including monotherapy and combination wells, contribute to one joint seven-parameter reference fit.</li>
-                <li>Growth controls define normalization and are not fit subjects. For absorbance, the Fit tab suggests a censor limit from a sharp lower-tail frequency drop. For Count, it suggests a limit immediately below the lowest reported count above 1, and reported values of 0 or 1 are censored. Responses at or below the selected limit are retained with <code>CENS = 1</code>.</li>
+                <li>Sampling mode can fit all imported wells, only the MIC-based limited set, or both. Comparison mode uses identical model settings and bootstrap seeds for the paired fits and labels every diagnostic by sampling source.</li>
+                <li>Growth controls define normalization and are not fit subjects. The Fit tab suggests a censor limit immediately below the lowest reported count above 1, and reported values of 0 or 1 are censored. Responses at or below the selected limit are retained with <code>CENS = 1</code>.</li>
                 <li>The transformed censor boundary must satisfy <code>0 ≤ E_L &lt; 1</code>. Equation 2 remains singular at an effect of exactly 0 or 1, so drug-exposed subjects on those boundaries are excluded with an explicit directional count rather than clipped.</li>
-                <li>The additive assay-error model uses <code>α(f) = C0 + C1f + C2f² + C3f³</code> and <code>σ = sqrt(α(f)² + λ²)</code>, evaluated on each well's predicted response. For absorbance, the polynomial coefficients, lambda, observations, and censor limit are therefore all on the absorbance scale.</li>
+                <li>The additive assay-error model uses <code>α(f) = C0 + C1f + C2f² + C3f³</code> and <code>σ = sqrt(α(f)² + λ²)</code>, evaluated on each well's predicted count. The polynomial coefficients, lambda, observations, and censor limit are therefore all on the count scale.</li>
                 <li>PMcore jointly fits EC50₁, EC50₂, h₁,₀, h₂,₀, B₁, B₂, and α₁₂ through the numerical Equation 2 effect solve. The dose-dependent Hill coefficient is <code>hᵢ(dᵢ) = hᵢ,₀ exp(Bᵢ tanh(log(dᵢ / EC50ᵢ)))</code>, with <code>−2 ≤ Bᵢ ≤ 2</code>; <code>Bᵢ = 0</code> recovers the constant-Hill model. Internal concentrations and EC50s are fractions of the tested maximum. The Fit summary multiplies EC50 results back into the corresponding imported concentration units.</li>
-                <li>The NPAG cycle limit defaults to 100. The fixed-grid parametric bootstrap defaults to 500 joint seven-parameter refits with seed 123; both values are editable. Synthetic absorbances are generated from the fitted prediction-based error model and recensored at L.</li>
+                <li>The NPAG cycle limit defaults to 100. The fixed-grid parametric bootstrap defaults to 500 joint seven-parameter refits with seed 123; both values are editable. Synthetic counts are generated from the fitted prediction-based error model and recensored at L.</li>
               </ul>
-              <p>The bacterial growth differential equation, <code>get_e2()</code>, and Nelder–Mead root search are not used. After fitting, Simulate draws 1,000 effects at user-entered constant free concentrations by sampling the unclustered bootstrap parameter vectors directly. With at least two completed simulations, Compare provides a descriptive ranking by median E; hypothesis tests are omitted because Monte Carlo draws are not independent biological replicates.</p>
+              <p>The bacterial growth differential equation, <code>get_e2()</code>, and Nelder–Mead root search are not used. After fitting, Simulate draws 1,000 effects at user-entered constant free concentrations by sampling the unclustered bootstrap parameter vectors directly. Full and limited fits share the entered concentrations. Compare reports their median-effect difference and rank shift; hypothesis tests are omitted because Monte Carlo draws are not independent biological replicates.</p>
             </section>
 
             <section id="instructions-results">
@@ -1629,10 +1920,10 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
             <section id="instructions-troubleshooting">
               <h2>Troubleshooting and good practice</h2>
               <ul>
-                <li>If a tab remains disabled, return to the preceding tab and look for missing mappings, nonpositive MICs, or an import warning.</li>
+                <li>If a tab remains disabled, return to the preceding tab and look for missing mappings, nonpositive {analysisType === "diamond" ? "dose anchors" : "MICs"}, or an import warning.</li>
                 <li>Confirm that units are nonblank and consistent, Drug C columns are supplied as a complete set, and every regimen includes a control.</li>
                 <li>Fractional response detection tolerates a small fraction of corrected outliers, but at least 95% of absolute values must remain within 0–1.</li>
-                <li>Changing MICs, concentration ranges, baseline correction, bootstrap iterations, or seed requires returning to Analyze and recalculating.</li>
+                <li>Changing {analysisType === "diamond" ? "dose anchors" : "MICs"}, concentration ranges, baseline correction, bootstrap iterations, or seed requires returning to Analyze and recalculating.</li>
                 <li>Use Export results to save the selected regimen’s summary and processed combinations to XLSX.</li>
               </ul>
             </section>
@@ -1662,10 +1953,12 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-function MicWorkspace({ assignments, values, suggestions, setValue, zeroTolerance, setZeroTolerance, busy, error, complete, diamond }: {
-  assignments: { key: string; organism: string | null; name: string; unit: string }[];
+function MicWorkspace({ assignments, values, suggestions, anchorEstimates, countEstimates, setValue, zeroTolerance, setZeroTolerance, busy, error, complete, diamond, drusano, importedDrusanoMics, importedMicStrata }: {
+  assignments: MicAssignment[];
   values: Record<string, number | null>;
   suggestions: Record<string, number | null>;
+  anchorEstimates: Record<string, DiamondDoseAnchorSuggestion>;
+  countEstimates: Record<string, MicEstimate>;
   setValue: (key: string, value: number | null) => void;
   zeroTolerance: number;
   setZeroTolerance: (value: number) => void;
@@ -1673,22 +1966,30 @@ function MicWorkspace({ assignments, values, suggestions, setValue, zeroToleranc
   error: string | null;
   complete: boolean;
   diamond: boolean;
+  drusano: boolean;
+  importedDrusanoMics: boolean;
+  importedMicStrata: ImportedMicStratum[];
 }) {
   return <main className="single-workspace"><section className="content-card stage-card">
-    <div className="card-heading"><div><h1>{diamond ? "DiaMOND dose anchors" : "MIC assignments"}</h1><p>{diamond ? "Assign a dose-centering concentration for every organism–drug pair (normally IC90 for a centered DiaMOND assay, or the common MIC/IC reference used when preparing the plate)." : "Each organism has its own MIC assignment for every drug to which it was exposed. Suggestions pool repeated estimates only within the same organism–drug pair; ties use the lower value."}</p></div><span className="count-badge">{assignments.length} assignments</span></div>
+    <div className="card-heading"><div><h1>{diamond ? "DiaMOND IC50 dose anchors" : drusano ? "Drusano MIC assignments" : "MIC assignments"}</h1><p>{diamond ? "Each single-agent curve is fitted first. The suggested anchor is the tested concentration closest to the fitted IC50; you may override it when the experiment used a different fixed-ratio anchor." : drusano ? importedDrusanoMics ? "Valid imported MIC pairs define replicate strata. The editable regimen-specific pair below is a fallback for a regimen with no imported pair; imported values always take precedence." : "Each regimen has its own editable MIC pair. Suggestions use only that regimen's wells and select the lowest tested single-agent concentration whose replicate mean count is strictly below 10% of its untreated-control growth." : "Each organism has its own MIC assignment for every drug to which it was exposed. Suggestions pool repeated estimates only within the same organism–drug pair; ties use the lower value."}</p></div><span className="count-badge">{`${assignments.length} assignments`}</span></div>
     <div className="stage-content">
-      <label className="compact-setting">MIC zero tolerance (viability percentage points)<input type="number" min={0} step="any" value={zeroTolerance} onChange={(event) => setZeroTolerance(Math.max(0, Number(event.target.value) || 0))} /></label>
-      <div className="result-table-wrap"><table className="result-table shared-drug-table"><thead><tr><th>Organism</th><th>Drug</th><th>Units</th><th>Suggested MIC</th><th>{diamond ? "Assigned dose anchor" : "Assigned MIC"}</th></tr></thead><tbody>
+      {importedDrusanoMics && <div className="mapping-status ready">Imported MIC A and MIC B values are used directly. Blank repeated-value cells inherit the applicable imported pair; a regimen with no imported pair uses its editable fallback below.</div>}
+      {importedDrusanoMics && (importedMicStrata.length ? <div className="result-table-wrap"><table className="result-table shared-drug-table"><thead><tr><th>Regimen</th><th>Organism</th><th>Drug A MIC</th><th>Drug B MIC</th></tr></thead><tbody>{importedMicStrata.map((stratum) => <tr key={stratum.key}><td>{stratum.regimenLabel}</td><td>{stratum.organism ?? "Unspecified organism"}</td><td><strong>{stratum.drugNames[0]}</strong> {format(stratum.micValues[0])}{stratum.units[0] ? ` ${stratum.units[0]}` : ""}</td><td><strong>{stratum.drugNames[1]}</strong> {format(stratum.micValues[1])}{stratum.units[1] ? ` ${stratum.units[1]}` : ""}</td></tr>)}</tbody></table></div>
+        : <p className="help-text">Validating the imported per-well MIC pairs…</p>)}
+      {!diamond && !drusano && <label className="compact-setting">MIC zero tolerance (viability percentage points)<input type="number" min={0} step="any" value={zeroTolerance} onChange={(event) => setZeroTolerance(Math.max(0, Number(event.target.value) || 0))} /></label>}
+      <div className="result-table-wrap"><table className="result-table shared-drug-table"><thead><tr>{drusano && <th>Regimen</th>}<th>Organism</th><th>Drug</th><th>Units</th>{diamond && <th>Fitted IC50</th>}{drusano && <><th>Untreated mean</th><th>10% threshold</th></>}<th>{diamond ? "Suggested tested anchor" : importedDrusanoMics ? "Suggested fallback MIC" : "Suggested MIC"}</th><th>{diamond ? "Assigned dose anchor" : importedDrusanoMics ? "Assigned fallback MIC" : "Assigned MIC"}</th></tr></thead><tbody>
         {assignments.map((assignment) => {
-          const assigned = micRecordValue(values, assignment.key, assignment.name);
-          const suggested = micRecordValue(suggestions, assignment.key, assignment.name);
+          const assigned = micRecordValue(values, assignment.key, assignment.name, assignment.legacyKey);
+          const suggested = micRecordValue(suggestions, assignment.key, assignment.name, assignment.legacyKey);
+          const anchorEstimate = anchorEstimates[assignment.key];
+          const countEstimate = countEstimates[assignment.key];
           const organism = assignment.organism ?? "Unspecified organism";
-          return <tr key={assignment.key}><td>{organism}</td><td><strong>{assignment.name}</strong></td><td>{assignment.unit || "—"}</td><td>{suggested == null ? "—" : suggested}</td><td><input aria-label={`${diamond ? "Dose anchor" : "MIC"} for ${assignment.name} against ${organism}`} type="number" min="0" step="any" value={assigned ?? ""} onChange={(event) => { const value = Number(event.target.value); setValue(assignment.key, event.target.value === "" || !Number.isFinite(value) ? null : value); }} /></td></tr>;
+          return <tr key={assignment.key}>{drusano && <td>{assignment.regimenLabel}</td>}<td>{organism}</td><td><strong>{assignment.name}</strong></td><td>{assignment.unit || "—"}</td>{diamond && <td>{anchorEstimate?.fittedIc50 == null ? "—" : format(anchorEstimate.fittedIc50)}</td>}{drusano && <><td>{countEstimate?.controlMean == null ? "—" : format(countEstimate.controlMean)}</td><td>{countEstimate?.thresholdResponse == null ? "—" : format(countEstimate.thresholdResponse)}</td></>}<td>{suggested == null ? "—" : format(suggested)}{diamond && anchorEstimate?.meanInhibitionAtAnchor != null ? <small className="table-note">{format(anchorEstimate.meanInhibitionAtAnchor)}% inhibition</small> : null}{drusano && countEstimate?.meanResponseAtMic != null ? <small className="table-note">{format(countEstimate.meanResponseAtMic)}% of control{countEstimate.nonMonotonic ? " · warning: a higher dose crosses back above 10%" : ""}</small> : null}</td><td><input aria-label={`${diamond ? "Dose anchor" : "MIC"} for ${assignment.name} against ${organism}${drusano ? ` in ${assignment.regimenLabel}` : ""}`} type="number" min="0" step="any" value={assigned ?? ""} onChange={(event) => { const value = Number(event.target.value); setValue(assignment.key, event.target.value === "" || !Number.isFinite(value) ? null : value); }} /></td></tr>;
         })}
       </tbody></table></div>
-      {busy && <p className="help-text">Inferring organism-specific MICs across all selected regimens…</p>}
+      {busy && <p className="help-text">{diamond ? "Fitting organism-specific single-agent IC50 values…" : drusano ? "Finding the first single-agent count below 10% of untreated growth…" : "Inferring organism-specific MICs across all selected regimens…"}</p>}
       {error && <p className="side-warning">{error}</p>}
-      {complete && <div className="mapping-status ready">{diamond ? "Dose anchors" : "MIC information"} complete. Continue to the Analyze tab.</div>}
+      {complete && <div className="mapping-status ready">{diamond ? "IC50-based dose anchors" : "MIC information"} complete. Continue to the {drusano ? "Sampling" : "Analyze"} tab.</div>}
     </div>
   </section></main>;
 }
@@ -2331,10 +2632,46 @@ function micRecordValue(
   values: Record<string, number | null>,
   assignmentKey: string,
   legacyDrugName: string,
+  legacyAssignmentKey?: string,
 ) {
   return Object.prototype.hasOwnProperty.call(values, assignmentKey)
     ? values[assignmentKey]
+    : legacyAssignmentKey && Object.prototype.hasOwnProperty.call(values, legacyAssignmentKey)
+      ? values[legacyAssignmentKey]
     : values[legacyDrugName];
+}
+
+function aggregateDiamondAnchorEstimates(entries: Array<{
+  organism: string | null;
+  estimate: DiamondDoseAnchorSuggestion;
+}>): Record<string, DiamondDoseAnchorSuggestion> {
+  const grouped = new Map<string, Array<DiamondDoseAnchorSuggestion>>();
+  for (const { organism, estimate } of entries) {
+    const key = micAssignmentKey(organism, estimate.drugName);
+    grouped.set(key, [...(grouped.get(key) ?? []), estimate]);
+  }
+  return Object.fromEntries([...grouped.entries()].map(([key, estimates]) => {
+    const fitted = estimates.map((estimate) => estimate.fittedIc50)
+      .filter((value): value is number => value != null && Number.isFinite(value) && value > 0)
+      .sort((left, right) => left - right);
+    const fittedIc50 = fitted.length
+      ? fitted.length % 2 ? fitted[(fitted.length - 1) / 2] : (fitted[fitted.length / 2 - 1] + fitted[fitted.length / 2]) / 2
+      : null;
+    const selected = fittedIc50 == null ? null : estimates
+      .filter((estimate) => estimate.suggestedAnchor != null && estimate.suggestedAnchor > 0)
+      .sort((left, right) => {
+        const leftDistance = Math.abs(Math.log2(left.suggestedAnchor! / fittedIc50));
+        const rightDistance = Math.abs(Math.log2(right.suggestedAnchor! / fittedIc50));
+        return leftDistance - rightDistance || left.suggestedAnchor! - right.suggestedAnchor!;
+      })[0] ?? null;
+    return [key, {
+      drugName: estimates[0]?.drugName ?? "",
+      fittedIc50,
+      suggestedAnchor: selected?.suggestedAnchor ?? null,
+      meanInhibitionAtAnchor: selected?.meanInhibitionAtAnchor ?? null,
+      singleAgentLevels: Math.max(0, ...estimates.map((estimate) => estimate.singleAgentLevels)),
+    }];
+  }));
 }
 
 function regimenKeyOf(regimen: Pick<RegimenPreview, "regimenKey" | "drugNames">) {

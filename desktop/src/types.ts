@@ -3,6 +3,7 @@ export type ColumnRole =
   | "drugNameA" | "drugNameB" | "drugNameC"
   | "drugA" | "drugB" | "drugC"
   | "unitsA" | "unitsB" | "unitsC"
+  | "micA" | "micB"
   | "organism"
   | "response";
 
@@ -28,6 +29,28 @@ export interface DrusanoModelSettings {
   maxCycles: number | null;
   bootstrapIterations: number | null;
   bootstrapSeed: number | null;
+}
+
+export type DrusanoSamplingMode = "allImported" | "micBased" | "compare";
+export type DrusanoSamplingVariant = "all" | "micBased";
+
+export interface DrusanoSamplingLocation {
+  concentrations: number[];
+  micValues: number[];
+  matchedWellCount: number;
+  maximumPair: boolean;
+}
+
+export interface DrusanoSamplingSummary {
+  totalWellCount: number;
+  selectedWellCount: number;
+  controlWellCount: number;
+  singleAgentWellCount: number;
+  combinationWellCount: number;
+  selectedWellIndices: number[];
+  requiredLocationCount: number;
+  matchedLocationCount: number;
+  locations: DrusanoSamplingLocation[];
 }
 
 export interface DrusanoCensorLimitSuggestion {
@@ -98,6 +121,19 @@ export interface DrusanoFitResult {
   bootstrapConvergedCount: number;
 }
 
+export interface DrusanoFitEntry {
+  id: string;
+  baseRegimenId: string;
+  label: string;
+  baseLabel: string;
+  regimenLabel?: string;
+  organism?: string | null;
+  sampling: DrusanoSamplingVariant;
+  micValues?: number[];
+  micColumns?: number[];
+  fit: DrusanoFitResult;
+}
+
 export interface DrusanoRegimenSimulationResult {
   drugNames: string[];
   concentrations: number[];
@@ -126,6 +162,9 @@ export interface DrusanoSimulationEntry {
   label: string;
   regimenLabel?: string;
   organism?: string | null;
+  baseRegimenId?: string;
+  baseLabel?: string;
+  sampling?: DrusanoSamplingVariant;
   simulation: DrusanoRegimenSimulationResult;
 }
 
@@ -291,6 +330,14 @@ export interface DiamondPolicy {
   diagonalToleranceLog2: number;
 }
 
+export interface DiamondDoseAnchorSuggestion {
+  drugName: string;
+  fittedIc50: number | null;
+  suggestedAnchor: number | null;
+  meanInhibitionAtAnchor: number | null;
+  singleAgentLevels: number;
+}
+
 export interface DiamondScore {
   inhibitionLevel: number;
   observedDose: number;
@@ -422,4 +469,7 @@ export interface MicEstimate {
   mic: number | null;
   meanResponseAtMic: number | null;
   singleAgentLevels: number;
+  controlMean?: number | null;
+  thresholdResponse?: number | null;
+  nonMonotonic?: boolean;
 }

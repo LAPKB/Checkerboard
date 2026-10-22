@@ -139,6 +139,16 @@ pub struct DiamondHillFit {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct DiamondDoseAnchorSuggestion {
+    pub drug_name: String,
+    pub fitted_ic50: Option<f64>,
+    pub suggested_anchor: Option<f64>,
+    pub mean_inhibition_at_anchor: Option<f64>,
+    pub single_agent_levels: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct DiamondScore {
     pub inhibition_level: f64,
     pub observed_dose: f64,
@@ -206,6 +216,114 @@ struct Location {
 struct CurveData {
     indices: Vec<usize>,
     locations: Vec<Location>,
+}
+
+pub fn suggest_dose_anchors(
+    input: &AssayInput,
+    mut policy: DiamondPolicy,
+) -> Result<Vec<DiamondDoseAnchorSuggestion>, DiamondError> {
+    validate_input(input)?;
+    if !policy.blank_value.is_finite()
+        || !policy.response_censor_threshold.is_finite()
+        || policy.response_censor_threshold < 0.0
+    {
+        return Err(DiamondError::InvalidPolicy);
+    }
+    let controls = input
+        .rows
+        .iter()
+        .filter(|row| is_control(&row.concentrations))
+        .collect::<Vec<_>>();
+    if controls.is_empty() {
+        return Err(DiamondError::MissingControl);
+    }
+    let control_mean = controls.iter().map(|row| row.od).sum::<f64>() / controls.len() as f64;
+    let adjusted_control = control_mean - policy.blank_value;
+    if matches!(
+        policy.response_type,
+        ResponseType::Viability | ResponseType::ViabilityFraction
+    ) {
+        if (0.5..=2.0).contains(&control_mean) {
+            policy.response_type = ResponseType::ViabilityFraction;
+        } else if (50.0..=150.0).contains(&control_mean) {
+            policy.response_type = ResponseType::Viability;
+        }
+    }
+    if policy.response_type == ResponseType::RawOd
+        && (!adjusted_control.is_finite() || adjusted_control <= 0.0)
+    {
+        return Err(DiamondError::InvalidControl(adjusted_control));
+    }
+
+    (0..input.drug_names.len())
+        .map(|drug_index| {
+            let mut groups = HashMap::<u64, (f64, Vec<f64>)>::new();
+            for (row_index, row) in input.rows.iter().enumerate() {
+                let concentration = row.concentrations[drug_index];
+                let single_agent = concentration > 0.0
+                    && row
+                        .concentrations
+                        .iter()
+                        .enumerate()
+                        .all(|(index, value)| index == drug_index || value.abs() < 1e-12);
+                if !single_agent {
+                    continue;
+                }
+                let raw = if policy.response_type == ResponseType::RawOd
+                    && row.od <= policy.response_censor_threshold
+                {
+                    policy.response_censor_threshold
+                } else {
+                    row.od
+                };
+                let inhibition = match policy.response_type {
+                    ResponseType::Viability => 100.0 - raw,
+                    ResponseType::ViabilityFraction => 100.0 * (1.0 - raw),
+                    ResponseType::Inhibition => raw,
+                    ResponseType::InhibitionFraction => 100.0 * raw,
+                    ResponseType::RawOd => {
+                        100.0 * (1.0 - (raw - policy.blank_value) / adjusted_control)
+                    }
+                };
+                if !inhibition.is_finite() {
+                    return Err(DiamondError::NonFiniteInhibition {
+                        row: row_index + 2,
+                        raw: row.od,
+                        inhibition,
+                    });
+                }
+                groups
+                    .entry(concentration.to_bits())
+                    .or_insert_with(|| (concentration, Vec::new()))
+                    .1
+                    .push(inhibition);
+            }
+            let mut series = groups
+                .into_values()
+                .map(|(concentration, values)| (concentration, mean(&values)))
+                .collect::<Vec<_>>();
+            series.sort_by(|left, right| left.0.total_cmp(&right.0));
+            let fitted_ic50 = (series.len() >= 3)
+                .then(|| fit_hill(&series).ic50)
+                .flatten();
+            let selected = fitted_ic50.and_then(|ic50| {
+                series.iter().min_by(|left, right| {
+                    (left.0 / ic50)
+                        .log2()
+                        .abs()
+                        .total_cmp(&(right.0 / ic50).log2().abs())
+                        .then_with(|| left.0.total_cmp(&right.0))
+                })
+            });
+            Ok(DiamondDoseAnchorSuggestion {
+                drug_name: input.drug_names[drug_index].clone(),
+                fitted_ic50,
+                suggested_anchor: selected.map(|value| value.0),
+                mean_inhibition_at_anchor: selected.map(|value| value.1),
+                single_agent_levels: series.len(),
+            })
+        })
+        .collect()
 }
 
 pub fn analyze(
@@ -1204,6 +1322,40 @@ mod tests {
             .unwrap();
         assert!((score.fic - 0.5).abs() < 0.02, "{}", score.fic);
         assert_eq!(score.interpretation, DiamondInterpretation::Synergistic);
+    }
+
+    #[test]
+    fn dose_anchor_suggestion_uses_the_tested_concentration_nearest_fitted_ic50() {
+        let mut rows = vec![AssayRow {
+            concentrations: vec![0.0, 0.0],
+            od: 100.0,
+        }];
+        for dose in [0.25, 0.5, 1.0, 2.0, 4.0] {
+            rows.push(AssayRow {
+                concentrations: vec![dose, 0.0],
+                od: 100.0 - hill(dose, 1.1),
+            });
+            rows.push(AssayRow {
+                concentrations: vec![0.0, dose],
+                od: 100.0 - hill(dose, 1.9),
+            });
+        }
+        let suggestions = suggest_dose_anchors(
+            &AssayInput {
+                drug_names: vec!["A".into(), "B".into()],
+                rows,
+            },
+            DiamondPolicy {
+                response_type: ResponseType::Viability,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!((suggestions[0].fitted_ic50.unwrap() - 1.1).abs() < 0.05);
+        assert_eq!(suggestions[0].suggested_anchor, Some(1.0));
+        assert!((suggestions[1].fitted_ic50.unwrap() - 1.9).abs() < 0.05);
+        assert_eq!(suggestions[1].suggested_anchor, Some(2.0));
+        assert_eq!(suggestions[0].single_agent_levels, 5);
     }
 
     #[test]

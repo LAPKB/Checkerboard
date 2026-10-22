@@ -1,10 +1,11 @@
 use checkerboard_core::{
     AnalysisPolicy, AnalysisResult, ColumnMapping, ConcentrationRange, ResponseType, analyze_with_progress,
     assay_from_rows,
-    diamond::{DiamondPolicy, DiamondResult},
+    diamond::{DiamondDoseAnchorSuggestion, DiamondPolicy, DiamondResult},
     drusano_greco::{
-        DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings, build_equation_dataset,
-        suggest_response_censor_limit,
+        DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings,
+        DrusanoSamplingSummary, build_equation_dataset, select_mic_limited_assay,
+        select_mic_limited_assay_by_row, suggest_response_censor_limit,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,20 @@ pub struct AnalyzeDiamondRequest {
     pub concentration_units: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestDiamondAnchorsRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub policy: DiamondPolicy,
+    #[serde(default)]
+    pub regimen_drug_names: Vec<String>,
+    #[serde(default)]
+    pub organism: Option<String>,
+    #[serde(default)]
+    pub organism_column: Option<usize>,
+}
+
 fn default_mic_zero_tolerance() -> f64 {
     5.0
 }
@@ -105,6 +120,8 @@ pub struct InferMicsRequest {
     pub blank_value: f64,
     pub zero_tolerance: f64,
     #[serde(default)]
+    pub strict_below: bool,
+    #[serde(default)]
     pub regimen_drug_names: Vec<String>,
     #[serde(default)]
     pub organism: Option<String>,
@@ -114,10 +131,20 @@ pub struct InferMicsRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DrusanoSamplingSettings {
+    pub mic_values: Vec<f64>,
+    #[serde(default)]
+    pub mic_columns: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrepareDrusanoDataRequest {
     pub import: ImportRequest,
     pub mapping: ColumnMapping,
     pub settings: DrusanoDataSettings,
+    #[serde(default)]
+    pub count_data: bool,
     #[serde(default)]
     pub assay_error: DrusanoAssayErrorSettings,
     #[serde(default)]
@@ -126,6 +153,8 @@ pub struct PrepareDrusanoDataRequest {
     pub organism: Option<String>,
     #[serde(default)]
     pub organism_column: Option<usize>,
+    #[serde(default)]
+    pub sampling: Option<DrusanoSamplingSettings>,
     #[serde(default = "default_drusano_max_cycles")]
     pub max_cycles: usize,
     #[serde(default)]
@@ -134,6 +163,19 @@ pub struct PrepareDrusanoDataRequest {
     pub bootstrap_iterations: usize,
     #[serde(default = "default_drusano_bootstrap_seed")]
     pub bootstrap_seed: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewDrusanoSamplingRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub regimen_drug_names: Vec<String>,
+    pub organism: Option<String>,
+    pub organism_column: Option<usize>,
+    pub mic_values: Vec<f64>,
+    #[serde(default)]
+    pub mic_columns: Option<Vec<usize>>,
 }
 
 fn default_drusano_max_cycles() -> usize {
@@ -198,6 +240,9 @@ pub struct MicEstimate {
     pub mic: Option<f64>,
     pub mean_response_at_mic: Option<f64>,
     pub single_agent_levels: usize,
+    pub control_mean: Option<f64>,
+    pub threshold_response: Option<f64>,
+    pub non_monotonic: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -392,16 +437,30 @@ pub fn infer_mics(request: InferMicsRequest) -> Result<Vec<MicEstimate>, AppErro
             levels.sort_by(|left, right| left.0.total_cmp(&right.0));
             let selected = levels
                 .iter()
-                .find(|(_, mean)| mean.abs() <= request.zero_tolerance)
+                .find(|(_, mean)| mic_threshold_crossed(*mean, request.zero_tolerance, request.strict_below))
                 .copied();
+            let non_monotonic = selected.is_some_and(|selected_level| levels.iter().any(|(concentration, mean)| {
+                *concentration > selected_level.0 && *mean >= request.zero_tolerance
+            }));
             Ok(MicEstimate {
                 drug_name: drug_name.clone(),
                 mic: selected.map(|value| value.0),
                 mean_response_at_mic: selected.map(|value| value.1),
                 single_agent_levels: levels.len(),
+                control_mean,
+                threshold_response: control_mean.map(|control| control * request.zero_tolerance / 100.0),
+                non_monotonic,
             })
         })
         .collect()
+}
+
+fn mic_threshold_crossed(mean_response: f64, threshold: f64, strict_below: bool) -> bool {
+    if strict_below {
+        mean_response < threshold
+    } else {
+        mean_response.abs() <= threshold
+    }
 }
 
 #[tauri::command]
@@ -409,6 +468,28 @@ pub fn prepare_drusano_data(
     request: PrepareDrusanoDataRequest,
 ) -> Result<DrusanoDataSet, AppError> {
     prepare_drusano_data_inner(request)
+}
+
+#[tauri::command]
+pub fn preview_drusano_sampling(
+    request: PreviewDrusanoSamplingRequest,
+) -> Result<DrusanoSamplingSummary, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    let (_, summary) = select_drusano_sampling_assay(
+        &assay,
+        &rows,
+        &request.mic_values,
+        request.mic_columns.as_deref(),
+    )
+        .map_err(|error| AppError::new("invalidDrusanoSampling", error.to_string()))?;
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -433,6 +514,7 @@ pub fn suggest_drusano_censor_limit(
 fn prepare_drusano_data_inner(
     request: PrepareDrusanoDataRequest,
 ) -> Result<DrusanoDataSet, AppError> {
+    require_drusano_count_data(request.count_data)?;
     let table = importer::read_table(&request.import)?;
     let rows = select_regimen_rows(
         &table,
@@ -441,7 +523,71 @@ fn prepare_drusano_data_inner(
         request.organism_column,
     )?;
     let assay = assay_from_rows(&rows, &request.mapping)?;
+    let assay = if let Some(sampling) = &request.sampling {
+        select_drusano_sampling_assay(
+            &assay,
+            &rows,
+            &sampling.mic_values,
+            sampling.mic_columns.as_deref(),
+        )
+            .map_err(|error| AppError::new("invalidDrusanoSampling", error.to_string()))?
+            .0
+    } else {
+        assay
+    };
     Ok(build_equation_dataset(&assay, &request.settings)?)
+}
+
+fn select_drusano_sampling_assay(
+    assay: &checkerboard_core::AssayInput,
+    rows: &[Vec<String>],
+    mic_values: &[f64],
+    mic_columns: Option<&[usize]>,
+) -> Result<(checkerboard_core::AssayInput, DrusanoSamplingSummary), checkerboard_core::drusano_greco::DrusanoSamplingError> {
+    if let Some(columns) = mic_columns {
+        if columns.len() != 2 {
+            return Err(checkerboard_core::drusano_greco::DrusanoSamplingError::InvalidRowMics);
+        }
+        let parsed = rows.iter().map(|row| {
+            let cells = columns.iter().map(|column| row.get(*column).map_or("", |value| value.trim())).collect::<Vec<_>>();
+            if cells.iter().all(|value| value.is_empty()) {
+                Ok(None)
+            } else {
+                let values = cells.iter().map(|value| value.parse::<f64>().ok()).collect::<Vec<_>>();
+                if values.iter().all(|value| value.is_some_and(|value| value.is_finite() && value > 0.0)) {
+                    Ok(Some(values.into_iter().map(Option::unwrap).collect::<Vec<_>>()))
+                } else {
+                    Err(checkerboard_core::drusano_greco::DrusanoSamplingError::InvalidRowMics)
+                }
+            }
+        }).collect::<Result<Vec<_>, _>>()?;
+        let first_imported = parsed.iter().find_map(|values| values.clone());
+        let fallback = (mic_values.len() == 2
+            && mic_values.iter().all(|value| value.is_finite() && *value > 0.0))
+            .then(|| mic_values.to_vec());
+        let mut previous = None::<Vec<f64>>;
+        let row_mic_values = parsed.into_iter().map(|values| {
+            let resolved = values.or_else(|| previous.clone()).or_else(|| first_imported.clone()).or_else(|| fallback.clone());
+            if let Some(values) = &resolved {
+                previous = Some(values.clone());
+            }
+            resolved.ok_or(checkerboard_core::drusano_greco::DrusanoSamplingError::InvalidRowMics)
+        }).collect::<Result<Vec<_>, _>>()?;
+        select_mic_limited_assay_by_row(assay, &row_mic_values)
+    } else {
+        select_mic_limited_assay(assay, mic_values)
+    }
+}
+
+fn require_drusano_count_data(count_data: bool) -> Result<(), AppError> {
+    if count_data {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "unsupportedDrusanoResponseType",
+            "Drusano-Greco analysis requires count responses.",
+        ))
+    }
 }
 
 #[tauri::command]
@@ -588,6 +734,24 @@ pub async fn analyze_diamond(
     })
     .await
     .map_err(|error| AppError::new("diamondWorkerError", error.to_string()))?
+}
+
+#[tauri::command]
+pub fn suggest_diamond_anchors(
+    request: SuggestDiamondAnchorsRequest,
+) -> Result<Vec<DiamondDoseAnchorSuggestion>, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    Ok(checkerboard_core::diamond::suggest_dose_anchors(
+        &assay,
+        request.policy,
+    )?)
 }
 
 fn analyze_table_inner(
@@ -755,6 +919,10 @@ fn select_regimen_rows(
             "An organism was selected, but no Organism column is mapped.",
         ));
     }
+    let normalized_regimen_drug_names = regimen_drug_names
+        .iter()
+        .map(|name| normalize_drug_name(name))
+        .collect::<Vec<_>>();
     let selected = table
         .rows
         .iter()
@@ -762,7 +930,7 @@ fn select_regimen_rows(
             let regimen_matches = regimen_drug_names.is_empty()
                 || name_columns.as_ref().is_none_or(|columns| {
                     row_drug_names(row, columns)
-                        .is_some_and(|names| names == regimen_drug_names)
+                        .is_some_and(|names| names == normalized_regimen_drug_names)
                 });
             let organism_matches = organism.is_none_or(|selected_organism| {
                 organism_column
@@ -974,21 +1142,27 @@ fn regimen_name_columns(headers: &[String]) -> Result<Vec<Option<usize>>, AppErr
 }
 
 fn row_drug_names(row: &[String], columns: &[Option<usize>]) -> Option<Vec<String>> {
-    let first = row.get(columns[0]?)?.trim();
-    let second = row.get(columns[1]?)?.trim();
+    let first = normalize_drug_name(row.get(columns[0]?)?);
+    let second = normalize_drug_name(row.get(columns[1]?)?);
     if first.is_empty() || second.is_empty() {
         return None;
     }
-    let mut names = vec![first.to_string(), second.to_string()];
+    let mut names = vec![first, second];
     if let Some(column) = columns.get(2).copied().flatten()
         && let Some(value) = row
             .get(column)
-            .map(|value| value.trim())
+            .map(|value| normalize_drug_name(value))
             .filter(|value| !value.is_empty())
     {
-        names.push(value.to_string());
+        names.push(value);
     }
     Some(names)
+}
+
+fn normalize_drug_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 fn find_units_column(headers: &[String], index: usize) -> Option<usize> {
@@ -1186,6 +1360,10 @@ fn default_role(header: &str, _index: usize) -> String {
         "unitc" | "unitsc" | "unitdrug3" | "unitsdrug3" | "drug3unit" | "drug3units"
     ) {
         "unitsC".into()
+    } else if matches!(normalized.as_str(), "mica" | "mic1" | "micdruga" | "micdrug1") {
+        "micA".into()
+    } else if matches!(normalized.as_str(), "micb" | "mic2" | "micdrugb" | "micdrug2") {
+        "micB".into()
     } else if normalized == "conca"
         || normalized == "conc1"
         || normalized == "concdrug1"
@@ -1391,6 +1569,41 @@ mod tests {
     }
 
     #[test]
+    fn drusano_greco_rejects_non_count_responses() {
+        let error = require_drusano_count_data(false).expect_err("non-count data must be rejected");
+        assert_eq!(error.code, "unsupportedDrusanoResponseType");
+        assert!(error.message.contains("requires count responses"));
+        assert!(require_drusano_count_data(true).is_ok());
+    }
+
+    #[test]
+    fn imported_mic_columns_allow_blank_repeated_values_and_regimen_fallbacks() {
+        let assay = checkerboard_core::AssayInput {
+            drug_names: vec!["A".into(), "B".into()],
+            rows: vec![
+                checkerboard_core::AssayRow { concentrations: vec![0.0, 0.0], od: 100.0 },
+                checkerboard_core::AssayRow { concentrations: vec![1.0, 2.0], od: 20.0 },
+                checkerboard_core::AssayRow { concentrations: vec![4.0, 8.0], od: 5.0 },
+            ],
+        };
+        let sparse_rows = vec![
+            vec!["0".into(), "0".into(), "100".into(), "".into(), "".into()],
+            vec!["1".into(), "2".into(), "20".into(), "1".into(), "2".into()],
+            vec!["4".into(), "8".into(), "5".into(), "".into(), "".into()],
+        ];
+        let (_, sparse_summary) = select_drusano_sampling_assay(&assay, &sparse_rows, &[], Some(&[3, 4])).unwrap();
+        assert!(sparse_summary.locations.iter().all(|location| location.mic_values == [1.0, 2.0]));
+
+        let blank_rows = sparse_rows.into_iter().map(|mut row| {
+            row[3].clear();
+            row[4].clear();
+            row
+        }).collect::<Vec<_>>();
+        let (_, fallback_summary) = select_drusano_sampling_assay(&assay, &blank_rows, &[2.0, 4.0], Some(&[3, 4])).unwrap();
+        assert!(fallback_summary.locations.iter().all(|location| location.mic_values == [2.0, 4.0]));
+    }
+
+    #[test]
     fn common_headers_get_expected_roles() {
         assert_eq!(default_role("Drug A", 0), "drugNameA");
         assert_eq!(default_role("Unit A", 0), "unitsA");
@@ -1402,6 +1615,8 @@ mod tests {
         assert_eq!(default_role("Drug1", 0), "drugNameA");
         assert_eq!(default_role("ConcDrug1", 2), "drugA");
         assert_eq!(default_role("UnitDrug2", 5), "unitsB");
+        assert_eq!(default_role("MIC_A", 6), "micA");
+        assert_eq!(default_role("MIC B", 7), "micB");
         assert_eq!(default_role("LatentEffect", 7), "ignore");
     }
 
@@ -1457,6 +1672,49 @@ mod tests {
         .unwrap();
         assert_eq!(selected.len(), 2);
         assert!(selected.iter().all(|row| row[0] == "Org 2"));
+    }
+
+    #[test]
+    fn drug_name_whitespace_is_removed_before_grouping_and_row_selection() {
+        let table = importer::ImportedTable {
+            headers: vec![
+                "Drug A".into(),
+                "Drug B".into(),
+                "Conc A".into(),
+                "Conc B".into(),
+                "Response".into(),
+            ],
+            rows: vec![
+                vec![
+                    "BDQ".into(),
+                    "TBA7371".into(),
+                    "0.25".into(),
+                    "1".into(),
+                    "2.30".into(),
+                ],
+                vec![
+                    "BDQ".into(),
+                    "TBA 7371".into(),
+                    "0.25".into(),
+                    "1".into(),
+                    "1.78".into(),
+                ],
+            ],
+        };
+
+        let regimens = describe_regimens(&table, &[2, 3], Some(4), None);
+        assert_eq!(regimens.len(), 1);
+        assert_eq!(regimens[0].drug_names, ["BDQ", "TBA7371"]);
+        assert_eq!(regimens[0].total_rows, 2);
+
+        let selected = select_regimen_rows(
+            &table,
+            &["BDQ".into(), "TBA 7371".into()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
     }
 
     #[test]
@@ -1633,7 +1891,7 @@ mod tests {
                     .all(|role| role == "ignore")
             );
             assert_eq!(preview.regimens.len(), 1);
-            assert_eq!(preview.regimens[0].drug_names, ["Drug 1", "Drug 2"]);
+            assert_eq!(preview.regimens[0].drug_names, ["Drug1", "Drug2"]);
             assert_eq!(preview.regimens[0].concentration_units, ["mg/L", "mg/L"]);
 
             let data = prepare_drusano_data_inner(PrepareDrusanoDataRequest {
@@ -1655,10 +1913,12 @@ mod tests {
                     blank_value: 0.0,
                     response_censor_limit: Some(0.1),
                 },
+                count_data: true,
                 assay_error: DrusanoAssayErrorSettings::default(),
                 regimen_drug_names: preview.regimens[0].drug_names.clone(),
                 organism: None,
                 organism_column: None,
+                sampling: None,
                 max_cycles: default_drusano_max_cycles(),
                 continuation: None,
                 bootstrap_iterations: 1,
@@ -1861,6 +2121,7 @@ mod tests {
             response_type: ResponseType::ViabilityFraction,
             blank_value: 0.0,
             zero_tolerance: 70.0,
+            strict_below: false,
             regimen_drug_names: Vec::new(),
             organism: None,
             organism_column: None,
@@ -1877,6 +2138,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 2]
         );
+    }
+
+    #[test]
+    fn drusano_mic_threshold_is_strictly_below_ten_percent() {
+        assert!(mic_threshold_crossed(9.999, 10.0, true));
+        assert!(!mic_threshold_crossed(10.0, 10.0, true));
+        assert!(!mic_threshold_crossed(10.001, 10.0, true));
+        assert!(mic_threshold_crossed(10.0, 10.0, false));
     }
 
     #[test]

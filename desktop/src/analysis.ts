@@ -50,7 +50,7 @@ export function propagateSharedDrugConcentrations(
   const previous = current[sourceId] ?? source.drugNames.map(() => null);
   const changedValues = source.drugNames.flatMap((drugName, index) => {
     const value = values[index] ?? null;
-    return value != null && value !== previous[index]
+    return value !== previous[index]
       ? [{ drugKey: normalizedDrugKey(drugName), value }]
       : [];
   });
@@ -58,17 +58,27 @@ export function propagateSharedDrugConcentrations(
   for (const target of regimens) {
     if (target.id === sourceId) continue;
     const targetValues = [...(current[target.id] ?? target.drugNames.map(() => null))];
-    let populated = false;
+    let changedTarget = false;
     for (const changed of changedValues) {
       const targetIndex = target.drugNames.findIndex((name) => normalizedDrugKey(name) === changed.drugKey);
-      if (targetIndex >= 0 && targetValues[targetIndex] == null) {
+      if (targetIndex >= 0 && targetValues[targetIndex] !== changed.value) {
         targetValues[targetIndex] = changed.value;
-        populated = true;
+        changedTarget = true;
       }
     }
-    if (populated || !current[target.id]) next[target.id] = targetValues;
+    if (changedTarget || !current[target.id]) next[target.id] = targetValues;
   }
   return next;
+}
+
+export function formatConcentrationInput(value: number): string {
+  if (!Number.isFinite(value)) return "";
+  const formatted = value.toLocaleString("en-US", {
+    useGrouping: false,
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 15,
+  });
+  return value !== 0 && Number(formatted) === 0 ? value.toExponential(6) : formatted;
 }
 
 export function groupAnalysisUnits<T extends { label: string; regimenLabel?: string; organism?: string | null }>(
@@ -147,13 +157,16 @@ export function validateRoles(roles: ColumnRole[]): string[] {
       errors.push(`${roleLabel(role)} must be assigned exactly once.`);
     }
   }
-  for (const role of ["drugNameA", "drugNameB", "drugNameC", "unitsA", "unitsB", "unitsC", "drugC", "organism"] as ColumnRole[]) {
+  for (const role of ["drugNameA", "drugNameB", "drugNameC", "unitsA", "unitsB", "unitsC", "drugC", "micA", "micB", "organism"] as ColumnRole[]) {
     if (roles.filter((value) => value === role).length > 1) {
       errors.push(`${roleLabel(role)} can be assigned at most once.`);
     }
   }
   if ((roles.includes("drugNameC") || roles.includes("unitsC")) && !roles.includes("drugC")) {
     errors.push("Drug C or Units C requires a Conc C assignment.");
+  }
+  if (roles.includes("micA") !== roles.includes("micB")) {
+    errors.push("MIC A and MIC B must either both be assigned or both be omitted.");
   }
   return errors;
 }
@@ -184,6 +197,8 @@ export function roleLabel(role: ColumnRole): string {
     unitsA: "Units A",
     unitsB: "Units B",
     unitsC: "Units C",
+    micA: "MIC A",
+    micB: "MIC B",
     organism: "Organism",
     response: "Response",
   }[role];
@@ -221,6 +236,10 @@ export function mostCommonLowerTie(values: number[]): number | null {
 
 export function micAssignmentKey(organism: string | null | undefined, drugName: string): string {
   return JSON.stringify([organism?.trim() || "", normalizedDrugKey(drugName)]);
+}
+
+export function regimenMicAssignmentKey(regimenId: string, drugName: string): string {
+  return JSON.stringify(["regimen", regimenId, normalizedDrugKey(drugName)]);
 }
 
 export function suggestMicsByOrganismDrug(

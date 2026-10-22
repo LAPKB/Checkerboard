@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { aggregateBliss, buildMapping, compareDrusanoSimulations, compareRegimens, concentrationRangeFor, diamondRankingScore, drusanoDiagnosticPoint, drusanoDiagnosticRegression, exceedanceAuc, exceedanceDomain, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, mostCommonLowerTie, propagateSharedDrugConcentrations, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
+import { aggregateBliss, buildMapping, compareDrusanoSimulations, compareRegimens, concentrationRangeFor, diamondRankingScore, drusanoDiagnosticPoint, drusanoDiagnosticRegression, exceedanceAuc, exceedanceDomain, formatConcentrationInput, formatPValue, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, mostCommonLowerTie, propagateSharedDrugConcentrations, regimenMicAssignmentKey, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
 import type { AnalysisResult, ComparisonRegimen, DrusanoFitResult, ImportPreview } from "./types";
 
 const preview: ImportPreview = {
@@ -31,6 +31,13 @@ describe("DiaMOND comparison ranking", () => {
 describe("column mapping", () => {
   it("requires each core role exactly once", () => {
     expect(validateRoles(["drugNameA", "drugNameB", "drugA", "drugA", "unitsA", "unitsB", "response"])).toHaveLength(2);
+  });
+
+  it("requires imported Drusano MIC columns as a pair", () => {
+    expect(validateRoles(["drugA", "drugB", "response", "micA"]))
+      .toContain("MIC A and MIC B must either both be assigned or both be omitted.");
+    expect(validateRoles(["drugA", "drugB", "response", "micA", "micB"]))
+      .toHaveLength(0);
   });
 
   it("builds drugs in stable A/B/C order", () => {
@@ -130,7 +137,7 @@ describe("Drusano shared-drug simulation inputs", () => {
     { id: "d-e", drugNames: ["D", "E"] },
   ];
 
-  it("prepopulates blank fields for the same drug without replacing overrides", () => {
+  it("keeps the concentration for a shared drug synchronized across regimens", () => {
     const populated = propagateSharedDrugConcentrations({}, regimens, "bdq-a", [0.001, null]);
     expect(populated).toEqual({
       "bdq-a": [0.001, null],
@@ -141,13 +148,22 @@ describe("Drusano shared-drug simulation inputs", () => {
 
     const overridden = propagateSharedDrugConcentrations(populated, regimens, "b-bdq", [null, 0.002]);
     expect(overridden["b-bdq"][1]).toBe(0.002);
-    expect(overridden["bdq-a"][0]).toBe(0.001);
-    expect(overridden["bdq-c"][0]).toBe(0.001);
+    expect(overridden["bdq-a"][0]).toBe(0.002);
+    expect(overridden["bdq-c"][0]).toBe(0.002);
 
     const sourceChanged = propagateSharedDrugConcentrations(overridden, regimens, "bdq-a", [0.003, null]);
     expect(sourceChanged["bdq-a"][0]).toBe(0.003);
-    expect(sourceChanged["b-bdq"][1]).toBe(0.002);
-    expect(sourceChanged["bdq-c"][0]).toBe(0.001);
+    expect(sourceChanged["b-bdq"][1]).toBe(0.003);
+    expect(sourceChanged["bdq-c"][0]).toBe(0.003);
+  });
+
+  it("preserves low concentration precision across propagation and JSON serialization", () => {
+    const concentration = 0.000123456;
+    const values = propagateSharedDrugConcentrations({}, regimens, "bdq-a", [concentration, null]);
+    const restored = JSON.parse(JSON.stringify(values)) as typeof values;
+    expect(restored["bdq-a"][0]).toBe(concentration);
+    expect(restored["b-bdq"][1]).toBe(concentration);
+    expect(restored["bdq-c"][0]).toBe(concentration);
   });
 
   it("matches harmless drug-name spacing differences", () => {
@@ -158,6 +174,13 @@ describe("Drusano shared-drug simulation inputs", () => {
       [0.25, null],
     );
     expect(values.two).toEqual([null, 0.25]);
+  });
+
+  it("displays at least three decimal places without rounding small values to zero", () => {
+    expect(formatConcentrationInput(1)).toBe("1.000");
+    expect(formatConcentrationInput(0.1)).toBe("0.100");
+    expect(formatConcentrationInput(0.000123456)).toBe("0.000123456");
+    expect(Number(formatConcentrationInput(1e-20))).toBe(1e-20);
   });
 });
 
@@ -181,6 +204,13 @@ describe("pooled MIC suggestion", () => {
       .not.toBe(micAssignmentKey("Organism B", "Amikacin"));
     expect(micAssignmentKey("Organism A", "TBA 7371"))
       .toBe(micAssignmentKey("Organism A", "TBA7371"));
+  });
+
+  it("uses a separate Drusano MIC assignment for each regimen", () => {
+    expect(regimenMicAssignmentKey("plate-1", "TBA 7371"))
+      .not.toBe(regimenMicAssignmentKey("plate-2", "TBA7371"));
+    expect(regimenMicAssignmentKey("plate-1", "TBA 7371"))
+      .toBe(regimenMicAssignmentKey("plate-1", "TBA7371"));
   });
 
   it("pools MIC suggestions within an organism but not across organisms", () => {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   compareDrusanoSimulations,
+  formatConcentrationInput,
   groupAnalysisUnits,
   drusanoDiagnosticPoint,
   drusanoDiagnosticRegression,
@@ -13,17 +14,19 @@ import { RegimenNavigator } from "./RegimenNavigator";
 import type {
   AnalysisType,
   DrusanoCensorLimitSuggestion,
+  DrusanoFitEntry,
   DrusanoFitResult,
   DrusanoModelSettings,
   DrusanoRegimenSimulationResult,
   DrusanoSimulationEntry,
+  DrusanoSamplingSummary,
   InputSettings,
   RegimenPreview,
 } from "./types";
 
 export const DRUSANO_GRECO_MODEL = `# Numerical Drusano-Greco Equation 2 prediction model
 # d1 and d2 are dimensionless concentration/maximum-tested-concentration covariates.
-# E and XM0 are dimensionless; absorbance remains on the imported response scale.
+# E and XM0 are dimensionless; counts remain on the imported response scale.
 u = d1 / ec50_1
 v = d2 / ec50_2
 w = alpha_12 * u * v
@@ -39,15 +42,15 @@ solve XM0 > 0 such that:
     1 = u / XM0^h_1 + v / XM0^h_2 + w / XM0^h_12
 
 predicted_effect = XM0 / (1 + XM0)
-predicted_absorbance = blank + response_span * (1 - predicted_effect)
+predicted_response = response_span * (1 - predicted_effect)
 
 error_sd = sqrt(lambda^2 + (
-    C0 + C1*predicted_absorbance
-       + C2*predicted_absorbance^2
-       + C3*predicted_absorbance^3
+    C0 + C1*predicted_response
+       + C2*predicted_response^2
+       + C3*predicted_response^3
 )^2)`;
 
-type FitEntry = { id: string; label: string; regimenLabel?: string; organism?: string | null; fit: DrusanoFitResult };
+type FitEntry = DrusanoFitEntry;
 type FitProgress = { phase: "reference" | "bootstrap"; cycle: number; objectiveFunction: number; completedBootstraps: number; totalBootstraps: number; regimenLabel?: string };
 
 export function ProjectWorkspace({ analysisType, setAnalysisType }: {
@@ -83,16 +86,58 @@ export function InputTypeControls({ settings, setSettings, analysisType }: {
   analysisType: AnalysisType;
 }) {
   const update = (patch: Partial<InputSettings>) => setSettings({ ...settings, ...patch });
+  const drusanoCountOnly = analysisType === "drusanoGreco";
   return <section className="input-settings">
     <h2>Input response</h2>
-    <label>Input type<select value={settings.inputType} onChange={(event) => update({ inputType: event.target.value as InputSettings["inputType"] })}>
-      <option value="" disabled>Choose input type…</option>
-      <option value="absorbance">Absorbance</option><option value="fluorescence">Fluorescence</option><option value="count">Count</option>
-      {(analysisType === "bliss" || analysisType === "diamond") && <option value="normalized">Control-normalized viability (auto-detect scale)</option>}
+    <label>Input type<select value={drusanoCountOnly ? "count" : settings.inputType} disabled={drusanoCountOnly} onChange={(event) => update({ inputType: event.target.value as InputSettings["inputType"] })}>
+      {drusanoCountOnly ? <option value="count">Count (required for Drusano–Greco)</option> : <>
+        <option value="" disabled>Choose input type…</option>
+        <option value="absorbance">Absorbance</option><option value="fluorescence">Fluorescence</option><option value="count">Count</option>
+        {(analysisType === "bliss" || analysisType === "diamond") && <option value="normalized">Control-normalized viability (auto-detect scale)</option>}
+      </>}
     </select></label>
+    {drusanoCountOnly && <p className="field-help">The Drusano–Greco workflow accepts count responses only.</p>}
     {settings.inputType === "normalized" && <p className="field-help">The all-zero drug controls determine the scale: a mean near 1 is treated as fractional viability and a mean near 100 as percentage viability.</p>}
     {settings.inputType !== "count" && settings.inputType !== "normalized" && <label>Blank response<input type="number" step="any" value={settings.blankValue ?? ""} onChange={(event) => update({ blankValue: nullableNumber(event.target.value) })} /><span className="field-help">Enter a value greater than 0 only when the imported responses have not already been blank-adjusted. If they are already blank-adjusted, enter 0.</span></label>}
   </section>;
+}
+
+export function DrusanoSamplingWorkspace({ regimens, summaries, busy, error }: {
+  regimens: RegimenPreview[];
+  summaries: Record<string, DrusanoSamplingSummary>;
+  busy: boolean;
+  error: string | null;
+}) {
+  const [selectedId, setSelectedId] = useState(regimens[0]?.id ?? "");
+  useEffect(() => {
+    if (!regimens.some((regimen) => regimen.id === selectedId)) setSelectedId(regimens[0]?.id ?? "");
+  }, [regimens, selectedId]);
+  const regimen = regimens.find((entry) => entry.id === selectedId) ?? regimens[0];
+  const summary = regimen ? summaries[regimen.id] : undefined;
+  const missing = summary?.locations.filter((location) => location.matchedWellCount === 0) ?? [];
+  return <main className="single-workspace"><section className="content-card stage-card">
+    <div className="card-heading"><div><h1>MIC-based limited sampling</h1><p>Each target is calculated from the applicable MIC pair for its regimen or replicate stratum. The nearest tested combination is selected when each drug's absolute concentration difference is at most 0.1, and every replicate at that location is retained.</p></div>{summary && <span className="count-badge">{summary.selectedWellCount} of {summary.totalWellCount} wells</span>}</div>
+    <div className="stage-content">
+      {regimens.length > 1 && regimen && <RegimenNavigator regimens={regimens} selectedId={regimen.id} onSelect={setSelectedId} compact label="Regimen" />}
+      <div className="policy-note"><strong>Included:</strong> untreated controls, every single-agent well, the 3×3 combination grid at ¼×, 1×, and 4× each assigned MIC, and the maximum–maximum location. Duplicate locations are selected once.</div>
+      {busy ? <p className="help-text">Checking MIC-grid coverage within ±0.1…</p> : error ? <div className="mapping-status warning">{error}</div> : summary && regimen ? <>
+        <div className="summary-metrics">
+          <div><span>Selected wells</span><strong>{summary.selectedWellCount}</strong></div>
+          <div><span>Controls</span><strong>{summary.controlWellCount}</strong></div>
+          <div><span>Single-agent wells</span><strong>{summary.singleAgentWellCount}</strong></div>
+          <div><span>Combination wells</span><strong>{summary.combinationWellCount}</strong></div>
+          <div><span>Target locations</span><strong>{summary.matchedLocationCount}/{summary.requiredLocationCount}</strong></div>
+        </div>
+        <div className="result-table-wrap"><table className="result-table"><thead><tr><th>MIC {regimen.drugNames[0]}</th><th>MIC {regimen.drugNames[1]}</th><th>{regimen.drugNames[0]}</th><th>{regimen.drugNames[1]}</th><th>Role</th><th>Measured wells</th></tr></thead><tbody>
+          {summary.locations.map((location, index) => <tr key={`${(location.micValues ?? []).join(":")}-${location.concentrations.join(":")}-${index}`}><td>{location.micValues?.[0] == null ? "—" : formatConcentrationInput(location.micValues[0])}</td><td>{location.micValues?.[1] == null ? "—" : formatConcentrationInput(location.micValues[1])}</td><td>{formatConcentrationInput(location.concentrations[0])}</td><td>{formatConcentrationInput(location.concentrations[1])}</td><td>{location.maximumPair ? "Maximum pair" : "MIC grid"}</td><td>{location.matchedWellCount || <strong className="warning-text">Missing</strong>}</td></tr>)}
+        </tbody></table></div>
+        <details><summary>Selected imported well indices ({summary.selectedWellIndices.length})</summary><p className="help-text">{summary.selectedWellIndices.join(", ")}</p></details>
+        {missing.length === 0
+          ? <div className="mapping-status ready">Every required location is represented within the ±0.1 tolerance. Continue to Fit.</div>
+          : <div className="mapping-status warning">{missing.length} target location{missing.length === 1 ? " has" : "s have"} no nearest available well within an absolute difference of 0.1 concentration units for each drug. The limited model will fit the available selected wells; no value is imputed.</div>}
+      </> : <div className="empty-state"><h2>No sampling preview</h2><p>Complete the MIC assignments to calculate the limited-sampling set.</p></div>}
+    </div>
+  </section></main>;
 }
 
 export function DrusanoFitWorkspace({
@@ -120,7 +165,7 @@ export function DrusanoFitWorkspace({
   }, [fits, selectedId]);
   const selected = fits.find((entry) => entry.id === selectedId) ?? fits[0] ?? null;
   const result = selected?.fit;
-  const selectedRegimen = regimens.find((regimen) => regimen.id === selected?.id);
+  const selectedRegimen = regimens.find((regimen) => regimen.id === selected?.baseRegimenId);
   const concentrationUnits = selectedRegimen?.concentrationUnits ?? [];
   const canContinue = Boolean(result && !result.converged && result.runCycles >= result.maxCycles);
   const shownPoints = result?.supportPoints.slice().sort((left, right) => right.probability - left.probability).slice(0, 100) ?? [];
@@ -143,7 +188,7 @@ export function DrusanoFitWorkspace({
     </section>}
     <section className="drusano-model-settings">
       <h3>Assay error model</h3>
-      <p className="help-text">Error polynomial α(f) = C₀ + C₁f + C₂f² + C₃f³, evaluated on each well's predicted {inputType === "absorbance" ? "absorbance" : "response"}. The total variance is λ² + α(f)². Lambda may start at 0; a zero value leaves that variance component off, while a positive value may be optimized by NPAG.</p>
+      <p className="help-text">Error polynomial α(f) = C₀ + C₁f + C₂f² + C₃f³, evaluated on each well's predicted count. The total variance is λ² + α(f)². Lambda may start at 0; a zero value leaves that variance component off, while a positive value may be optimized by NPAG.</p>
       <div className="error-coefficient-grid">{settings.errorCoefficients.map((value, index) => <label key={index}>C<sub>{index}</sub><input type="number" step="any" value={value ?? ""} onChange={(event) => updateCoefficient(index, nullableNumber(event.target.value))} /></label>)}</div>
       <label>Initial λ (response units)<input type="number" min="0" step="any" value={settings.lambda ?? ""} onChange={(event) => setSettings({ ...settings, lambda: nullableNumber(event.target.value) })} /></label>
     </section>
@@ -153,7 +198,7 @@ export function DrusanoFitWorkspace({
       <span className="field-help">The default is 100 cycles. A continuation receives this many additional cycles.</span>
       <label>Parametric bootstraps<input type="number" min="1" max="10000" step="1" value={settings.bootstrapIterations ?? ""} onChange={(event) => setSettings({ ...settings, bootstrapIterations: nullableNumber(event.target.value) })} /></label>
       <label>Bootstrap seed<input type="number" min="0" step="1" value={settings.bootstrapSeed ?? ""} onChange={(event) => setSettings({ ...settings, bootstrapSeed: nullableNumber(event.target.value) })} /></label>
-      <span className="field-help">Defaults: 500 bootstraps and seed 123. Every bootstrap retains the fixed dose grid and simulates new responses from the fitted absorbance-scale error and censoring model.</span>
+      <span className="field-help">Defaults: 500 bootstraps and seed 123. Every bootstrap retains the fixed dose grid and simulates new counts from the fitted count-scale error and censoring model.</span>
     </section>
     <button className="primary-button full-width" disabled={busy || !settingsComplete} onClick={fit}>{busy ? "Fitting…" : fits.length ? "Refit Equation 2" : "Fit Equation 2 with NPAG"}</button>
     {canContinue && selected && <button className="secondary-button full-width" disabled={busy || !settingsComplete} onClick={() => continueFit(selected.id)}>Continue selected fit</button>}
@@ -167,7 +212,7 @@ export function DrusanoFitWorkspace({
     <div className="stage-content">
       {result ? <>
         {fits.length > 1 && <RegimenNavigator regimens={fits} selectedId={selected?.id ?? fits[0].id} onSelect={setSelectedId} compact label="Fitted regimen" />}
-        <div className={result.converged ? "mapping-status ready" : "mapping-status warning"}>{result.converged ? "NPAG converged" : result.runCycles >= result.maxCycles ? "NPAG reached the cycle limit before convergence" : "NPAG stopped before convergence"} after {result.cycles} total cycle{result.cycles === 1 ? "" : "s"}{result.continuedFromCycles > 0 ? ` (${result.runCycles} in the latest continuation)` : ""}. Objective function: {format(result.objectiveFunction)}.</div>
+        <div className={result.converged ? "mapping-status ready" : "mapping-status warning"}><strong>{selected?.sampling === "micBased" ? "MIC-based LSS" : "All imported wells"}:</strong> {result.converged ? "NPAG converged" : result.runCycles >= result.maxCycles ? "NPAG reached the cycle limit before convergence" : "NPAG stopped before convergence"} after {result.cycles} total cycle{result.cycles === 1 ? "" : "s"}{result.continuedFromCycles > 0 ? ` (${result.runCycles} in the latest continuation)` : ""}. Objective function: {format(result.objectiveFunction)}.</div>
         <div className="mapping-status ready">Reference and bootstrap results are available. You can now proceed to the Simulate tab to evaluate constant free-drug concentrations.</div>
         <div className="summary-metrics">
           <div><span>Eligible wells</span><strong>{result.data.eligibleWellCount}</strong></div>
@@ -178,7 +223,7 @@ export function DrusanoFitWorkspace({
         </div>
         <fieldset className="radio-field diagnostic-scale-control"><legend>Diagnostic plot scale</legend>
           <label><input type="radio" name="diagnostic-plot-scale" checked={diagnosticScale === "effect"} onChange={() => setDiagnosticScale("effect")} />Normalized effect</label>
-          <label><input type="radio" name="diagnostic-plot-scale" checked={diagnosticScale === "absorbance"} onChange={() => setDiagnosticScale("absorbance")} />Absorbance</label>
+          <label><input type="radio" name="diagnostic-plot-scale" checked={diagnosticScale === "absorbance"} onChange={() => setDiagnosticScale("absorbance")} />Count</label>
         </fieldset>
         <ObservedPredictedPlot result={result} scale={diagnosticScale} />
         <ResidualDiagnostics result={result} scale={diagnosticScale} />
@@ -201,7 +246,7 @@ export function DrusanoFitWorkspace({
         <p className="help-text">Assay error polynomial: ({result.assayError.coefficients.map(format).join(", ")}) · initial λ: {format(result.assayError.initialLambda)} · fitted λ: {format(result.assayError.fittedLambda)}</p>
         {result.data.warnings.map((warning) => <div className="mapping-status warning" key={warning}>{warning}</div>)}
         <div className="mapping-table-wrap"><table className="mapping-table"><thead><tr>{result.data.headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{result.data.rows.slice(0, 20).map((row, index) => <tr key={index}>{row.map((value, column) => <td key={column}>{value}</td>)}</tr>)}</tbody></table></div>
-      </> : <div className="empty-state"><div className="empty-icon">⌁</div><h2>No NPAG fit yet</h2><p>Supply the blank response, then fit the predefined generalized interaction equation. Drug concentrations are scaled automatically to their tested maxima.</p></div>}
+      </> : <div className="empty-state"><div className="empty-icon">⌁</div><h2>No NPAG fit yet</h2><p>Supply count responses and a censor limit, then fit the predefined generalized interaction equation. Drug concentrations are scaled automatically to their tested maxima.</p></div>}
       <details><summary>Predefined read-only numerical model</summary><p className="help-text">Equation 2 is solved for dimensionless effect at the reference estimate and every bootstrap parameter vector. The predicted effect is then converted back to the imported response scale before the likelihood, error polynomial, and censor limit are applied.</p><pre className="model-code">{result?.modelSource ?? DRUSANO_GRECO_MODEL}</pre></details>
     </div>
   </section></main>;
@@ -219,9 +264,9 @@ function ObservedPredictedPlot({ result, scale }: { result: DrusanoFitResult; sc
   const y = (value: number) => margin.top + ((maximum - value) / (maximum - minimum)) * plotHeight;
   const ticks = Array.from({ length: 6 }, (_, index) => minimum + (index / 5) * (maximum - minimum));
   const regression = drusanoDiagnosticRegression(points);
-  const noun = scale === "effect" ? "normalized effect" : "absorbance";
+  const noun = scale === "effect" ? "normalized effect" : "count";
   return <section className="drusano-fit-plot">
-    <div><h2>Observed vs. predicted {noun}</h2><p className="help-text">Predicted {noun} is on the x-axis and observed {noun} is on the y-axis. Regression statistics use uncensored wells only; {scale === "effect" ? <>upward arrows at E<sub>L</sub> mean observed E ≥ E<sub>L</sub></> : <>downward arrows at L mean observed absorbance ≤ L</>}.</p></div>
+    <div><h2>Observed vs. predicted {noun}</h2><p className="help-text">Predicted {noun} is on the x-axis and observed {noun} is on the y-axis. Regression statistics use uncensored wells only; {scale === "effect" ? <>upward arrows at E<sub>L</sub> mean observed E ≥ E<sub>L</sub></> : <>downward arrows at L mean observed count ≤ L</>}.</p></div>
     {points.length ? <>
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Observed versus predicted ${noun}`}>
         <defs><clipPath id="drusano-plot-clip"><rect x={margin.left} y={margin.top} width={plotWidth} height={plotHeight} /></clipPath></defs>
@@ -234,14 +279,14 @@ function ObservedPredictedPlot({ result, scale }: { result: DrusanoFitResult; sc
           {points.map(({ source: point, predicted, observed }) => point.censored
             ? scale === "effect"
               ? <g className={`censor-arrow ${doseClass(point.normalizedDoses)}`} key={point.wellId}><title>{`Well ${point.wellId}: predicted effect ${format(predicted)}; observed effect ≥ ${format(observed)} because response ≤ ${format(result.data.responseCensorLimit ?? Number.NaN)}`}</title><line x1={x(predicted)} x2={x(predicted)} y1={y(observed)} y2={y(observed) - 14} /><path d={`M ${x(predicted) - 5} ${y(observed) - 10} L ${x(predicted)} ${y(observed) - 17} L ${x(predicted) + 5} ${y(observed) - 10} Z`} /></g>
-              : <g className={`censor-arrow ${doseClass(point.normalizedDoses)}`} key={point.wellId}><title>{`Well ${point.wellId}: predicted absorbance ${format(predicted)}; observed absorbance ≤ ${format(observed)}`}</title><line x1={x(predicted)} x2={x(predicted)} y1={y(observed)} y2={y(observed) + 14} /><path d={`M ${x(predicted) - 5} ${y(observed) + 10} L ${x(predicted)} ${y(observed) + 17} L ${x(predicted) + 5} ${y(observed) + 10} Z`} /></g>
+              : <g className={`censor-arrow ${doseClass(point.normalizedDoses)}`} key={point.wellId}><title>{`Well ${point.wellId}: predicted count ${format(predicted)}; observed count ≤ ${format(observed)}`}</title><line x1={x(predicted)} x2={x(predicted)} y1={y(observed)} y2={y(observed) + 14} /><path d={`M ${x(predicted) - 5} ${y(observed) + 10} L ${x(predicted)} ${y(observed) + 17} L ${x(predicted) + 5} ${y(observed) + 10} Z`} /></g>
             : <circle className={`prediction-point ${doseClass(point.normalizedDoses)}`} key={point.wellId} cx={x(predicted)} cy={y(observed)} r="4"><title>{`Well ${point.wellId}: predicted ${format(predicted)}, observed ${format(observed)}`}</title></circle>)}
         </g>
         <text className="chart-axis-title" x={margin.left + plotWidth / 2} y={height - 12} textAnchor="middle">Predicted {noun}</text>
         <text className="chart-axis-title" transform={`translate(18 ${margin.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">Observed {noun}</text>
       </svg>
       <DoseClassLegend drugNames={result.data.drugNames} />
-      <div className="plot-legend"><span><i className="identity-swatch" />Identity: slope 1, intercept 0</span>{regression && <span><i className="regression-swatch" />Observed-on-predicted regression</span>}<span><i className="censored-swatch">{scale === "effect" ? "↑" : "↓"}</i>{scale === "effect" ? <>Censored: observed E ≥ E<sub>L</sub></> : <>Censored: observed absorbance ≤ L</>}</span></div>
+      <div className="plot-legend"><span><i className="identity-swatch" />Identity: slope 1, intercept 0</span>{regression && <span><i className="regression-swatch" />Observed-on-predicted regression</span>}<span><i className="censored-swatch">{scale === "effect" ? "↑" : "↓"}</i>{scale === "effect" ? <>Censored: observed E ≥ E<sub>L</sub></> : <>Censored: observed count ≤ L</>}</span></div>
       {regression ? <div className="fit-statistics"><span>n = <strong>{regression.observations}</strong></span><span>Slope = <strong>{format(regression.slope)}</strong></span><span>Intercept = <strong>{format(regression.intercept)}</strong></span><span>R² = <strong>{format(regression.rSquared)}</strong></span><span>RMSE = <strong>{format(regression.rootMeanSquaredError)}</strong></span></div> : <p className="help-text">Regression statistics require at least two uncensored predictions with different observed effects.</p>}
       {result.unpredictedCount > 0 && <div className="mapping-status warning">No finite Equation 2 root was found for {result.unpredictedCount} well{result.unpredictedCount === 1 ? "" : "s"}; those wells are omitted from this plot.</div>}
     </> : <div className="mapping-status warning">No finite Equation 2 predictions could be generated for this fit.</div>}
@@ -261,7 +306,7 @@ function diagnosticDomain(points: DrusanoDiagnosticPoint[], scale: DrusanoDiagno
 function ResidualDiagnostics({ result, scale }: { result: DrusanoFitResult; scale: DrusanoDiagnosticScale }) {
   const points = result.predictions.map((point) => drusanoDiagnosticPoint(point, scale, result.data.responseCensorLimit))
     .filter((point) => point.residual != null && Number.isFinite(point.residual));
-  const noun = scale === "effect" ? "Normalized effect" : "Absorbance";
+  const noun = scale === "effect" ? "Normalized effect" : "Count";
   if (!points.length) return <section className="drusano-fit-plot"><div><h2>{noun} residual diagnostics</h2><p className="help-text">No uncensored wells with finite reference predictions are available for residual plots.</p></div></section>;
   const residualLimit = Math.max(...points.map((point) => Math.abs(point.residual!)), Number.EPSILON) * 1.08;
   return <section className="residual-diagnostics">
@@ -345,6 +390,32 @@ function doseClass(normalizedDoses: number[]): "drug-1" | "drug-2" | "combinatio
   return "combination";
 }
 
+function ConcentrationInput({ value, onChange }: {
+  value: number | null;
+  onChange: (value: number | null) => void;
+}) {
+  const [text, setText] = useState(value == null ? "" : formatConcentrationInput(value));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    if (!focused) setText(value == null ? "" : formatConcentrationInput(value));
+  }, [focused, value]);
+  return <input
+    type="number"
+    min="0"
+    step="any"
+    value={text}
+    onFocus={() => setFocused(true)}
+    onBlur={() => {
+      setFocused(false);
+      setText(value == null ? "" : formatConcentrationInput(value));
+    }}
+    onChange={(event) => {
+      setText(event.target.value);
+      onChange(nullableNumber(event.target.value));
+    }}
+  />;
+}
+
 export function DrusanoRegimenWorkspace({ fits, regimens, simulations, concentrationValues, setConcentrationValues, simulate }: {
   fits: FitEntry[];
   regimens: RegimenPreview[];
@@ -357,17 +428,15 @@ export function DrusanoRegimenWorkspace({ fits, regimens, simulations, concentra
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!fits.some((entry) => entry.id === selectedId)) setSelectedId(fits[0]?.id ?? "");
-    for (const entry of fits) if (!concentrationValues[entry.id]) {
-      setConcentrationValues(entry.id, entry.fit.data.maxConcentrations.map(() => null));
-    }
   }, [fits, selectedId]);
   const selected = fits.find((entry) => entry.id === selectedId) ?? fits[0];
   if (!selected) return <DrusanoPendingWorkspace stage="regimen" />;
-  const regimen = regimens.find((entry) => entry.id === selected.id);
+  const regimen = regimens.find((entry) => entry.id === selected.baseRegimenId);
   const units = regimen?.concentrationUnits ?? [];
   const entered = concentrationValues[selected.id] ?? selected.fit.data.maxConcentrations.map(() => null);
   const complete = entered.length === 2 && entered.every((value) => value != null && Number.isFinite(value) && value >= 0);
   const storedResult = simulations[selected.id];
+  const pairedSimulation = fits.some((entry) => entry.id !== selected.id && entry.baseRegimenId === selected.baseRegimenId && entry.sampling !== selected.sampling);
   const result = storedResult && storedResult.concentrations.every((value, index) => value === entered[index]) ? storedResult : null;
   const updateConcentration = (index: number, value: number | null) => {
     const next = [...entered];
@@ -388,17 +457,17 @@ export function DrusanoRegimenWorkspace({ fits, regimens, simulations, concentra
 
   return <main className="workspace"><aside className="sidebar">
     <h2>Constant-concentration regimen</h2>
-    <p className="help-text">Enter each constant free concentration in the imported concentration units. A value prepopulates blank fields for the same drug in other regimens; each regimen can then be overridden independently. The simulator divides it by that drug’s maximum tested concentration before evaluating Equation 2.</p>
+    <p className="help-text">Enter each constant free concentration in the imported concentration units. The value for a drug is shared across every regimen containing that drug. The simulator divides it by that drug’s maximum tested concentration before evaluating Equation 2.</p>
     {fits.length > 1 && <RegimenNavigator regimens={fits} selectedId={selected.id} onSelect={setSelectedId} compact label="Fitted regimen" />}
     <section className="drusano-model-settings">
-      {selected.fit.data.drugNames.map((name, index) => <label key={name}>{name} free concentration{units[index] ? ` (${units[index]})` : ""}<input type="number" min="0" step="any" value={entered[index] ?? ""} onChange={(event) => updateConcentration(index, nullableNumber(event.target.value))} /><span className="field-help">Tested maximum: {format(selected.fit.data.maxConcentrations[index])}{units[index] ? ` ${units[index]}` : ""}{entered[index] != null && Number.isFinite(entered[index]) ? ` · ${format(entered[index]! / selected.fit.data.maxConcentrations[index])} × tested maximum` : ""}</span></label>)}
+      {selected.fit.data.drugNames.map((name, index) => <label key={name}>{name} free concentration{units[index] ? ` (${units[index]})` : ""}<ConcentrationInput value={entered[index] ?? null} onChange={(value) => updateConcentration(index, value)} /><span className="field-help">Tested maximum: {format(selected.fit.data.maxConcentrations[index])}{units[index] ? ` ${units[index]}` : ""}{entered[index] != null && Number.isFinite(entered[index]) ? ` · ${format(entered[index]! / selected.fit.data.maxConcentrations[index])} × tested maximum` : ""}</span></label>)}
     </section>
-    <button className="primary-button full-width" disabled={busy || !complete} onClick={run}>{busy ? "Simulating…" : "Simulate 1,000 effects"}</button>
+    <button className="primary-button full-width" disabled={busy || !complete} onClick={run}>{busy ? "Simulating…" : pairedSimulation ? "Simulate both models" : "Simulate 1,000 effects"}</button>
     <div className="side-warning"><strong>Empirical bootstrap simulation:</strong> each effect draw selects one unclustered bootstrap parameter vector with replacement. No additional parameter variance is added around a vector.</div>
   </aside><section className="content-card stage-card">
     <div className="card-heading"><div><h1>Simulation</h1><p>Distribution of dimensionless effect at constant free-drug concentrations.</p></div>{result && <span className="count-badge">{result.simulationCount.toLocaleString()} simulations</span>}</div>
     <div className="stage-content">{result ? <>
-      <div className="mapping-status ready">Simulation complete for {result.drugNames.map((name, index) => `${name} ${format(result.concentrations[index])} (${format(result.normalizedDoses[index])} × tested maximum)`).join(" · ")}.</div>
+      <div className="mapping-status ready">Simulation complete for {result.drugNames.map((name, index) => `${name} ${formatConcentrationInput(result.concentrations[index])} (${format(result.normalizedDoses[index])} × tested maximum)`).join(" · ")}.</div>
       <div className="summary-metrics">
         <div><span>Mean E</span><strong>{format(result.summary.mean)}</strong></div>
         <div><span>SD</span><strong>{format(result.summary.standardDeviation)}</strong></div>
@@ -414,20 +483,100 @@ export function DrusanoRegimenWorkspace({ fits, regimens, simulations, concentra
   </section></main>;
 }
 
+type DrusanoPairedSortKey = "regimen" | "fullMedian" | "limitedMedian" | "difference" | "fullRank" | "limitedRank" | "rankShift";
+type DrusanoSingleSortKey = "rank" | "regimen" | "median" | "mean" | "interval" | "simulations";
+type SortDirection = "asc" | "desc";
+type RankedDrusanoEntry = DrusanoSimulationEntry & { rank: number };
+type DrusanoPairRow = { baseId: string; full?: RankedDrusanoEntry; limited?: RankedDrusanoEntry };
+
 export function DrusanoComparisonWorkspace({ entries, grouping, setGrouping }: { entries: DrusanoSimulationEntry[]; grouping: "organism" | "regimen"; setGrouping: (value: "organism" | "regimen") => void }) {
   const groups = groupAnalysisUnits(entries, grouping);
+  const paired = entries.some((entry) => entry.sampling === "all") && entries.some((entry) => entry.sampling === "micBased");
+  const [pairedSort, setPairedSort] = useState<{ key: DrusanoPairedSortKey; direction: SortDirection }>({ key: "fullRank", direction: "asc" });
+  const [singleSort, setSingleSort] = useState<{ key: DrusanoSingleSortKey; direction: SortDirection }>({ key: "rank", direction: "asc" });
   return <main className="single-workspace"><section className="content-card comparison-card">
-    <div className="card-heading"><div><h1>Drusano regimen comparison</h1><p>Regimens are ranked by median simulated efficacy at the concentrations entered on Simulate.</p></div><span className="count-badge">{entries.length} simulations</span></div>
+    <div className="card-heading"><div><h1>Drusano regimen comparison</h1><p>{paired ? "Full and MIC-based limited models are compared at the same entered concentrations." : "Regimens are ranked by median simulated efficacy at the concentrations entered on Simulate."}</p></div><span className="count-badge">{entries.length} simulations</span></div>
     <div className="comparison-content">
       <label className="compact-setting">Group comparisons by<select value={grouping} onChange={(event) => setGrouping(event.target.value as "organism" | "regimen")}><option value="organism">Organism</option><option value="regimen">Regimen</option></select></label>
-      {groups.map((group) => { const result = compareDrusanoSimulations(group.entries); return <section className="comparison-section" key={group.key}>
+      {groups.map((group) => {
+        const result = compareDrusanoSimulations(group.entries);
+        const full = compareDrusanoSimulations(group.entries.filter((entry) => entry.sampling !== "micBased")).rankings;
+        const limited = compareDrusanoSimulations(group.entries.filter((entry) => entry.sampling === "micBased")).rankings;
+        const pairs = [...new Set(group.entries.map((entry) => entry.baseRegimenId ?? entry.id))].map((baseId): DrusanoPairRow => ({
+          baseId,
+          full: full.find((entry) => (entry.baseRegimenId ?? entry.id) === baseId),
+          limited: limited.find((entry) => (entry.baseRegimenId ?? entry.id) === baseId),
+        })).sort((left, right) => compareDrusanoPairRows(left, right, pairedSort));
+        const sortedRankings = result.rankings.slice().sort((left, right) => compareDrusanoSingleRows(left, right, singleSort));
+        return <section className="comparison-section" key={group.key}>
       <h2>{grouping === "organism" ? "Organism" : "Regimen"}: {group.label}</h2>
-      <div className="result-table-wrap"><table className="result-table ranking-table"><thead><tr><th>Rank</th><th>Regimen</th><th>Median E</th><th>Mean E</th><th>95% interval</th><th>Simulations</th></tr></thead><tbody>
-        {result.rankings.map((entry) => <tr key={entry.id}><td>{entry.rank}</td><td><strong>{entry.label}</strong></td><td>{format(entry.simulation.summary.median)}</td><td>{format(entry.simulation.summary.mean)}</td><td>{format(entry.simulation.summary.percentile2_5)}–{format(entry.simulation.summary.percentile97_5)}</td><td>{entry.simulation.simulationCount.toLocaleString()}</td></tr>)}
-      </tbody></table></div>
+      {paired ? <div className="result-table-wrap"><table className="result-table ranking-table drusano-paired-ranking"><thead><tr><SortableDrusanoHeading label="Regimen" sortKey="regimen" sort={pairedSort} setSort={setPairedSort} /><SortableDrusanoHeading label="Full median E" sortKey="fullMedian" sort={pairedSort} setSort={setPairedSort} /><SortableDrusanoHeading label="LSS median E" sortKey="limitedMedian" sort={pairedSort} setSort={setPairedSort} /><SortableDrusanoHeading label="Difference" sortKey="difference" sort={pairedSort} setSort={setPairedSort} /><SortableDrusanoHeading label="Full rank" sortKey="fullRank" sort={pairedSort} setSort={setPairedSort} /><SortableDrusanoHeading label="LSS rank" sortKey="limitedRank" sort={pairedSort} setSort={setPairedSort} /><SortableDrusanoHeading label="Rank shift" sortKey="rankShift" sort={pairedSort} setSort={setPairedSort} /></tr></thead><tbody>
+        {pairs.map(({ baseId, full: fullEntry, limited: limitedEntry }) => <tr key={baseId}><td><strong>{fullEntry?.baseLabel ?? limitedEntry?.baseLabel ?? fullEntry?.label ?? limitedEntry?.label}</strong></td><td>{fullEntry ? format(fullEntry.simulation.summary.median) : "—"}</td><td>{limitedEntry ? format(limitedEntry.simulation.summary.median) : "—"}</td><td>{fullEntry && limitedEntry ? format(limitedEntry.simulation.summary.median - fullEntry.simulation.summary.median) : "—"}</td><td>{fullEntry?.rank ?? "—"}</td><td>{limitedEntry?.rank ?? "—"}</td><td>{fullEntry && limitedEntry ? limitedEntry.rank - fullEntry.rank : "—"}</td></tr>)}
+      </tbody></table></div> : <div className="result-table-wrap"><table className="result-table ranking-table"><thead><tr><SortableDrusanoHeading label="Rank" sortKey="rank" sort={singleSort} setSort={setSingleSort} /><SortableDrusanoHeading label="Regimen" sortKey="regimen" sort={singleSort} setSort={setSingleSort} /><SortableDrusanoHeading label="Median E" sortKey="median" sort={singleSort} setSort={setSingleSort} /><SortableDrusanoHeading label="Mean E" sortKey="mean" sort={singleSort} setSort={setSingleSort} /><SortableDrusanoHeading label="95% interval" sortKey="interval" sort={singleSort} setSort={setSingleSort} /><SortableDrusanoHeading label="Simulations" sortKey="simulations" sort={singleSort} setSort={setSingleSort} /></tr></thead><tbody>
+          {sortedRankings.map((entry) => <tr key={entry.id}><td>{entry.rank}</td><td><strong>{entry.label}</strong></td><td>{format(entry.simulation.summary.median)}</td><td>{format(entry.simulation.summary.mean)}</td><td>{format(entry.simulation.summary.percentile2_5)}–{format(entry.simulation.summary.percentile97_5)}</td><td>{entry.simulation.simulationCount.toLocaleString()}</td></tr>)}
+        </tbody></table></div>}
       <p className="policy-note">This is a descriptive model-based ranking at the concentrations selected on Simulate. Inferential tests are intentionally omitted because the 1,000 Monte Carlo draws are resamples from fitted bootstrap vectors, not independent biological replicates.</p>
     </section>; })}</div>
   </section></main>;
+}
+
+function SortableDrusanoHeading<Key extends string>({ label, sortKey, sort, setSort }: {
+  label: string;
+  sortKey: Key;
+  sort: { key: Key; direction: SortDirection };
+  setSort: (sort: { key: Key; direction: SortDirection }) => void;
+}) {
+  return <th><span className="sortable-heading"><span>{label}</span><span className="sort-arrows"><button className={sort.key === sortKey && sort.direction === "asc" ? "active" : ""} aria-label={`Sort ${label} ascending`} onClick={() => setSort({ key: sortKey, direction: "asc" })}>▲</button><button className={sort.key === sortKey && sort.direction === "desc" ? "active" : ""} aria-label={`Sort ${label} descending`} onClick={() => setSort({ key: sortKey, direction: "desc" })}>▼</button></span></span></th>;
+}
+
+function compareDrusanoPairRows(left: DrusanoPairRow, right: DrusanoPairRow, sort: { key: DrusanoPairedSortKey; direction: SortDirection }) {
+  const label = (row: DrusanoPairRow) => row.full?.baseLabel ?? row.limited?.baseLabel ?? row.full?.label ?? row.limited?.label ?? "";
+  if (sort.key === "regimen") return directedComparison(label(left).localeCompare(label(right)), sort.direction);
+  const value = (row: DrusanoPairRow): number | null => {
+    const full = row.full;
+    const limited = row.limited;
+    switch (sort.key) {
+      case "fullMedian": return full?.simulation.summary.median ?? null;
+      case "limitedMedian": return limited?.simulation.summary.median ?? null;
+      case "difference": return full && limited ? limited.simulation.summary.median - full.simulation.summary.median : null;
+      case "fullRank": return full?.rank ?? null;
+      case "limitedRank": return limited?.rank ?? null;
+      case "rankShift": return full && limited ? limited.rank - full.rank : null;
+      case "regimen": return null;
+    }
+  };
+  return compareNullableNumbers(value(left), value(right), sort.direction)
+    || label(left).localeCompare(label(right));
+}
+
+function compareDrusanoSingleRows(left: RankedDrusanoEntry, right: RankedDrusanoEntry, sort: { key: DrusanoSingleSortKey; direction: SortDirection }) {
+  if (sort.key === "regimen") return directedComparison(left.label.localeCompare(right.label), sort.direction);
+  if (sort.key === "interval") {
+    const lower = compareNullableNumbers(left.simulation.summary.percentile2_5, right.simulation.summary.percentile2_5, sort.direction);
+    return lower || directedComparison(left.simulation.summary.percentile97_5 - right.simulation.summary.percentile97_5, sort.direction) || left.label.localeCompare(right.label);
+  }
+  const value = (row: RankedDrusanoEntry) => {
+    switch (sort.key) {
+      case "rank": return row.rank;
+      case "median": return row.simulation.summary.median;
+      case "mean": return row.simulation.summary.mean;
+      case "simulations": return row.simulation.simulationCount;
+      case "regimen":
+      case "interval": return null;
+    }
+  };
+  return compareNullableNumbers(value(left), value(right), sort.direction) || left.label.localeCompare(right.label);
+}
+
+function compareNullableNumbers(left: number | null | undefined, right: number | null | undefined, direction: SortDirection) {
+  if (left == null && right == null) return 0;
+  if (left == null) return 1;
+  if (right == null) return -1;
+  return directedComparison(left - right, direction);
+}
+
+function directedComparison(value: number, direction: SortDirection) {
+  return direction === "asc" ? value : -value;
 }
 
 function EffectDensityPlot({ result }: { result: DrusanoRegimenSimulationResult }) {

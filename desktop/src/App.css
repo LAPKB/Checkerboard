@@ -149,6 +149,7 @@ input:focus, select:focus { outline: 2px solid rgba(35,87,137,.2); border-color:
 .range-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .help-text, .file-path { color: #667582; font-size: .8rem; line-height: 1.4; }
 .field-help { color: #667582; font-size: .76rem; font-weight: 400; line-height: 1.35; }
+.table-note { display: block; margin-top: 3px; color: #667582; font-size: .72rem; font-weight: 400; }
 .od-display-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 10px; margin-bottom: 12px; }
 .od-display-controls label { margin-bottom: 4px; }
 .od-display-controls > .field-help { grid-column: 1 / -1; }
@@ -217,6 +218,8 @@ h1 { margin: 0 0 4px; font-size: 1.05rem; }
 .radio-field legend { padding: 0 5px; color: #334150; font-size: .82rem; font-weight: 700; }
 .radio-field label { display: flex; grid-auto-flow: column; align-items: center; gap: 6px; margin: 0; }
 .radio-field input { width: 16px; min-height: 16px; margin: 0; accent-color: #235789; }
+.sampling-mode-field { flex-direction: column; gap: 8px; }
+.sampling-mode-field label { align-items: flex-start; }
 .calibration-editor { margin: 14px 0; padding: 12px; border: 1px solid #d5e0e7; border-radius: 7px; background: #f8fafb; }
 .calibration-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 7px; margin-top: 7px; }
 .calibration-row .secondary-button { min-width: 76px; }
@@ -355,6 +358,10 @@ td.antagonistic { color: #a02d2d; font-weight: 700; }
 .ranking-table th:nth-child(2), .ranking-table td:nth-child(2) { text-align: left; }
 .sortable-heading { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; }
 .ranking-table th:nth-child(2) .sortable-heading { justify-content: flex-start; }
+.ranking-table.drusano-paired-ranking th:first-child, .ranking-table.drusano-paired-ranking td:first-child { text-align: left; }
+.ranking-table.drusano-paired-ranking th:nth-child(2), .ranking-table.drusano-paired-ranking td:nth-child(2) { text-align: right; }
+.ranking-table.drusano-paired-ranking th:first-child .sortable-heading { justify-content: flex-start; }
+.ranking-table.drusano-paired-ranking th:nth-child(2) .sortable-heading { justify-content: flex-end; }
 .sort-arrows { display: inline-grid; gap: 0; }
 .sort-arrows button { width: 17px; height: 13px; padding: 0; border: 0; color: rgba(255,255,255,.45); background: transparent; font-size: .58rem; line-height: 1; }
 .sort-arrows button:hover { color: white; }

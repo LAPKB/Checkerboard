@@ -3,6 +3,203 @@ use thiserror::Error;
 
 use crate::AssayInput;
 
+const LIMITED_SAMPLING_COORDINATE_TOLERANCE: f64 = 0.1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrusanoSamplingLocation {
+    pub concentrations: Vec<f64>,
+    pub mic_values: Vec<f64>,
+    pub matched_well_count: usize,
+    pub maximum_pair: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrusanoSamplingSummary {
+    pub total_well_count: usize,
+    pub selected_well_count: usize,
+    pub control_well_count: usize,
+    pub single_agent_well_count: usize,
+    pub combination_well_count: usize,
+    pub selected_well_indices: Vec<usize>,
+    pub required_location_count: usize,
+    pub matched_location_count: usize,
+    pub locations: Vec<DrusanoSamplingLocation>,
+}
+
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum DrusanoSamplingError {
+    #[error("MIC-based limited sampling requires exactly two drugs and two finite, positive MIC values.")]
+    InvalidMics,
+    #[error("MIC-based limited sampling requires a finite, positive tested maximum for each drug.")]
+    InvalidMaximumConcentrations,
+    #[error("MIC_A and MIC_B must form finite, positive pairs. Blank MIC rows require another imported pair in that regimen or a completed MIC-tab fallback pair.")]
+    InvalidRowMics,
+}
+
+fn nearest_sampling_location(assay: &AssayInput, target: &[f64]) -> Option<Vec<f64>> {
+    let nearest = assay
+        .rows
+        .iter()
+        .filter(|row| row.concentrations.iter().all(|value| *value > 0.0))
+        .min_by(|left, right| {
+            let left_differences = left.concentrations.iter().zip(target).map(|(observed, required)| (observed - required).abs()).collect::<Vec<_>>();
+            let right_differences = right.concentrations.iter().zip(target).map(|(observed, required)| (observed - required).abs()).collect::<Vec<_>>();
+            let left_maximum = left_differences.iter().copied().fold(0.0, f64::max);
+            let right_maximum = right_differences.iter().copied().fold(0.0, f64::max);
+            left_maximum
+                .total_cmp(&right_maximum)
+                .then_with(|| left_differences.iter().sum::<f64>().total_cmp(&right_differences.iter().sum::<f64>()))
+        })?;
+    nearest
+        .concentrations
+        .iter()
+        .zip(target)
+        .all(|(observed, required)| {
+            (observed - required).abs()
+                <= LIMITED_SAMPLING_COORDINATE_TOLERANCE + f64::EPSILON
+        })
+        .then(|| nearest.concentrations.clone())
+}
+
+fn select_mic_limited_assay_single(
+    assay: &AssayInput,
+    mic_values: &[f64],
+) -> Result<(AssayInput, DrusanoSamplingSummary), DrusanoSamplingError> {
+    if assay.drug_names.len() != 2
+        || mic_values.len() != 2
+        || mic_values.iter().any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(DrusanoSamplingError::InvalidMics);
+    }
+    let maxima = (0..2)
+        .map(|index| assay.rows.iter().map(|row| row.concentrations[index]).fold(f64::NEG_INFINITY, f64::max))
+        .collect::<Vec<_>>();
+    if maxima.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        return Err(DrusanoSamplingError::InvalidMaximumConcentrations);
+    }
+
+    let mut requested = Vec::<(Vec<f64>, bool)>::new();
+    for first in [0.25, 1.0, 4.0] {
+        for second in [0.25, 1.0, 4.0] {
+            requested.push((vec![first * mic_values[0], second * mic_values[1]], false));
+        }
+    }
+    if let Some(index) = requested.iter().position(|(location, _)| location == &maxima) {
+        requested[index].1 = true;
+    } else {
+        requested.push((maxima.clone(), true));
+    }
+
+    let resolved_locations = requested
+        .iter()
+        .map(|(location, maximum_pair)| {
+            (location.clone(), nearest_sampling_location(assay, location), *maximum_pair)
+        })
+        .collect::<Vec<_>>();
+    let locations = resolved_locations
+        .iter()
+        .map(|(location, matched_location, maximum_pair)| DrusanoSamplingLocation {
+            concentrations: location.clone(),
+            mic_values: mic_values.to_vec(),
+            matched_well_count: matched_location.as_ref().map_or(0, |matched| {
+                assay.rows.iter().filter(|row| row.concentrations == *matched).count()
+            }),
+            maximum_pair: *maximum_pair,
+        })
+        .collect::<Vec<_>>();
+    let selected_well_indices = assay.rows.iter().enumerate().filter_map(|(index, row)| {
+        let positive = row.concentrations.iter().filter(|value| **value > 0.0).count();
+        (positive <= 1 || resolved_locations.iter().any(|(_, matched_location, _)| {
+            matched_location.as_ref().is_some_and(|matched| row.concentrations == *matched)
+        }))
+            .then_some(index + 1)
+    }).collect::<Vec<_>>();
+    let selected_rows = selected_well_indices.iter().map(|index| assay.rows[*index - 1].clone()).collect::<Vec<_>>();
+    let control_well_count = selected_rows.iter().filter(|row| row.concentrations.iter().all(|value| *value == 0.0)).count();
+    let single_agent_well_count = selected_rows.iter().filter(|row| row.concentrations.iter().filter(|value| **value > 0.0).count() == 1).count();
+    let combination_well_count = selected_rows.len() - control_well_count - single_agent_well_count;
+    let matched_location_count = locations.iter().filter(|location| location.matched_well_count > 0).count();
+    let summary = DrusanoSamplingSummary {
+        total_well_count: assay.rows.len(),
+        selected_well_count: selected_rows.len(),
+        control_well_count,
+        single_agent_well_count,
+        combination_well_count,
+        selected_well_indices,
+        required_location_count: locations.len(),
+        matched_location_count,
+        locations,
+    };
+    Ok((AssayInput { drug_names: assay.drug_names.clone(), rows: selected_rows }, summary))
+}
+
+pub fn select_mic_limited_assay(
+    assay: &AssayInput,
+    mic_values: &[f64],
+) -> Result<(AssayInput, DrusanoSamplingSummary), DrusanoSamplingError> {
+    select_mic_limited_assay_single(assay, mic_values)
+}
+
+pub fn select_mic_limited_assay_by_row(
+    assay: &AssayInput,
+    row_mic_values: &[Vec<f64>],
+) -> Result<(AssayInput, DrusanoSamplingSummary), DrusanoSamplingError> {
+    if row_mic_values.len() != assay.rows.len()
+        || row_mic_values.iter().any(|values| {
+            values.len() != 2 || values.iter().any(|value| !value.is_finite() || *value <= 0.0)
+        })
+    {
+        return Err(DrusanoSamplingError::InvalidRowMics);
+    }
+    let mut mic_pairs = Vec::<Vec<f64>>::new();
+    for values in row_mic_values {
+        if !mic_pairs.contains(values) {
+            mic_pairs.push(values.clone());
+        }
+    }
+
+    let mut selected_well_indices = Vec::<usize>::new();
+    let mut locations = Vec::<DrusanoSamplingLocation>::new();
+    for mic_values in mic_pairs {
+        let source_indices = row_mic_values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, values)| (values == &mic_values).then_some(index))
+            .collect::<Vec<_>>();
+        let stratum = AssayInput {
+            drug_names: assay.drug_names.clone(),
+            rows: source_indices.iter().map(|index| assay.rows[*index].clone()).collect(),
+        };
+        let (_, summary) = select_mic_limited_assay_single(&stratum, &mic_values)?;
+        selected_well_indices.extend(summary.selected_well_indices.iter().map(|index| source_indices[*index - 1] + 1));
+        locations.extend(summary.locations);
+    }
+    selected_well_indices.sort_unstable();
+    selected_well_indices.dedup();
+    let selected_rows = selected_well_indices
+        .iter()
+        .map(|index| assay.rows[*index - 1].clone())
+        .collect::<Vec<_>>();
+    let control_well_count = selected_rows.iter().filter(|row| row.concentrations.iter().all(|value| *value == 0.0)).count();
+    let single_agent_well_count = selected_rows.iter().filter(|row| row.concentrations.iter().filter(|value| **value > 0.0).count() == 1).count();
+    let combination_well_count = selected_rows.len() - control_well_count - single_agent_well_count;
+    let matched_location_count = locations.iter().filter(|location| location.matched_well_count > 0).count();
+    let summary = DrusanoSamplingSummary {
+        total_well_count: assay.rows.len(),
+        selected_well_count: selected_rows.len(),
+        control_well_count,
+        single_agent_well_count,
+        combination_well_count,
+        selected_well_indices,
+        required_location_count: locations.len(),
+        matched_location_count,
+        locations,
+    };
+    Ok((AssayInput { drug_names: assay.drug_names.clone(), rows: selected_rows }, summary))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DrusanoDataSettings {
@@ -669,5 +866,108 @@ mod tests {
                 .filter(|well| well.censored)
                 .all(|well| well.raw_response <= 1.0)
         );
+    }
+
+    #[test]
+    fn mic_limited_sampling_retains_controls_all_monotherapies_grid_replicates_and_maximum_pair() {
+        let mut rows = vec![
+            AssayRow { concentrations: vec![0.0, 0.0], od: 100.0 },
+            AssayRow { concentrations: vec![0.25, 0.0], od: 80.0 },
+            AssayRow { concentrations: vec![1.0, 0.0], od: 8.0 },
+            AssayRow { concentrations: vec![0.0, 0.5], od: 70.0 },
+            AssayRow { concentrations: vec![0.0, 2.0], od: 5.0 },
+        ];
+        for first in [0.25, 1.0, 4.0] {
+            for second in [0.5, 2.0, 8.0] {
+                rows.push(AssayRow { concentrations: vec![first, second], od: 20.0 });
+            }
+        }
+        rows.push(AssayRow { concentrations: vec![1.0, 2.0], od: 19.0 });
+        rows.push(AssayRow { concentrations: vec![0.3, 0.4], od: 18.0 });
+        rows.push(AssayRow { concentrations: vec![10.0, 12.0], od: 1.0 });
+        rows.push(AssayRow { concentrations: vec![2.0, 3.0], od: 10.0 });
+        let input = assay(rows);
+
+        let (limited, summary) = select_mic_limited_assay(&input, &[1.0, 2.0]).unwrap();
+
+        assert_eq!(summary.required_location_count, 10);
+        assert_eq!(summary.matched_location_count, 10);
+        assert_eq!(summary.control_well_count, 1);
+        assert_eq!(summary.single_agent_well_count, 4);
+        assert_eq!(summary.combination_well_count, 11);
+        assert_eq!(limited.rows.len(), 16);
+        assert!(!limited.rows.iter().any(|row| row.concentrations == [2.0, 3.0]));
+        assert!(!limited.rows.iter().any(|row| row.concentrations == [0.3, 0.4]));
+        assert_eq!(limited.rows.iter().filter(|row| row.concentrations == [1.0, 2.0]).count(), 2);
+    }
+
+    #[test]
+    fn limited_sampling_uses_the_nearest_absolute_concentrations_and_keeps_replicates() {
+        let mut rows = vec![AssayRow { concentrations: vec![0.0, 0.0], od: 100.0 }];
+        for first in [0.25, 1.0, 4.0] {
+            for second in [0.06, 0.125, 0.5] {
+                rows.push(AssayRow { concentrations: vec![first, second], od: 20.0 });
+            }
+        }
+        rows.push(AssayRow { concentrations: vec![0.25, 0.06], od: 19.0 });
+        let input = assay(rows);
+
+        let (limited, summary) = select_mic_limited_assay(&input, &[1.0, 0.125]).unwrap();
+        let quarter_mic_location = summary
+            .locations
+            .iter()
+            .find(|location| location.concentrations == [0.25, 0.03125])
+            .unwrap();
+
+        assert_eq!(quarter_mic_location.matched_well_count, 2);
+        assert_eq!(summary.matched_location_count, summary.required_location_count);
+        assert_eq!(
+            limited.rows.iter().filter(|row| row.concentrations == [0.25, 0.06]).count(),
+            2
+        );
+    }
+
+    #[test]
+    fn imported_row_mics_keep_replicate_strata_separate_within_a_regimen() {
+        let mut rows = Vec::new();
+        let mut row_mics = Vec::new();
+        for mic_values in [[1.0, 2.0], [2.0, 4.0]] {
+            for first in [0.25, 1.0, 4.0] {
+                for second in [0.25, 1.0, 4.0] {
+                    rows.push(AssayRow {
+                        concentrations: vec![first * mic_values[0], second * mic_values[1]],
+                        od: 20.0,
+                    });
+                    row_mics.push(mic_values.to_vec());
+                }
+            }
+        }
+        let input = assay(rows);
+
+        let (limited, summary) = select_mic_limited_assay_by_row(&input, &row_mics).unwrap();
+
+        assert_eq!(limited.rows.len(), 18);
+        assert_eq!(summary.required_location_count, 18);
+        assert_eq!(summary.matched_location_count, 18);
+        assert!(summary.locations.iter().any(|location| location.mic_values == [1.0, 2.0]));
+        assert!(summary.locations.iter().any(|location| location.mic_values == [2.0, 4.0]));
+    }
+
+    #[test]
+    fn missing_limited_sampling_targets_are_reported_without_preventing_dataset_creation() {
+        let input = assay(vec![
+            AssayRow { concentrations: vec![0.0, 0.0], od: 100.0 },
+            AssayRow { concentrations: vec![1.0, 0.0], od: 60.0 },
+            AssayRow { concentrations: vec![0.0, 2.0], od: 55.0 },
+            AssayRow { concentrations: vec![1.0, 2.0], od: 20.0 },
+        ]);
+        let (limited, summary) = select_mic_limited_assay(&input, &[1.0, 2.0]).unwrap();
+
+        assert!(summary.matched_location_count < summary.required_location_count);
+        let data = build_equation_dataset(
+            &limited,
+            &DrusanoDataSettings { blank_value: 0.0, response_censor_limit: None },
+        ).unwrap();
+        assert_eq!(data.eligible_well_count, 3);
     }
 }
