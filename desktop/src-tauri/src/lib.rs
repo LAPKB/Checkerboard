@@ -21,6 +21,7 @@ pub fn run() {
             commands::analyze_table,
             commands::analyze_diamond,
             commands::suggest_diamond_anchors,
+            commands::check_diamond_layout,
             commands::export_results,
             commands::save_project_snapshot,
             commands::load_project_snapshot,

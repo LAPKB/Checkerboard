@@ -1,7 +1,7 @@
 use checkerboard_core::{
     AnalysisPolicy, AnalysisResult, ColumnMapping, ConcentrationRange, ResponseType, analyze_with_progress,
     assay_from_rows,
-    diamond::{DiamondDoseAnchorSuggestion, DiamondPolicy, DiamondResult},
+    diamond::{DiamondDoseAnchorSuggestion, DiamondLayoutCheck, DiamondPolicy, DiamondResult},
     drusano_greco::{
         DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings,
         DrusanoSamplingSummary, build_equation_dataset, select_mic_limited_assay,
@@ -104,6 +104,32 @@ pub struct SuggestDiamondAnchorsRequest {
     pub organism: Option<String>,
     #[serde(default)]
     pub organism_column: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckDiamondLayoutRequest {
+    pub import: ImportRequest,
+    pub mapping: ColumnMapping,
+    pub dose_anchors: Vec<f64>,
+    pub diagonal_tolerance_log2: f64,
+    pub policy: DiamondPolicy,
+    pub regimen_drug_names: Vec<String>,
+    pub organism: Option<String>,
+    pub organism_column: Option<usize>,
+}
+
+#[tauri::command]
+pub fn check_diamond_layout(request: CheckDiamondLayoutRequest) -> Result<DiamondLayoutCheck, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(&table, &request.regimen_drug_names,
+        request.organism.as_deref(), request.organism_column)?;
+    let assay = assay_from_rows(&rows, &request.mapping)?;
+    let mut check = checkerboard_core::diamond::check_dose_layout(&assay,
+        &request.dose_anchors, request.diagonal_tolerance_log2)?;
+    check.repeat_layout = checkerboard_core::diamond::suggest_repeat_layout_for_policy(&assay,
+        DiamondPolicy { diagonal_tolerance_log2: request.diagonal_tolerance_log2, ..request.policy })?;
+    Ok(check)
 }
 
 fn default_mic_zero_tolerance() -> f64 {

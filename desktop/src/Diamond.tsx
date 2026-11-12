@@ -1,15 +1,177 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import { diamondRankingScore } from "./analysis";
 import { RegimenNavigator } from "./RegimenNavigator";
-import type { DiamondCurve, DiamondIsoboleDiagnostic, DiamondRegimen, DiamondResult, InputSettings } from "./types";
+import type { ColumnMapping, DiamondCurve, DiamondIsoboleDiagnostic, DiamondLayoutCheck, DiamondPolicy, DiamondRegimen, DiamondRepeatLayout, DiamondResult, ImportRequest, InputSettings } from "./types";
 
 type Progress = { completedIterations: number; totalIterations: number; regimenLabel?: string };
+
+export type DiamondLayoutRequest = {
+  label: string;
+  units: string[];
+  request: {
+    import: ImportRequest;
+    mapping: ColumnMapping;
+    doseAnchors: number[];
+    diagonalToleranceLog2: number;
+    policy: DiamondPolicy;
+    regimenDrugNames: string[];
+    organism: string | null;
+    organismColumn: number | null;
+  };
+};
+
+export function DiamondAnchorExplanation() {
+  return <div className="method-card"><strong>What do dose anchors mean?</strong>
+    <p>An anchor is a reference concentration, in that drug’s imported units. Concentration ÷ assigned anchor gives the dose in anchor units. Combination wells belong to the diagonal when every active drug has approximately the same dose in anchor units.</p>
+    <p><strong>Closest Anchor:</strong> the tested single-agent concentration nearest the fitted IC50 on a log₂ scale. It may not match the ratio used to prepare the combinations, and its measured inhibition need not be 50%.</p>
+    <p><strong>Maximum Dose Retention:</strong> the anchor concentration from the measured combination direction that retains the most dose levels at the current tolerance. Read the drug values together as one anchor set; this is a layout reference, not an IC50 estimate.</p>
+    <p><strong>Assigned dose anchor:</strong> the editable value actually used to select combination wells and express dose. Choose assigned anchors whose ratios match the experimental dilution direction. For example, anchors of 500 µM and 0.0625 µg/mL accept combinations of 250 µM + 0.03125 µg/mL: each is 0.5 anchor units.</p>
+    <p>A layout-compatible anchor is not a new IC50 estimate or MIC. Multiplying all anchors by the same positive factor preserves the diagonal; changing their ratios selects a different direction and can change the fitted result. Check each regimen below before calculating.</p>
+  </div>;
+}
+
+export type DiamondLayoutResult = { check?: DiamondLayoutCheck; error?: string };
+
+export function diamondRetentionAssignments(
+  assignments: { key: string; organism: string | null; name: string }[],
+  checks: DiamondLayoutRequest[], results: DiamondLayoutResult[] | null,
+): { values: Record<string, number>; conflict: boolean; complete: boolean } {
+  const values: Record<string, number> = {};
+  let conflict = false;
+  for (const assignment of assignments) {
+    const candidates = checks.flatMap((entry, i) => {
+      if (entry.request.organism !== assignment.organism) return [];
+      const index = entry.request.regimenDrugNames.indexOf(assignment.name);
+      const value = index < 0 ? null : results?.[i]?.check?.compatibleAnchors?.[index];
+      return value != null && Number.isFinite(value) && value > 0 ? [value] : [];
+    });
+    const matches = checks.filter((entry) => entry.request.organism === assignment.organism
+      && entry.request.regimenDrugNames.includes(assignment.name)).length;
+    if (candidates.some((value) => value !== candidates[0])) conflict = true;
+    if (matches > 0 && candidates.length === matches && candidates.every((value) => value === candidates[0])) {
+      values[assignment.key] = candidates[0];
+    }
+  }
+  return { values, conflict, complete: !conflict && assignments.length > 0 && Object.keys(values).length === assignments.length };
+}
+
+export function useDiamondLayoutChecks(checks: DiamondLayoutRequest[]) {
+  const key = JSON.stringify(checks);
+  const [state, setState] = useState<{ key: string; results: DiamondLayoutResult[] } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const requests = JSON.parse(key) as DiamondLayoutRequest[];
+    const timer = window.setTimeout(() => {
+      void Promise.all(requests.map(async ({ request }) => {
+        try { return { check: await invoke<DiamondLayoutCheck>("check_diamond_layout", { request }) }; }
+        catch (reason) { return { error: typeof reason === "object" && reason && "message" in reason ? String(reason.message) : String(reason) }; }
+      })).then((results) => { if (!cancelled) setState({ key, results }); });
+    }, 200);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [key]);
+  return state?.key === key ? state.results : null;
+}
+
+export function DiamondAnchorGuidance({ checks, results }: { checks: DiamondLayoutRequest[]; results: DiamondLayoutResult[] | null }) {
+  if (!checks.length) return <p className="help-text">Enter positive assigned anchors for all drugs to check combination coverage.</p>;
+  if (!results) return <p className="help-text" role="status">Checking assigned anchors against the measured combination doses…</p>;
+  return <div className="diamond-anchor-guidance" aria-live="polite">{checks.map((entry, i) => {
+    const { check, error } = results[i];
+    if (!check) return <div className="side-warning" key={i}><strong>{entry.label}</strong><p>Could not check dose layout: {error}</p></div>;
+    const insufficient = check.retainedLocations < 3;
+    return <div className={insufficient ? "side-warning" : "method-card"} key={i}>
+      <strong>{entry.label}: {check.retainedLocations} of {check.combinationLocations} combination dose levels retained</strong>
+      <p>At tolerance {entry.request.diagonalToleranceLog2} log₂, the assigned anchors exclude {check.combinationLocations - check.retainedLocations} full-combination dose levels. Replicates count as one level; controls and single agents are checked separately during analysis.</p>
+      {insufficient && <><p>{check.retainedLocations === 0 && check.combinationLocations > 0 ? "All measured full-combination doses would be excluded. " : ""}DiaMOND requires at least three retained full-combination dose levels.</p>
+        {check.compatibleAnchors && check.compatibleLocations >= 3 ? <><p><strong>Layout-compatible example — enter these as the assigned dose anchors:</strong></p>
+          <ul>{check.compatibleAnchors.map((anchor, index) => <li key={index}>{entry.request.regimenDrugNames[index]}: <strong>{anchor}</strong> {entry.units[index]}</li>)}</ul>
+          <p>This measured concentration ratio retains {check.compatibleLocations} combination dose levels at the current tolerance. Review it against the plate preparation, then update the assignments on Dose anchors. Shared organism–drug assignments also affect other selected regimens; recheck their coverage.</p></>
+          : <p>No measured full-combination direction retains three levels at this tolerance. Check the concentration mapping, experimental dilution ratios, and available dose levels. Increasing tolerance can combine different directions; use it only for justified dispensing or rounding differences.</p>}
+      </>}
+    </div>;
+  })}</div>;
+}
+
+export function DiamondRetentionCell({ organism, drug, checks, results }: {
+  organism: string | null; drug: string; checks: DiamondLayoutRequest[]; results: DiamondLayoutResult[] | null;
+}) {
+  const matching = checks.map((entry, i) => ({ entry, result: results?.[i] }))
+    .filter(({ entry }) => (entry.request.organism ?? null) === organism && entry.request.regimenDrugNames.includes(drug));
+  if (!matching.length) return <>—</>;
+  if (!results) return <>Checking…</>;
+  return <>{matching.map(({ entry, result }, i) => {
+    const check = result?.check;
+    const index = entry.request.regimenDrugNames.indexOf(drug);
+    const anchor = check?.compatibleAnchors?.[index];
+    return <div key={i}>
+      <strong>{anchor == null ? "—" : anchor.toLocaleString(undefined, { maximumSignificantDigits: 8 })}</strong>
+      <small className="table-note">{matching.length > 1 ? `${entry.label}: ` : ""}{check ? `${check.compatibleLocations}/${check.combinationLocations} full-combination levels` : result?.error ?? "Layout unavailable"}</small>
+      {check && <small className="table-note">Assigned: {check.retainedLocations}/{check.combinationLocations} retained</small>}
+    </div>;
+  })}</>;
+}
+
+export function DiamondRepeatLayouts({ checks, results }: { checks: DiamondLayoutRequest[]; results: DiamondLayoutResult[] | null }) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const keyOf = (entry: DiamondLayoutRequest) => JSON.stringify([entry.request.organism, entry.request.regimenDrugNames]);
+  const selectedIndex = Math.max(0, checks.findIndex((entry) => keyOf(entry) === selectedKey));
+  return <section className="diamond-repeat-layout"><h2>Suggested layout for a repeat experiment</h2>
+    <p>This IC50-centered plan targets equal normalized doses and retention of every planned combination. It is a starting design, not a guarantee of the best biological precision. It replaces the dilution direction for a new experiment; it does not change the imported measurements.</p>
+    {!results && <p role="status">Waiting for fitted IC50 values and dose-layout checks…</p>}
+    {checks.length > 1 && <div className="diamond-layout-selector"><RegimenNavigator
+      regimens={checks.map((entry) => ({ id: keyOf(entry), label: entry.label }))}
+      selectedId={keyOf(checks[selectedIndex])} onSelect={setSelectedKey} label="Suggested layout" />
+      <span className="help-text">Layout {selectedIndex + 1} of {checks.length}</span></div>}
+    {checks.slice(selectedIndex, selectedIndex + 1).map((entry) => {
+      const result = results?.[selectedIndex];
+      const plan = result?.check?.repeatLayout;
+      return <section className="diamond-repeat-regimen" key={keyOf(entry)}><h3>{entry.label}</h3>
+        {!plan ? <p className="help-text">{result?.error ?? (results ? "A complete layout needs a finite positive fitted IC50 for every drug and positive concentrations within the supported numeric range. Confirm the single-agent curves first." : "Preparing layout…")}</p>
+          : <>
+            <p><strong>Use these assigned anchors for the repeat:</strong> {entry.request.regimenDrugNames.map((name, index) => `${name}: ${plan.anchors[index].toLocaleString(undefined, { maximumSignificantDigits: 8 })} ${entry.units[index] ?? ""}`).join("; ")}. These follow the rounded dilution ratio and may differ from the fitted IC50 values.</p>
+            <p>Each drug’s highest concentration starts at 16 × fitted IC50. Values from 1 to below 10 round to the nearest integer; values of 10 or more round to the nearest multiple of 5. Values below 1 retain decimal precision with one significant digit. The eight lower concentrations are successive twofold dilutions. The grid axes show final well concentrations, including zero for the control and single-agent row and column.</p>
+            <p><strong>{plan.retainedLocations}/{plan.combinationLocations} planned combination levels retained</strong> at tolerance {entry.request.diagonalToleranceLog2} log₂. Include an untreated control and replicate the controls and every dose level to estimate uncertainty. Verify stock availability and solubility before plate preparation.</p>
+            {plan.warnings.map((warning) => <p className="side-warning" key={warning}>{warning}</p>)}
+            <DiamondRepeatGrid plan={plan} drugNames={entry.request.regimenDrugNames} units={entry.units} />
+            <p className="help-text">Italic ICxx labels show the fitted single-agent inhibition percentage at that concentration, rounded to one decimal place. For example, IC50 means approximately 50% inhibition. These are model estimates, not observed responses; rounded planning anchors need not be IC50.</p>
+            <p className="help-text">Control = no drug; Single = one drug; Mix = planned combination; — = unused intersection. Measure the marked wells, including replicates. Filling every intersection would add off-diagonal combinations. For three drugs, additional grids show the third-drug concentrations. Confirm that the measured response transition falls within the planned range.</p>
+            <p className="help-text">Method basis: <a href="https://pubmed.ncbi.nlm.nih.gov/29026882/" target="_blank" rel="noreferrer">Cokol et al., 2017 (DiaMOND)</a>. The twofold range is this app’s planning choice.</p>
+          </>}
+      </section>;
+    })}
+  </section>;
+}
+
+export function DiamondRepeatGrid({ plan, drugNames, units }: { plan: DiamondRepeatLayout; drugNames: string[]; units: string[] }) {
+  const number = (value: number) => value.toLocaleString(undefined, { maximumSignificantDigits: 10 });
+  const doseHeader = (drug: number, index: number) => {
+    const level = plan.inhibitionLevels[drug]?.[index];
+    return <>{number(plan.dilutions[drug][index])}{level != null && <em className="diamond-dose-ic" title={`Fitted single-agent inhibition: ${level.toLocaleString(undefined, { maximumFractionDigits: 3 })}%`}>IC{level.toLocaleString(undefined, { maximumFractionDigits: 1 })}</em>}</>;
+  };
+  const planned = new Set(plan.locations.map((location) => location.concentrations.join("|")));
+  const slices = plan.dilutions[2] ?? [0];
+  const grid = (third: number) => <div className="result-table-wrap"><table className="diamond-repeat-grid">
+    <caption>{drugNames[0]} ({units[0] || "imported units"}) →{drugNames.length === 3 ? ` · ${drugNames[2]} = ${number(third)} ${units[2] ?? ""}` : ""}</caption>
+    <thead><tr><th scope="col">{drugNames[1]} ({units[1] || "imported units"}) ↓</th>{plan.dilutions[0].map((dose, index) => <th scope="col" key={dose}>{doseHeader(0, index)}</th>)}</tr></thead>
+    <tbody>{plan.dilutions[1].map((y, index) => <tr key={y}><th scope="row">{doseHeader(1, index)}</th>{plan.dilutions[0].map((x) => {
+      const concentrations = drugNames.length === 3 ? [x, y, third] : [x, y];
+      const active = concentrations.filter((c) => c > 0).length;
+      const included = active === 0 || planned.has(concentrations.join("|"));
+      const label = !included ? "—" : active === 0 ? "Control" : active === 1 ? "Single" : "Mix";
+      return <td key={x} className={!included ? "unused" : active === 0 ? "control" : active === 1 ? "single" : "combination"}
+        aria-label={`${drugNames.map((name, i) => `${name} ${number(concentrations[i])} ${units[i] ?? ""}`).join(", ")}: ${included ? label : "unused"}`}>{label}</td>;
+    })}</tr>)}</tbody>
+  </table></div>;
+  return <div className="diamond-repeat-grids">{grid(slices[0])}{slices.slice(1).map((third) => <details key={third}><summary>{drugNames[2]} = {number(third)} {units[2]}</summary>{grid(third)}</details>)}</div>;
+}
 
 export function DiamondSetupWorkspace({
   inputType, responseCensorLimit, setResponseCensorLimit, bootstrapIterations,
   setBootstrapIterations, randomSeed, setRandomSeed, diagonalToleranceLog2,
   setDiagonalToleranceLog2, calculate, busy, progress, settingsComplete,
+  anchorGuidance,
 }: {
   inputType: InputSettings["inputType"];
   responseCensorLimit: number | null;
@@ -24,6 +186,7 @@ export function DiamondSetupWorkspace({
   busy: boolean;
   progress: Progress | null;
   settingsComplete: boolean;
+  anchorGuidance: ReactNode;
 }) {
   return <main className="workspace analysis-setup-workspace"><aside className="sidebar">
     {(inputType === "absorbance" || inputType === "count") && <label>Response censor limit
@@ -38,7 +201,8 @@ export function DiamondSetupWorkspace({
   </aside><section className="content-card stage-card">
     <div className="card-heading"><div><h1>DiaMOND analysis</h1><p>Fit the single-agent and equipotent combination diagonals, then calculate Loewe FIC50 and FIC90. Off-diagonal wells do not enter the primary fits; complete checkerboards additionally receive full-isobole diagnostics.</p></div></div>
     <div className="stage-content">
-      <div className="method-card"><strong>Dose layout requirement</strong><p>The assigned anchors default to the tested concentrations nearest the fitted single-agent IC50 values. At each combination dose, concentration ÷ anchor should be equal for every active drug. For example, a two-drug total dose of 1 contains 0.5 anchor units of each drug.</p></div>
+      <DiamondAnchorExplanation />
+      {anchorGuidance}
       <div className="method-card"><strong>Normalized response scale</strong><p>Control-normalized viability may be supplied as a fraction or percentage. DiaMOND detects the scale from the all-zero drug controls: a mean near 1 is fractional and a mean near 100 is percentage. Response censoring is not applied to normalized viability; it is used only for raw instrument measurements.</p></div>
       <button className="success-button calculate-button" disabled={busy || !settingsComplete} onClick={calculate}>{busy ? "Calculating…" : "Calculate DiaMOND"}</button>
       {progress && <ProgressBar progress={progress} />}

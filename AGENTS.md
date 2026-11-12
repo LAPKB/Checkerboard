@@ -66,8 +66,13 @@ state the methodological effect clearly in the handoff.
 - Prefer small, explicit state transitions over hidden mutation. An analysis
   shown in the UI must correspond to the displayed policy and MIC values.
 - Do not silently impute missing assay locations or alter experimental values.
-- Update all displayed/package version fields together only when preparing a
-  versioned feature or release.
+- For every completed app change, increment the patch version and add its
+  user-facing notes to `desktop/src/version-history.json`. From `desktop/`, run
+  `npm run version:change -- "Describe the change"` once per change. Keep
+  package.json, package-lock.json, Tauri config, Cargo.toml and Cargo.lock in
+  sync. The header and instructions read the version from package.json.
+- Keep previous version-history entries; the header version button opens the
+  history popup. Do not invent version numbers for changes never versioned.
 
 ## Validation
 

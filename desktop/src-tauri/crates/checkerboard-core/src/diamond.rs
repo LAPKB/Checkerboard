@@ -145,6 +145,167 @@ pub struct DiamondDoseAnchorSuggestion {
     pub suggested_anchor: Option<f64>,
     pub mean_inhibition_at_anchor: Option<f64>,
     pub single_agent_levels: usize,
+    #[serde(skip)]
+    pub fit: Option<DiamondHillFit>,
+}
+
+/// Coverage counts distinct measured concentration locations, not replicates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiamondLayoutCheck {
+    pub combination_locations: usize,
+    pub retained_locations: usize,
+    pub compatible_anchors: Option<Vec<f64>>,
+    pub compatible_locations: usize,
+    pub repeat_layout: Option<DiamondRepeatLayout>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiamondRepeatLayout {
+    pub anchors: Vec<f64>,
+    pub dilutions: Vec<Vec<f64>>,
+    pub inhibition_levels: Vec<Vec<Option<f64>>>,
+    pub locations: Vec<DiamondRepeatLocation>,
+    pub combination_locations: usize,
+    pub retained_locations: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiamondRepeatLocation {
+    pub drug_indices: Vec<usize>,
+    pub dilution_factor: f64,
+    pub concentrations: Vec<f64>,
+}
+
+fn round_repeat_maximum(maximum: f64) -> f64 {
+    let step = if maximum < 1.0 { 10.0f64.powf(maximum.log10().floor()) }
+        else if maximum < 10.0 { 1.0 } else { 5.0 };
+    (maximum / step).round() * step
+}
+
+/// A planning heuristic: round a maximum near 16 times IC50, then use
+/// nine common twofold levels for singles and all combination subsets.
+pub fn suggest_repeat_layout(input: &AssayInput, ic50s: &[Option<f64>], tolerance: f64)
+    -> Option<DiamondRepeatLayout>
+{
+    if validate_input(input).is_err() || ic50s.len() != input.drug_names.len() || !tolerance.is_finite() || tolerance < 0.0 {
+        return None;
+    }
+    let fitted = ic50s.iter().copied().collect::<Option<Vec<_>>>()?;
+    if fitted.iter().any(|a| !a.is_finite() || *a <= 0.0) { return None; }
+    let mut warnings = Vec::new();
+    for (index, anchor) in fitted.iter().enumerate() {
+        let singles = input.rows.iter().filter(|row| row.concentrations[index] > 0.0
+            && row.concentrations.iter().enumerate().all(|(i, c)| i == index || c.abs() < 1e-12));
+        let (low, high) = singles.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), row|
+            (low.min(row.concentrations[index]), high.max(row.concentrations[index])));
+        if *anchor < low || *anchor > high {
+            warnings.push(format!("{}: fitted IC50 is outside the tested single-agent range. This layout is provisional; confirm the IC50 with a single-agent range-finding experiment before preparing combinations.", input.drug_names[index]));
+        }
+    }
+    let maxima = fitted.iter().map(|ic50| round_repeat_maximum(ic50 * 16.0)).collect::<Vec<_>>();
+    if maxima.iter().any(|c| !c.is_finite() || *c <= 0.0) { return None; }
+    let anchors = maxima.iter().map(|maximum| maximum / 16.0).collect::<Vec<_>>();
+    let dilutions = maxima.iter().map(|maximum| std::iter::once(0.0)
+        .chain((0..9).map(|i| maximum / 2.0f64.powi(8 - i))).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let mut locations = Vec::new();
+    for mask in 1usize..(1 << anchors.len()) {
+        let indices = (0..anchors.len()).filter(|i| mask & (1 << i) != 0).collect::<Vec<_>>();
+        for exponent in -4..=4 {
+            let factor = 2.0f64.powi(exponent);
+            let concentrations = anchors.iter().enumerate().map(|(i, a)|
+                if indices.contains(&i) { a * factor } else { 0.0 }).collect::<Vec<_>>();
+            if concentrations.iter().enumerate().any(|(i, c)| indices.contains(&i) && (!c.is_finite() || *c < 1e-12)) {
+                return None;
+            }
+            locations.push(DiamondRepeatLocation { drug_indices: indices.clone(), dilution_factor: factor, concentrations });
+        }
+    }
+    let combination_locations = locations.iter().filter(|l| l.drug_indices.len() > 1).count();
+    let retained_locations = locations.iter().filter(|l| l.drug_indices.len() > 1
+        && on_diagonal(&l.concentrations, &anchors, tolerance)).count();
+    if retained_locations != combination_locations {
+        warnings.push("The current diagonal tolerance excludes some planned doses due to numerical rounding. Use a small positive tolerance and recheck the prepared concentrations.".into());
+    }
+    let inhibition_levels = dilutions.iter().map(|doses| vec![None; doses.len()]).collect();
+    Some(DiamondRepeatLayout { anchors, dilutions, inhibition_levels, locations, combination_locations, retained_locations, warnings })
+}
+
+/// Labels use the full fitted single-agent Hill curve on the absolute dose
+/// scale, not the rounded planning anchors or an assumed Hill slope of one.
+pub fn suggest_repeat_layout_for_policy(input: &AssayInput, policy: DiamondPolicy)
+    -> Result<Option<DiamondRepeatLayout>, DiamondError>
+{
+    let suggestions = suggest_dose_anchors(input, policy)?;
+    let ic50s = suggestions.iter().map(|s| s.fitted_ic50).collect::<Vec<_>>();
+    Ok(suggest_repeat_layout(input, &ic50s, policy.diagonal_tolerance_log2).map(|mut plan| {
+        plan.inhibition_levels = plan.dilutions.iter().zip(&suggestions).map(|(doses, suggestion)| {
+            doses.iter().map(|dose| suggestion.fit.as_ref().and_then(|fit| {
+                let inhibition = if *dose == 0.0 { 0.0 } else {
+                    fit.maximum_inhibition / (1.0 + (fit.ec50 / dose).powf(fit.hill_slope))
+                };
+                inhibition.is_finite().then_some(inhibition)
+            })).collect()
+        }).collect();
+        plan
+    }))
+}
+
+fn on_diagonal(concentrations: &[f64], anchors: &[f64], tolerance: f64) -> bool {
+    let normalized = concentrations.iter().zip(anchors)
+        .filter(|(c, _)| **c > 0.0).map(|(c, a)| c / a);
+    let (low, high) = normalized.fold((f64::INFINITY, f64::NEG_INFINITY),
+        |(low, high), value| (low.min(value), high.max(value)));
+    let outside_tolerance = (high / low).log2() > tolerance;
+    !outside_tolerance
+}
+
+pub fn check_dose_layout(
+    input: &AssayInput, anchors: &[f64], tolerance: f64,
+) -> Result<DiamondLayoutCheck, DiamondError> {
+    validate_input(input)?;
+    if anchors.len() != input.drug_names.len()
+        || anchors.iter().any(|a| !a.is_finite() || *a <= 0.0) {
+        return Err(DiamondError::InvalidDoseAnchors);
+    }
+    if !tolerance.is_finite() || tolerance < 0.0 {
+        return Err(DiamondError::InvalidPolicy);
+    }
+    // Full combinations are required for both two- and three-drug analysis.
+    // Pairwise planes in a three-drug assay remain optional.
+    let mut locations = input.rows.iter()
+        .filter(|row| row.concentrations.iter().all(|c| *c >= 1e-12))
+        .map(|row| row.concentrations.clone()).collect::<Vec<_>>();
+    locations.sort_by(|a, b| a.iter().zip(b).map(|(a,b)| a.total_cmp(b))
+        .find(|order| !order.is_eq()).unwrap_or(std::cmp::Ordering::Equal));
+    locations.dedup();
+    let coverage = |candidate: &[f64]| locations.iter()
+        .filter(|c| on_diagonal(c, candidate, tolerance)).count();
+    let retained_locations = coverage(anchors);
+    // A concrete measured concentration vector defines an available direction.
+    // Maximize coverage, then prefer the example closest to the assigned scale.
+    let distance = |candidate: &[f64]| candidate.iter().zip(anchors)
+        .map(|(c, a)| (c / a).log2().abs()).sum::<f64>();
+    let mut best: Option<(&Vec<f64>, usize)> = None;
+    for candidate in &locations {
+        let count = coverage(candidate);
+        if best.is_none_or(|(previous, previous_count)| count > previous_count
+            || (count == previous_count && distance(candidate) < distance(previous))) {
+            best = Some((candidate, count));
+        }
+    }
+    let (compatible_anchors, compatible_locations) = match best {
+        Some((candidate, count)) => (Some(candidate.clone()), count),
+        _ => (None, 0),
+    };
+    Ok(DiamondLayoutCheck {
+        combination_locations: locations.len(), retained_locations,
+        compatible_anchors, compatible_locations,
+        repeat_layout: None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -303,9 +464,8 @@ pub fn suggest_dose_anchors(
                 .map(|(concentration, values)| (concentration, mean(&values)))
                 .collect::<Vec<_>>();
             series.sort_by(|left, right| left.0.total_cmp(&right.0));
-            let fitted_ic50 = (series.len() >= 3)
-                .then(|| fit_hill(&series).ic50)
-                .flatten();
+            let fit = (series.len() >= 3).then(|| fit_hill(&series));
+            let fitted_ic50 = fit.as_ref().and_then(|fit| fit.ic50);
             let selected = fitted_ic50.and_then(|ic50| {
                 series.iter().min_by(|left, right| {
                     (left.0 / ic50)
@@ -321,6 +481,7 @@ pub fn suggest_dose_anchors(
                 suggested_anchor: selected.map(|value| value.0),
                 mean_inhibition_at_anchor: selected.map(|value| value.1),
                 single_agent_levels: series.len(),
+                fit,
             })
         })
         .collect()
@@ -459,13 +620,7 @@ pub fn analyze(
             continue;
         }
         if indices.len() > 1 {
-            let normalized = indices
-                .iter()
-                .map(|i| location.concentrations[*i] / dose_anchors[*i])
-                .collect::<Vec<_>>();
-            let low = normalized.iter().copied().fold(f64::INFINITY, f64::min);
-            let high = normalized.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            if (high / low).log2() > policy.diagonal_tolerance_log2 {
+            if !on_diagonal(&location.concentrations, dose_anchors, policy.diagonal_tolerance_log2) {
                 excluded += 1;
                 continue;
             }
@@ -1356,6 +1511,150 @@ mod tests {
         assert!((suggestions[1].fitted_ic50.unwrap() - 1.9).abs() < 0.05);
         assert_eq!(suggestions[1].suggested_anchor, Some(2.0));
         assert_eq!(suggestions[0].single_agent_levels, 5);
+    }
+
+    #[test]
+    fn pinned_diamond_workbook_reports_excluded_diagonal_and_usable_anchors() {
+        let mut reader = csv::Reader::from_reader(include_str!(
+            "../../../../../fixtures/diamond-anchor-layout-11-11-26.csv"
+        ).as_bytes());
+        let records = reader.records().map(Result::unwrap).collect::<Vec<_>>();
+        for strain in ["BB-MAB-1", "BB-MAB-4"] {
+            let mut input = AssayInput {
+                drug_names: vec!["DETA NONOate".into(), "CFZ".into()],
+                rows: records.iter().filter(|r| &r[0] == strain).map(|r| AssayRow {
+                    concentrations: vec![r[1].parse().unwrap(), r[2].parse().unwrap()],
+                    od: r[3].parse().unwrap(),
+                }).collect(),
+            };
+            let policy = DiamondPolicy { response_type: ResponseType::RawOd,
+                bootstrap_iterations: 2, ..Default::default() };
+            let suggestions = suggest_dose_anchors(&input, policy).unwrap();
+            let anchors = suggestions.iter()
+                .map(|s| s.suggested_anchor.unwrap()).collect::<Vec<_>>();
+            let plan = suggest_repeat_layout_for_policy(&input, policy).unwrap().unwrap();
+            assert!(plan.inhibition_levels.iter().all(|levels| levels.len() == 10 && levels.iter().all(Option::is_some)));
+            assert_eq!((plan.combination_locations, plan.retained_locations), (9, 9));
+            assert_eq!(plan.locations.len(), 27);
+            assert_eq!(plan.warnings.is_empty(), strain == "BB-MAB-1");
+            let expected_maxima = if strain == "BB-MAB-1" { [540.0, 3.0] } else { [0.2, 1.0] };
+            for (i, maximum) in expected_maxima.iter().enumerate() {
+                assert_eq!(plan.dilutions[i][9], *maximum);
+                assert_eq!(plan.dilutions[i][0], 0.0);
+                for pair in plan.dilutions[i][1..].windows(2) { assert_eq!(pair[1], 2.0 * pair[0]); }
+            }
+            let check = check_dose_layout(&input, &anchors, 0.5).unwrap();
+            assert_eq!((check.combination_locations, check.retained_locations), (7, 0));
+            assert!(matches!(analyze(&input, &anchors, policy, |_, _| {}), Err(DiamondError::MissingCurve(_))));
+            let compatible = check.compatible_anchors.as_ref().unwrap();
+            assert_eq!(check.compatible_locations, 7);
+            assert_eq!(check_dose_layout(&input, compatible, 0.5).unwrap().retained_locations, 7);
+            let result = analyze(&input, compatible, policy, |_, _| {}).unwrap();
+            assert_eq!(result.excluded_off_diagonal_locations, 0);
+            assert_eq!(result.curves.iter().find(|c| c.drug_indices.len() == 2).unwrap().points.len(), 7);
+            let scaled = compatible.iter().map(|a| a * 2.0).collect::<Vec<_>>();
+            assert_eq!(check_dose_layout(&input, &scaled, 0.5).unwrap().retained_locations, 7);
+            input.rows.extend(input.rows.clone());
+            assert_eq!(check_dose_layout(&input, &anchors, 0.5).unwrap(), check);
+        }
+    }
+
+    #[test]
+    fn layout_check_requires_three_full_combination_levels_and_respects_tolerance() {
+        let mut input = AssayInput { drug_names: vec!["A".into(), "B".into(), "C".into()],
+            rows: vec![
+                AssayRow { concentrations: vec![1.0, 1.0, 0.0], od: 50.0 },
+                AssayRow { concentrations: vec![2.0, 2.0, 0.0], od: 25.0 },
+                AssayRow { concentrations: vec![4.0, 4.0, 0.0], od: 10.0 },
+                AssayRow { concentrations: vec![1.0, 2.0, 4.0], od: 50.0 },
+                AssayRow { concentrations: vec![2.0, 4.0, 8.0], od: 25.0 },
+            ] };
+        let check = check_dose_layout(&input, &[1.0; 3], 0.5).unwrap();
+        assert_eq!(check.combination_locations, 2);
+        assert_eq!(check.compatible_locations, 2);
+        input.rows.push(AssayRow { concentrations: vec![4.0, 8.0, 16.0], od: 10.0 });
+        let check = check_dose_layout(&input, &[1.0; 3], 0.5).unwrap();
+        assert_eq!(check.retained_locations, 0);
+        assert_eq!(check.compatible_locations, 3);
+        assert_eq!(check_dose_layout(&input, &[1.0; 3], 2.0).unwrap().retained_locations, 3);
+        assert!(check_dose_layout(&input, &[0.0; 3], 0.5).is_err());
+        assert!(check_dose_layout(&input, &[1.0; 3], f64::NAN).is_err());
+        input.rows.reverse();
+        assert_eq!(check_dose_layout(&input, &[1.0; 3], 0.5).unwrap(), check);
+    }
+
+    #[test]
+    fn repeat_ic_labels_use_single_agent_hill_slopes_and_absolute_inhibition() {
+        let mut rows = vec![AssayRow { concentrations: vec![0.0, 0.0], od: 1.0 }];
+        for dose in [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0] {
+            for index in 0..2 {
+                let mut concentrations = vec![0.0, 0.0];
+                concentrations[index] = dose;
+                let inhibition = if index == 0 { 100.0 / (1.0 + (1.0f64 / dose).powf(2.0)) }
+                    else { 80.0 / (1.0 + (2.0f64 / dose).powf(1.5)) };
+                rows.push(AssayRow { concentrations, od: 1.0 - inhibition / 100.0 });
+            }
+        }
+        let input = AssayInput { drug_names: vec!["A".into(), "B".into()], rows };
+        let plan = suggest_repeat_layout_for_policy(&input, DiamondPolicy {
+            response_type: ResponseType::ViabilityFraction, ..Default::default()
+        }).unwrap().unwrap();
+        for (index, doses) in plan.dilutions.iter().enumerate() {
+            for (j, dose) in doses.iter().enumerate() {
+                let expected = if *dose == 0.0 { 0.0 } else if index == 0 {
+                    100.0 / (1.0 + (1.0f64 / dose).powf(2.0))
+                } else { 80.0 / (1.0 + (2.0f64 / dose).powf(1.5)) };
+                let actual = plan.inhibition_levels[index][j].unwrap();
+                assert!((actual - expected).abs() < 0.15, "{index} {dose}: {actual} vs {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn repeat_maxima_follow_integer_five_and_subunit_rounding_rules() {
+        for (value, expected) in [(1.49, 1.0), (9.4, 9.0), (9.6, 10.0),
+            (10.0, 10.0), (12.5, 15.0), (97.0, 95.0), (102.0, 100.0),
+            (0.22, 0.2), (0.049, 0.05)] {
+            assert!((round_repeat_maximum(value) - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn repeat_layout_centers_absolute_doses_on_ic50_and_retains_every_subset() {
+        for count in [2, 3] {
+            let anchors = [0.013771332737472738, 0.06387200372943856, 10.0][..count].to_vec();
+            let input = AssayInput {
+                drug_names: (0..count).map(|i| format!("Drug {i}")).collect(),
+                rows: (0..count).map(|i| {
+                    let mut concentrations = vec![0.0; count];
+                    concentrations[i] = anchors[i];
+                    AssayRow { concentrations, od: 50.0 }
+                }).collect(),
+            };
+            let ic50s = anchors.iter().copied().map(Some).collect::<Vec<_>>();
+            let plan = suggest_repeat_layout(&input, &ic50s, 0.5).unwrap();
+            assert_eq!(plan.anchors, [0.0125, 0.0625, 10.0][..count]);
+            assert_eq!(plan.locations.len(), ((1 << count) - 1) * 9);
+            assert_eq!(plan.retained_locations, plan.combination_locations);
+            assert!(plan.warnings.is_empty());
+            for location in &plan.locations {
+                for (i, concentration) in location.concentrations.iter().enumerate() {
+                    if location.drug_indices.contains(&i) {
+                        let expected = plan.anchors[i] * location.dilution_factor;
+                        assert_eq!(*concentration, expected);
+                        assert!(plan.dilutions[i].contains(concentration));
+                    } else { assert_eq!(*concentration, 0.0); }
+                }
+            }
+            let repeated = AssayInput { drug_names: input.drug_names.clone(),
+                rows: plan.locations.iter().map(|l| AssayRow { concentrations: l.concentrations.clone(), od: 50.0 }).collect() };
+            let coverage = check_dose_layout(&repeated, &plan.anchors, 0.5).unwrap();
+            assert_eq!((coverage.combination_locations, coverage.retained_locations), (9, 9));
+            assert!(suggest_repeat_layout(&input, &vec![None; count], 0.5).is_none());
+            assert!(suggest_repeat_layout(&input, &vec![Some(f64::INFINITY); count], 0.5).is_none());
+            let extrapolated = suggest_repeat_layout(&input, &vec![Some(100.0); count], 0.5).unwrap();
+            assert_eq!(extrapolated.warnings.len(), count);
+        }
     }
 
     #[test]

@@ -1,0 +1,39 @@
+[
+  {
+    "version": "0.8.2",
+    "changes": [
+      "Suggested experiment grids now show italic fitted ICxx labels beside concentration headers and display one organism–drug layout at a time with previous/next controls."
+    ]
+  },
+  {
+    "version": "0.8.1",
+    "changes": [
+      "Click the version number in the header to view changes in each recorded version.",
+      "Dose Anchors now shows Closest Anchor, Maximum Dose Retention, and editable Assigned Dose Anchor columns, with buttons to copy either suggested set.",
+      "Check how many combination doses the assigned anchors retain before analysis, and see compatible anchors when too few doses remain.",
+      "Plan repeat experiments with concentration grids, single-agent rows and columns, rounded maximum concentrations, and exact twofold dilutions.",
+      "Repeat-layout anchors follow the rounded concentration ratio; extrapolated IC50 estimates are flagged as provisional."
+    ]
+  },
+  {
+    "version": "0.8.0",
+    "changes": [
+      "Added Drusano–Greco fitting, count-data sampling, regimen simulation, and comparison.",
+      "Added MuSyC analysis and project save/load.",
+      "Added native DiaMOND analysis, dose-response plots, and regimen comparison."
+    ]
+  },
+  {
+    "version": "0.7.0",
+    "changes": [
+      "Expanded native Bliss calculations and SynergyFinder compatibility checks.",
+      "Improved regimen comparison, bootstrap results, and workbook export."
+    ]
+  },
+  {
+    "version": "0.1.0",
+    "changes": [
+      "Introduced the self-contained Tauri desktop app with React and native Rust assay analysis."
+    ]
+  }
+]

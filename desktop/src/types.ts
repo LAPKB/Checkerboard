@@ -338,6 +338,24 @@ export interface DiamondDoseAnchorSuggestion {
   singleAgentLevels: number;
 }
 
+export interface DiamondLayoutCheck {
+  combinationLocations: number;
+  retainedLocations: number;
+  compatibleAnchors: number[] | null;
+  compatibleLocations: number;
+  repeatLayout: DiamondRepeatLayout | null;
+}
+
+export interface DiamondRepeatLayout {
+  anchors: number[];
+  dilutions: number[][];
+  inhibitionLevels: (number | null)[][];
+  locations: { drugIndices: number[]; dilutionFactor: number; concentrations: number[] }[];
+  combinationLocations: number;
+  retainedLocations: number;
+  warnings: string[];
+}
+
 export interface DiamondScore {
   inhibitionLevel: number;
   observedDose: number;

@@ -114,6 +114,19 @@ When R and `synergyfinder` 3.20.0 are installed, the test suite also runs the
 development-only native-versus-R parity checks. Missing R is never an
 application runtime error.
 
+## Versions and release notes
+
+For each completed app change, run from `desktop/`:
+
+```sh
+npm run version:change -- "Describe the change for users"
+```
+
+This increments the patch version, updates frontend and native package metadata,
+and adds an entry to `src/version-history.json`. Add further notes to that entry
+as needed. The header version button opens this history; version consistency is
+checked by the frontend tests. Build the Mac installer with `npm run tauri build`.
+
 ## Boundaries
 
 The `checkerboard-core` crate contains presentation-independent scientific
