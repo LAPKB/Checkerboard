@@ -80,6 +80,25 @@ The R package remains an optional development oracle for parity tests.
 
 ### MIC inference and comparison
 
+Repeat-experiment planning uses an 8 × 8 concentration grid: a zero-dose
+control plus seven positive levels per drug, with exact twofold spacing.
+The maximum starts near 16 times fitted IC50 and uses practical rounding;
+the six lower levels are successive twofold dilutions. Combination subsets
+use the same normalized levels and remain on the assigned diagonal. Italic
+ICxx labels report predictions from the full single-agent fit at each dose;
+planning does not require a finite IC99. IC50 estimates outside the measured
+single-agent range are flagged as provisional. The suggested design does not
+alter imported measurements or analysis settings.
+
+Imported positive concentrations are matched per drug within a relative
+tolerance of 0.01%. Starting from the highest dose, a group admits lower doses
+only while `(maximum - minimum) / minimum <= 0.0001`; all members use the
+highest original dose. Bounding the full group range prevents chain merging,
+and this ordering keeps repeated normalization stable. Zero concentrations,
+response values, and user-assigned MICs and dose anchors retain their values.
+DiaMOND uses the same normalized dose pool for measured and blank-response
+locations. Raw source files and Import preview rows retain their original values.
+
 After column mapping, the app groups single-agent wells (one positive drug
 concentration and all other drug concentrations equal to zero). It converts the
 selected response type to viability percentage, averages replicates at each

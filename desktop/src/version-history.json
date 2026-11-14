@@ -1,5 +1,37 @@
 [
   {
+    "version": "0.8.7",
+    "changes": [
+      "Assigned-anchor analysis plots now orient the longer concentration series horizontally, keeping more columns than rows for two-drug layouts and three-drug slices.",
+      "Restored standard twofold dilutions in the 8 × 8 suggested repeat design: control plus seven positive levels per drug, with fitted ICxx labels."
+    ]
+  },
+  {
+    "version": "0.8.6",
+    "changes": [
+      "Imported concentrations now use a 0.01% relative matching tolerance to combine near-equal dose levels consistently across analysis and DiaMOND layouts, while preserving response precision, zero doses, and assigned MICs and anchors."
+    ]
+  },
+  {
+    "version": "0.8.5",
+    "changes": [
+      "Assigned-anchor layouts now show every two-drug concentration in one plot; three-drug layouts let you choose the drug and concentration used to page through the two-drug displays."
+    ]
+  },
+  {
+    "version": "0.8.4",
+    "changes": [
+      "Added per-row Import exclusions and organized Dose Anchors by combination and organism with a plate preview of assigned doses, available response data, and the closest IC50-based reference cells.",
+      "DiaMOND now treats blank responses as unmeasured locations and omits them from fitting; numeric zero responses remain measured data."
+    ]
+  },
+  {
+    "version": "0.8.3",
+    "changes": [
+      "DiaMOND dose-response point tooltips now show each drug’s absolute concentration in its imported units alongside normalized dose and inhibition."
+    ]
+  },
+  {
     "version": "0.8.2",
     "changes": [
       "Suggested experiment grids now show italic fitted ICxx labels beside concentration headers and display one organism–drug layout at a time with previous/next controls."

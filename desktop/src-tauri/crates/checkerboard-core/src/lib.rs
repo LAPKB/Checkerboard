@@ -272,6 +272,47 @@ struct EffectGroup {
     replicate_count: usize,
 }
 
+/// Import-only equivalence for concentrations that differ by at most 0.01%.
+pub const IMPORT_CONCENTRATION_RELATIVE_TOLERANCE: f64 = 1e-4;
+
+/// Normalize positive imported dose levels independently for each drug.
+///
+/// Each cluster's full relative spread is bounded by the import tolerance, so
+/// successive close neighbors cannot join genuinely different endpoint doses.
+/// Clustering starts at the highest original level, which represents its cluster.
+/// This makes repeated normalization idempotent. Zero, negative and non-finite
+/// values are left untouched; callers validate source values first. Normalize
+/// the complete original import pool, including unmeasured wells.
+pub fn normalize_imported_concentrations(concentrations: &mut [Vec<f64>]) {
+    let drug_count = concentrations.iter().map(Vec::len).max().unwrap_or(0);
+    for drug in 0..drug_count {
+        let mut levels = concentrations.iter().filter_map(|row| row.get(drug).copied())
+            .filter(|value| value.is_finite() && *value > 0.0).collect::<Vec<_>>();
+        levels.sort_by(f64::total_cmp);
+        levels.dedup();
+        let mut representatives = HashMap::<u64, f64>::new();
+        let mut end = levels.len();
+        while end > 0 {
+            let representative = levels[end - 1];
+            let mut start = end - 1;
+            while start > 0
+                && (representative - levels[start - 1]) / levels[start - 1] <= IMPORT_CONCENTRATION_RELATIVE_TOLERANCE {
+                start -= 1;
+            }
+            for level in &levels[start..end] {
+                representatives.insert(level.to_bits(), representative);
+            }
+            end = start;
+        }
+        for row in concentrations.iter_mut() {
+            if let Some(value) = row.get_mut(drug)
+                && let Some(representative) = representatives.get(&value.to_bits()) {
+                *value = *representative;
+            }
+        }
+    }
+}
+
 pub fn assay_from_rows(
     rows: &[Vec<String>],
     mapping: &ColumnMapping,
@@ -282,11 +323,24 @@ pub fn assay_from_rows(
     for (row_index, row) in rows.iter().enumerate() {
         let source_row = row_index + 2;
         let mut concentrations = Vec::with_capacity(mapping.drugs.len());
-        for mapped in &mapping.drugs {
-            concentrations.push(parse_cell(row, source_row, mapped.column)?);
+        for (drug_index, mapped) in mapping.drugs.iter().enumerate() {
+            let concentration = parse_cell(row, source_row, mapped.column)?;
+            if !concentration.is_finite() {
+                return Err(AnalysisError::NonFiniteConcentration { row: source_row, drug: drug_index + 1 });
+            }
+            if concentration < 0.0 {
+                return Err(AnalysisError::NegativeConcentration { row: source_row, drug: drug_index + 1 });
+            }
+            concentrations.push(concentration);
         }
         let od = parse_cell(row, source_row, mapping.response_column)?;
         assay_rows.push(AssayRow { concentrations, od });
+    }
+
+    let mut concentration_pool = assay_rows.iter().map(|row| row.concentrations.clone()).collect::<Vec<_>>();
+    normalize_imported_concentrations(&mut concentration_pool);
+    for (row, concentrations) in assay_rows.iter_mut().zip(concentration_pool) {
+        row.concentrations = concentrations;
     }
 
     Ok(AssayInput {
@@ -905,6 +959,77 @@ mod tests {
             response_column: drug_count,
         };
         assay_from_rows(&rows, &mapping).unwrap()
+    }
+
+    #[test]
+    fn imported_two_drug_near_equal_doses_share_locations_without_rounding_responses() {
+        let input = assay_from_csv(
+            include_str!("../../../../../fixtures/valid/import_near_equal_two_drug.csv"), 2,
+        );
+        assert_eq!(input.rows[1].concentrations, vec![0.00390625, 0.0]);
+        assert_eq!(input.rows[2].concentrations, input.rows[1].concentrations);
+        assert_eq!(input.rows[3].concentrations, vec![0.0, 0.0625]);
+        assert_eq!(input.rows[4].concentrations, input.rows[3].concentrations);
+        assert_eq!(input.rows[6].concentrations, vec![0.00390625, 0.0625]);
+        assert_eq!(input.rows[2].od, 60.987654321);
+        let result = analyze(&input, legacy_policy()).unwrap();
+        assert_eq!(result.processed.len(), 4);
+        let combination = result.processed.iter().find(|point| point.concentrations == [0.00390625, 0.0625]).unwrap();
+        assert_eq!(combination.replicate_count, 2);
+        assert!((combination.mean_original_od - 15.555555555).abs() < 1e-12);
+    }
+
+    #[test]
+    fn imported_three_drug_near_equal_doses_retain_all_subset_locations() {
+        let input = assay_from_csv(
+            include_str!("../../../../../fixtures/valid/import_near_equal_three_drug.csv"), 3,
+        );
+        assert_eq!(input.rows[8].concentrations, vec![0.00390625, 0.0625, 0.015625]);
+        assert_eq!(input.rows[8].od, 10.987654321);
+        let result = analyze(&input, legacy_policy()).unwrap();
+        assert_eq!(result.processed.len(), 8);
+        let triple = result.processed.iter().find(|point| point.concentrations == [0.00390625, 0.0625, 0.015625]).unwrap();
+        assert_eq!(triple.replicate_count, 2);
+        for pair in [[0.00390625, 0.0625, 0.0], [0.00390625, 0.0, 0.015625], [0.0, 0.0625, 0.015625]] {
+            assert!(result.processed.iter().any(|point| point.concentrations == pair));
+        }
+    }
+
+    #[test]
+    fn imported_dose_clusters_are_order_independent_bounded_and_keep_positive_small_doses() {
+        let original = vec![
+            vec![0.0, 1e-100], vec![1.0, 1.00005e-100],
+            vec![1.00009, 2e-100], vec![1.00018, f64::MAX], vec![0.0, 0.0],
+        ];
+        let mut normalized = original.clone();
+        normalize_imported_concentrations(&mut normalized);
+        assert_eq!(normalized[0], vec![0.0, 1.00005e-100]);
+        assert_eq!(normalized[1][0], 1.0);
+        assert_eq!(normalized[2][0], 1.00018);
+        // Close neighbors cannot chain two genuinely different endpoint levels.
+        assert_eq!(normalized[3][0], 1.00018);
+        assert_eq!(normalized[3][1], f64::MAX);
+        assert!(normalized[..4].iter().all(|row| row[1] > 0.0));
+        assert_eq!(normalized[4], vec![0.0, 0.0]);
+        let mut reordered = original.into_iter().rev().collect::<Vec<_>>();
+        normalize_imported_concentrations(&mut reordered);
+        reordered.reverse();
+        assert_eq!(normalized, reordered);
+        normalize_imported_concentrations(&mut reordered);
+        assert_eq!(normalized, reordered);
+    }
+
+    #[test]
+    fn imported_negative_and_nonfinite_concentrations_fail_before_normalization() {
+        let mapping = ColumnMapping {
+            drugs: vec![MappedDrug { column: 0, name: "A".into() }, MappedDrug { column: 1, name: "B".into() }],
+            response_column: 2,
+        };
+        let rows = |dose: &str| vec![vec![dose.into(), "0".into(), "42.123456789".into()]];
+        assert!(matches!(assay_from_rows(&rows("-0.0000001"), &mapping), Err(AnalysisError::NegativeConcentration { row: 2, drug: 1 })));
+        for dose in ["NaN", "inf", "-inf"] {
+            assert!(matches!(assay_from_rows(&rows(dose), &mapping), Err(AnalysisError::NonFiniteConcentration { row: 2, drug: 1 })));
+        }
     }
 
     #[test]

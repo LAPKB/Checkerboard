@@ -1,0 +1,24 @@
+.diamond-analysis-plate { min-width: 0; padding: 12px; border: 1px solid #dce4ea; border-radius: 9px; background: #fafcfd; }
+.diamond-analysis-plate h2 { margin: 0 0 8px; font-size: 1rem; }
+.diamond-analysis-plate p { margin: 8px 0; }
+.diamond-analysis-plate-toolbar { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px; }
+.diamond-analysis-plate-toolbar label { display: grid; min-width: 0; max-width: 100%; gap: 4px; font-size: .75rem; }
+.diamond-analysis-plate-toolbar select { width: 100%; max-width: 280px; }
+.diamond-analysis-page-controls { display: flex; align-items: center; gap: 8px; font-size: .75rem; }
+.diamond-analysis-page-controls button { padding: 3px 10px; }
+.diamond-analysis-axis-label { font-size: .75rem; overflow-wrap: anywhere; }
+.diamond-analysis-plate-grid { display: block; width: 100%; height: auto; }
+.diamond-analysis-plate-frame { fill: #eef2f5; stroke: #b9c6d1; stroke-width: 1.5; }
+.diamond-analysis-dose-header { font-size: 11px; fill: #3c4b57; }
+.diamond-analysis-well { fill: #f8fafc; stroke: #d1dae1; stroke-width: 1.2; }
+.diamond-analysis-well.selected-data, .diamond-analysis-plate-legend .selected-data { fill: #187862; background: #187862; stroke: #0d5b49; }
+.diamond-analysis-well.selected-missing, .diamond-analysis-plate-legend .selected-missing { fill: #fff4d8; background: #fff4d8; stroke: #a87812; stroke-dasharray: 3 2; }
+.diamond-analysis-well.measured, .diamond-analysis-plate-legend .measured { fill: #b9c9d9; background: #b9c9d9; stroke: #6b8194; }
+.diamond-analysis-well.ideal, .diamond-analysis-plate-legend .ideal { stroke: #a040be; border: 3px solid #a040be; stroke-width: 3; }
+.diamond-analysis-well.padding { fill: #e7edf2; stroke: #d9e1e7; opacity: .5; }
+.diamond-analysis-well-label { fill: #fff; font-size: 13px; font-weight: 700; }
+.diamond-analysis-well-label.missing-label { fill: #89610f; }
+.diamond-analysis-plate-legend { display: flex; flex-wrap: wrap; gap: 7px 12px; font-size: .69rem; margin: 9px 0; }
+.diamond-analysis-plate-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.diamond-analysis-plate-legend i { display: inline-block; width: 12px; height: 12px; border: 1px solid #9aaab7; border-radius: 50%; }
+.diamond-analysis-plate .help-text { font-size: .72rem; line-height: 1.45; }

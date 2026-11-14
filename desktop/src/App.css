@@ -299,6 +299,15 @@ h1 { margin: 0 0 4px; font-size: 1.05rem; }
 .mapping-table thead tr:nth-child(2) th { overflow: visible; text-overflow: clip; color: white; background: #235789; }
 .mapping-table th:first-child, .mapping-table td:first-child { position: sticky; left: 0; z-index: 2; width: 60px; background: #f1f4f6; }
 .mapping-table thead th:first-child { z-index: 4; }
+.mapping-table th:nth-child(2), .mapping-table td:nth-child(2) { width: 60px; }
+.mapping-table .exclude-row { text-align: center; }
+.mapping-table .exclude-row input { width: 16px; min-height: 16px; margin: 0; accent-color: #9b3d2b; }
+.mapping-table tbody tr.import-row-excluded td { color: #7c514c; background: #fbe9e5; }
+.import-row-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin: 12px 16px 0; }
+.import-row-controls .help-text { margin: 0; }
+.import-row-pages { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: .76rem; }
+.import-row-pages button { min-height: 28px; padding: 4px 8px; font-size: .76rem; }
+.import-row-legacy { margin: 8px 16px; }
 .mapping-table select { width: 104px; min-height: 28px; padding: 3px 4px; font-weight: 650; }
 .mapping-table tbody tr:nth-child(even) td { background: #f8fafb; }
 .mapping-table tbody tr:nth-child(even) td:first-child { background: #edf1f4; }

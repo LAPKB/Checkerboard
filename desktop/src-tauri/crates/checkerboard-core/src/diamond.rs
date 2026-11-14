@@ -158,6 +158,27 @@ pub struct DiamondLayoutCheck {
     pub compatible_anchors: Option<Vec<f64>>,
     pub compatible_locations: usize,
     pub repeat_layout: Option<DiamondRepeatLayout>,
+    #[serde(default)]
+    pub analysis_plate: Option<DiamondAnalysisPlate>,
+}
+
+/// A concentration-space plate preview, not inferred physical well coordinates.
+/// Empty lattice intersections are candidates only and never become assay rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiamondAnalysisPlate {
+    pub dilutions: Vec<Vec<f64>>,
+    pub locations: Vec<DiamondAnalysisPlateLocation>,
+    pub ideal_anchors: Vec<Option<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiamondAnalysisPlateLocation {
+    pub concentrations: Vec<f64>,
+    pub replicate_count: usize,
+    pub selected: bool,
+    pub closest_to_ideal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -187,7 +208,7 @@ fn round_repeat_maximum(maximum: f64) -> f64 {
 }
 
 /// A planning heuristic: round a maximum near 16 times IC50, then use
-/// nine common twofold levels for singles and all combination subsets.
+/// seven common twofold levels plus a zero-dose control for singles and all combination subsets.
 pub fn suggest_repeat_layout(input: &AssayInput, ic50s: &[Option<f64>], tolerance: f64)
     -> Option<DiamondRepeatLayout>
 {
@@ -210,11 +231,11 @@ pub fn suggest_repeat_layout(input: &AssayInput, ic50s: &[Option<f64>], toleranc
     if maxima.iter().any(|c| !c.is_finite() || *c <= 0.0) { return None; }
     let anchors = maxima.iter().map(|maximum| maximum / 16.0).collect::<Vec<_>>();
     let dilutions = maxima.iter().map(|maximum| std::iter::once(0.0)
-        .chain((0..9).map(|i| maximum / 2.0f64.powi(8 - i))).collect::<Vec<_>>()).collect::<Vec<_>>();
+        .chain((0..7).map(|i| maximum / 2.0f64.powi(6 - i))).collect::<Vec<_>>()).collect::<Vec<_>>();
     let mut locations = Vec::new();
     for mask in 1usize..(1 << anchors.len()) {
         let indices = (0..anchors.len()).filter(|i| mask & (1 << i) != 0).collect::<Vec<_>>();
-        for exponent in -4..=4 {
+        for exponent in -2..=4 {
             let factor = 2.0f64.powi(exponent);
             let concentrations = anchors.iter().enumerate().map(|(i, a)|
                 if indices.contains(&i) { a * factor } else { 0.0 }).collect::<Vec<_>>();
@@ -305,7 +326,83 @@ pub fn check_dose_layout(
         combination_locations: locations.len(), retained_locations,
         compatible_anchors, compatible_locations,
         repeat_layout: None,
+        analysis_plate: None,
     })
+}
+
+/// Uses the same diagonal predicate as analysis. The reference direction uses
+/// the tested single-agent concentrations nearest the respective fitted IC50s.
+pub fn analysis_plate_for_policy(
+    input: &AssayInput, anchors: &[f64], tolerance: f64, policy: DiamondPolicy,
+    available_concentrations: &[Vec<f64>],
+) -> Result<DiamondAnalysisPlate, DiamondError> {
+    let ideal = suggest_dose_anchors(input, policy)?
+        .iter().map(|suggestion| suggestion.suggested_anchor).collect::<Vec<_>>();
+    analysis_plate(input, anchors, tolerance, &ideal, available_concentrations)
+}
+
+fn analysis_plate(
+    input: &AssayInput, anchors: &[f64], tolerance: f64, ideal_anchors: &[Option<f64>],
+    available_concentrations: &[Vec<f64>],
+) -> Result<DiamondAnalysisPlate, DiamondError> {
+    validate_input(input)?;
+    if anchors.len() != input.drug_names.len()
+        || anchors.iter().any(|a| !a.is_finite() || *a <= 0.0) {
+        return Err(DiamondError::InvalidDoseAnchors);
+    }
+    if !tolerance.is_finite() || tolerance < 0.0 {
+        return Err(DiamondError::InvalidPolicy);
+    }
+    let mut dilutions = vec![vec![0.0]; anchors.len()];
+    for concentrations in available_concentrations.iter().chain(input.rows.iter().map(|row| &row.concentrations)) {
+        if concentrations.len() != anchors.len()
+            || concentrations.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            continue;
+        }
+        for (drug, dose) in concentrations.iter().enumerate() {
+            dilutions[drug].push(*dose);
+        }
+    }
+    for doses in &mut dilutions {
+        doses.sort_by(f64::total_cmp);
+        doses.dedup();
+    }
+    let mut counts = HashMap::<ConcentrationKey, usize>::new();
+    for row in &input.rows {
+        *counts.entry(ConcentrationKey::new(&row.concentrations)).or_default() += 1;
+    }
+    let ideal = ideal_anchors.iter().copied().collect::<Option<Vec<_>>>()
+        .filter(|values| values.len() == anchors.len() && values.iter().all(|value| value.is_finite() && *value > 0.0));
+    let thirds = dilutions.get(2).cloned().unwrap_or_else(|| vec![0.0]);
+    let mut locations = Vec::new();
+    for third in thirds {
+        for y in &dilutions[1] {
+            for x in &dilutions[0] {
+                let mut concentrations = vec![*x, *y];
+                if anchors.len() == 3 { concentrations.push(third); }
+                let normalized = concentrations.iter().map(|value| if value.abs() < 1e-12 { 0.0 } else { *value }).collect::<Vec<_>>();
+                let active = normalized.iter().filter(|value| **value > 0.0).count();
+                locations.push(DiamondAnalysisPlateLocation {
+                    replicate_count: counts.get(&ConcentrationKey::new(&concentrations)).copied().unwrap_or(0),
+                    selected: active <= 1 || on_diagonal(&normalized, anchors, tolerance),
+                    closest_to_ideal: active > 1 && ideal.as_ref().is_some_and(|reference| {
+                        let first = normalized.iter().position(|dose| *dose > 0.0).unwrap();
+                        let target = normalized[first] / reference[first];
+                        normalized.iter().enumerate().filter(|(_, dose)| **dose > 0.0).all(|(drug, dose)| {
+                            let nearest = dilutions[drug].iter().filter(|candidate| **candidate >= 1e-12)
+                                .min_by(|left, right| {
+                                    let distance = |candidate: f64| (candidate / reference[drug] / target).log2().abs();
+                                    distance(**left).total_cmp(&distance(**right)).then_with(|| left.total_cmp(right))
+                                });
+                            nearest.is_some_and(|candidate| *candidate == *dose)
+                        })
+                    }),
+                    concentrations,
+                });
+            }
+        }
+    }
+    Ok(DiamondAnalysisPlate { dilutions, locations, ideal_anchors: ideal_anchors.to_vec() })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1437,6 +1534,58 @@ mod tests {
     }
 
     #[test]
+    fn analysis_plate_matches_selected_curves_and_never_imputes_missing_responses() {
+        let anchors = [1.0, 2.0, 4.0];
+        let mut rows = vec![AssayRow { concentrations: vec![0.0; 3], od: 100.0 }];
+        for factor in [0.25, 0.5, 1.0, 2.0, 4.0] {
+            for mask in 1..8 {
+                if mask == 3 && factor == 2.0 { continue; }
+                let concentrations = anchors.iter().enumerate().map(|(drug, anchor)|
+                    if mask & (1 << drug) == 0 { 0.0 } else { anchor * factor }).collect::<Vec<_>>();
+                let total = concentrations.iter().zip(anchors).map(|(dose, anchor)| dose / anchor).sum::<f64>();
+                rows.push(AssayRow { concentrations, od: if factor == 1.0 && mask == 7 { 0.0 } else { 100.0 - hill(total, 1.0) } });
+            }
+        }
+        rows.push(AssayRow { concentrations: vec![1.0, 4.0, 0.0], od: 25.0 });
+        let input = AssayInput { drug_names: vec!["A".into(), "B".into(), "C".into()], rows };
+        let plate = analysis_plate(&input, &anchors, 0.01, &[Some(1.0), Some(4.0), Some(8.0)], &[vec![8.0, 16.0, 32.0]]).unwrap();
+        let at = |coordinates: &[f64]| plate.locations.iter().find(|location| location.concentrations == coordinates).unwrap();
+        assert!(at(&[0.0, 0.0, 0.0]).selected);
+        assert!(at(&[0.0, 2.0, 0.0]).selected);
+        assert!(at(&[2.0, 4.0, 0.0]).selected);
+        assert_eq!(at(&[2.0, 4.0, 0.0]).replicate_count, 0);
+        assert!(at(&[8.0, 16.0, 32.0]).selected);
+        assert_eq!(at(&[8.0, 16.0, 32.0]).replicate_count, 0);
+        assert_eq!(at(&[1.0, 2.0, 4.0]).replicate_count, 1, "a measured response of zero is data");
+        assert!(!at(&[1.0, 4.0, 0.0]).selected);
+        assert!(at(&[1.0, 4.0, 0.0]).closest_to_ideal);
+        let result = analyze(&input, &anchors, DiamondPolicy { diagonal_tolerance_log2: 0.01, ..Default::default() }, |_, _| {}).unwrap();
+        let fitted = result.curves.iter().flat_map(|curve| curve.points.iter()).map(|point| point.concentrations.clone()).collect::<Vec<_>>();
+        for location in &plate.locations {
+            if location.concentrations.iter().all(|dose| *dose == 0.0) { continue; }
+            assert_eq!(fitted.contains(&location.concentrations), location.selected && location.replicate_count > 0,
+                "plate selection must match primary fits at {:?}", location.concentrations);
+        }
+    }
+
+    #[test]
+    fn analysis_plate_reference_uses_nearest_available_cells_when_no_exact_ray_exists() {
+        let input = AssayInput { drug_names: vec!["A".into(), "B".into()], rows: vec![
+            AssayRow { concentrations: vec![0.0, 0.0], od: 100.0 },
+            AssayRow { concentrations: vec![1.0, 3.0], od: 50.0 },
+            AssayRow { concentrations: vec![2.0, 0.0], od: 50.0 },
+            AssayRow { concentrations: vec![0.0, 5.0], od: 50.0 },
+        ] };
+        let plate = analysis_plate(&input, &[1.0, 3.0], 0.0, &[Some(1.0), Some(4.0)], &[]).unwrap();
+        let at = |x, y| plate.locations.iter().find(|location| location.concentrations == [x, y]).unwrap();
+        assert!(at(1.0, 5.0).closest_to_ideal, "5 is nearer 4 than 3 on the log scale");
+        assert!(!at(1.0, 5.0).selected);
+        assert_eq!(at(1.0, 5.0).replicate_count, 0);
+        assert!(at(1.0, 3.0).selected);
+        assert!(!at(1.0, 3.0).closest_to_ideal);
+    }
+
+    #[test]
     fn two_drug_fic_recovers_known_synergy() {
         let mut rows = vec![AssayRow {
             concentrations: vec![0.0, 0.0],
@@ -1533,13 +1682,13 @@ mod tests {
             let anchors = suggestions.iter()
                 .map(|s| s.suggested_anchor.unwrap()).collect::<Vec<_>>();
             let plan = suggest_repeat_layout_for_policy(&input, policy).unwrap().unwrap();
-            assert!(plan.inhibition_levels.iter().all(|levels| levels.len() == 10 && levels.iter().all(Option::is_some)));
-            assert_eq!((plan.combination_locations, plan.retained_locations), (9, 9));
-            assert_eq!(plan.locations.len(), 27);
+            assert!(plan.inhibition_levels.iter().all(|levels| levels.len() == 8 && levels.iter().all(Option::is_some)));
+            assert_eq!((plan.combination_locations, plan.retained_locations), (7, 7));
+            assert_eq!(plan.locations.len(), 21);
             assert_eq!(plan.warnings.is_empty(), strain == "BB-MAB-1");
             let expected_maxima = if strain == "BB-MAB-1" { [540.0, 3.0] } else { [0.2, 1.0] };
             for (i, maximum) in expected_maxima.iter().enumerate() {
-                assert_eq!(plan.dilutions[i][9], *maximum);
+                assert_eq!(plan.dilutions[i][7], *maximum);
                 assert_eq!(plan.dilutions[i][0], 0.0);
                 for pair in plan.dilutions[i][1..].windows(2) { assert_eq!(pair[1], 2.0 * pair[0]); }
             }
@@ -1634,9 +1783,14 @@ mod tests {
             let ic50s = anchors.iter().copied().map(Some).collect::<Vec<_>>();
             let plan = suggest_repeat_layout(&input, &ic50s, 0.5).unwrap();
             assert_eq!(plan.anchors, [0.0125, 0.0625, 10.0][..count]);
-            assert_eq!(plan.locations.len(), ((1 << count) - 1) * 9);
+            assert_eq!(plan.locations.len(), ((1 << count) - 1) * 7);
             assert_eq!(plan.retained_locations, plan.combination_locations);
             assert!(plan.warnings.is_empty());
+            for doses in &plan.dilutions {
+                assert_eq!(doses.len(), 8);
+                assert_eq!(doses[0], 0.0);
+                for pair in doses[1..].windows(2) { assert_eq!(pair[1], 2.0 * pair[0]); }
+            }
             for location in &plan.locations {
                 for (i, concentration) in location.concentrations.iter().enumerate() {
                     if location.drug_indices.contains(&i) {
@@ -1649,7 +1803,7 @@ mod tests {
             let repeated = AssayInput { drug_names: input.drug_names.clone(),
                 rows: plan.locations.iter().map(|l| AssayRow { concentrations: l.concentrations.clone(), od: 50.0 }).collect() };
             let coverage = check_dose_layout(&repeated, &plan.anchors, 0.5).unwrap();
-            assert_eq!((coverage.combination_locations, coverage.retained_locations), (9, 9));
+            assert_eq!((coverage.combination_locations, coverage.retained_locations), (7, 7));
             assert!(suggest_repeat_layout(&input, &vec![None; count], 0.5).is_none());
             assert!(suggest_repeat_layout(&input, &vec![Some(f64::INFINITY); count], 0.5).is_none());
             let extrapolated = suggest_repeat_layout(&input, &vec![Some(100.0); count], 0.5).unwrap();

@@ -224,11 +224,14 @@ export interface ImportRequest {
   rowLimit: number;
   columnLimit: number;
   organismColumn: number | null;
+  /** Absolute, one-based file row numbers; the header is startRow. */
+  excludedRows?: number[];
 }
 
 export interface ImportPreview {
   headers: string[];
   rows: string[][];
+  rowNumbers?: number[];
   totalRows: number;
   totalColumns: number;
   suggestedRoles: ColumnRole[];
@@ -246,6 +249,7 @@ export interface RegimenPreview {
   concentrationUnits: string[];
   suggestedResponseType: ResponseType;
   rows: string[][];
+  rowNumbers?: number[];
   totalRows: number;
 }
 
@@ -344,6 +348,18 @@ export interface DiamondLayoutCheck {
   compatibleAnchors: number[] | null;
   compatibleLocations: number;
   repeatLayout: DiamondRepeatLayout | null;
+  analysisPlate?: DiamondAnalysisPlateData | null;
+}
+
+export interface DiamondAnalysisPlateData {
+  dilutions: number[][];
+  locations: {
+    concentrations: number[];
+    replicateCount: number;
+    selected: boolean;
+    closestToIdeal: boolean;
+  }[];
+  idealAnchors: (number | null)[];
 }
 
 export interface DiamondRepeatLayout {

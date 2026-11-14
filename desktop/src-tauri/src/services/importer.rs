@@ -1,4 +1,4 @@
-use std::{fs::File, path::Path};
+use std::{collections::HashSet, fs::File, path::Path};
 
 use calamine::{Data, Reader, open_workbook_auto};
 use serde::{Deserialize, Serialize};
@@ -16,12 +16,16 @@ pub struct ImportRequest {
     pub column_limit: usize,
     #[serde(default)]
     pub organism_column: Option<usize>,
+    /// Absolute one-based source row numbers, including the header in numbering.
+    #[serde(default)]
+    pub excluded_rows: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ImportedTable {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    pub row_numbers: Vec<usize>,
 }
 
 pub fn list_worksheets(path: &str) -> Result<Vec<String>, AppError> {
@@ -143,16 +147,24 @@ fn select_range(
         request.row_limit.min(available_data)
     };
     let mut data = Vec::with_capacity(selected_rows);
-    for raw in rows.iter().skip(header_index + 1).take(selected_rows) {
+    let mut row_numbers = Vec::with_capacity(selected_rows);
+    let excluded_rows = request.excluded_rows.iter().copied().collect::<HashSet<_>>();
+    for (index, raw) in rows.iter().enumerate().skip(header_index + 1).take(selected_rows) {
+        let row_number = index + 1;
+        if excluded_rows.contains(&row_number) {
+            continue;
+        }
         let mut row = Vec::with_capacity(selected_columns);
         for column in start_column..end_column {
             row.push(raw.get(column).cloned().unwrap_or_default());
         }
         data.push(row);
+        row_numbers.push(row_number);
     }
     Ok(ImportedTable {
         headers,
         rows: data,
+        row_numbers,
     })
 }
 
@@ -237,9 +249,46 @@ mod tests {
             row_limit: 1,
             column_limit: 2,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let selected = select_range(rows, &request).unwrap();
         assert_eq!(selected.headers, vec!["DrugA", "OD"]);
         assert_eq!(selected.rows, vec![vec!["0", "1"]]);
+        assert_eq!(selected.row_numbers, vec![3]);
+    }
+
+    #[test]
+    fn exclusions_use_source_rows_without_expanding_the_selected_range() {
+        let rows = vec![
+            vec!["metadata".into()],
+            vec!["Dose".into(), "Response".into()],
+            vec!["1".into(), "0.5".into()],
+            vec!["1".into(), "0.5".into()],
+            vec!["2".into(), "0.25".into()],
+        ];
+        let request = ImportRequest {
+            path: "unused.csv".into(),
+            worksheet: None,
+            start_row: 2,
+            start_column: 1,
+            row_limit: 2,
+            column_limit: 0,
+            organism_column: None,
+            excluded_rows: vec![3, 3, 100],
+        };
+        let selected = select_range(rows, &request).unwrap();
+        // Identical experimental replicates retain independent source identity.
+        assert_eq!(selected.rows, vec![vec!["1", "0.5"]]);
+        assert_eq!(selected.row_numbers, vec![4]);
+    }
+
+    #[test]
+    fn earlier_import_requests_default_to_no_exclusions() {
+        let request: ImportRequest = serde_json::from_value(serde_json::json!({
+            "path": "unused.csv", "worksheet": null, "startRow": 1,
+            "startColumn": 1, "rowLimit": 0, "columnLimit": 0,
+            "organismColumn": null,
+        })).unwrap();
+        assert!(request.excluded_rows.is_empty());
     }
 }

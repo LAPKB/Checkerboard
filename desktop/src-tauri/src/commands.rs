@@ -1,6 +1,6 @@
 use checkerboard_core::{
     AnalysisPolicy, AnalysisResult, ColumnMapping, ConcentrationRange, ResponseType, analyze_with_progress,
-    assay_from_rows,
+    assay_from_rows, normalize_imported_concentrations,
     diamond::{DiamondDoseAnchorSuggestion, DiamondLayoutCheck, DiamondPolicy, DiamondResult},
     drusano_greco::{
         DrusanoCensorLimitSuggestion, DrusanoDataSet, DrusanoDataSettings,
@@ -29,6 +29,7 @@ use crate::{
 pub struct ImportPreview {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    pub row_numbers: Vec<usize>,
     pub total_rows: usize,
     pub total_columns: usize,
     pub suggested_roles: Vec<String>,
@@ -48,6 +49,7 @@ pub struct RegimenPreview {
     pub concentration_units: Vec<String>,
     pub suggested_response_type: ResponseType,
     pub rows: Vec<Vec<String>>,
+    pub row_numbers: Vec<usize>,
     pub total_rows: usize,
 }
 
@@ -124,12 +126,51 @@ pub fn check_diamond_layout(request: CheckDiamondLayoutRequest) -> Result<Diamon
     let table = importer::read_table(&request.import)?;
     let rows = select_regimen_rows(&table, &request.regimen_drug_names,
         request.organism.as_deref(), request.organism_column)?;
-    let assay = assay_from_rows(&rows, &request.mapping)?;
+    let (assay, available_concentrations, _) = diamond_assay_from_rows(&rows, &request.mapping)?;
     let mut check = checkerboard_core::diamond::check_dose_layout(&assay,
         &request.dose_anchors, request.diagonal_tolerance_log2)?;
     check.repeat_layout = checkerboard_core::diamond::suggest_repeat_layout_for_policy(&assay,
         DiamondPolicy { diagonal_tolerance_log2: request.diagonal_tolerance_log2, ..request.policy })?;
+    check.analysis_plate = Some(checkerboard_core::diamond::analysis_plate_for_policy(&assay,
+        &request.dose_anchors, request.diagonal_tolerance_log2, request.policy,
+        &available_concentrations)?);
     Ok(check)
+}
+
+// Empty responses describe unmeasured locations; they never become response values.
+fn diamond_assay_from_rows(
+    rows: &[Vec<String>], mapping: &ColumnMapping,
+) -> Result<(checkerboard_core::AssayInput, Vec<Vec<f64>>, usize), AppError> {
+    let measured_rows = rows.iter().filter(|row| {
+        !row.get(mapping.response_column).is_some_and(|value| value.trim().is_empty())
+    }).cloned().collect::<Vec<_>>();
+    let mut assay = assay_from_rows(&measured_rows, mapping)?;
+    let mut available_concentrations = rows.iter().enumerate().map(|(row_index, row)| {
+        mapping.drugs.iter().enumerate().map(|(drug_index, mapped)| {
+            let value = row.get(mapped.column).ok_or(checkerboard_core::AnalysisError::MissingColumn {
+                row: row_index + 2, column: mapped.column + 1,
+            })?.trim();
+            let concentration = value.parse::<f64>().map_err(|_| checkerboard_core::AnalysisError::NonNumericValue {
+                row: row_index + 2, column: mapped.column + 1, value: value.to_string(),
+            })?;
+            if !concentration.is_finite() {
+                return Err(checkerboard_core::AnalysisError::NonFiniteConcentration { row: row_index + 2, drug: drug_index + 1 });
+            }
+            if concentration < 0.0 {
+                return Err(checkerboard_core::AnalysisError::NegativeConcentration { row: row_index + 2, drug: drug_index + 1 });
+            }
+            Ok(concentration)
+        }).collect::<Result<Vec<_>, checkerboard_core::AnalysisError>>()
+    }).collect::<Result<Vec<_>, checkerboard_core::AnalysisError>>()?;
+    // Use one complete original dose pool for measured and unmeasured locations.
+    normalize_imported_concentrations(&mut available_concentrations);
+    let measured_concentrations = rows.iter().zip(&available_concentrations).filter(|(row, _)| {
+        !row.get(mapping.response_column).is_some_and(|value| value.trim().is_empty())
+    });
+    for (row, (_, concentrations)) in assay.rows.iter_mut().zip(measured_concentrations) {
+        row.concentrations = concentrations.clone();
+    }
+    Ok((assay, available_concentrations, rows.len() - measured_rows.len()))
 }
 
 fn default_mic_zero_tolerance() -> f64 {
@@ -313,7 +354,10 @@ pub fn list_worksheets(path: String) -> Result<Vec<String>, AppError> {
 
 #[tauri::command]
 pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError> {
-    let table = importer::read_table(&request)?;
+    // Keep excluded rows visible so users can inspect and restore them.
+    let mut preview_request = request.clone();
+    preview_request.excluded_rows.clear();
+    let table = importer::read_table(&preview_request)?;
     let total_rows = table.rows.len();
     let total_columns = table.headers.len();
     let mut suggested_roles = suggest_roles(&table.headers);
@@ -386,7 +430,8 @@ pub fn import_preview(request: ImportRequest) -> Result<ImportPreview, AppError>
     }
     Ok(ImportPreview {
         headers: table.headers,
-        rows: table.rows.into_iter().take(100).collect(),
+        rows: table.rows,
+        row_numbers: table.row_numbers,
         total_rows,
         total_columns,
         suggested_roles,
@@ -725,41 +770,50 @@ pub async fn analyze_diamond(
     request: AnalyzeDiamondRequest,
     on_progress: Channel<AnalysisProgress>,
 ) -> Result<DiamondResult, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let table = importer::read_table(&request.import)?;
-        let rows = select_regimen_rows(
-            &table,
-            &request.regimen_drug_names,
-            request.organism.as_deref(),
-            request.organism_column,
-        )?;
-        validate_regimen_units(
-            &table.headers,
-            &rows,
-            &request.mapping,
-            &request.concentration_units,
-        )?;
-        let assay = assay_from_rows(&rows, &request.mapping)?;
-        let mut result = checkerboard_core::diamond::analyze(
-            &assay,
-            &request.dose_anchors,
-            request.policy,
-            |completed, total| {
-                let _ = on_progress.send(AnalysisProgress {
+    tauri::async_runtime::spawn_blocking(move || analyze_diamond_inner(request, Some(on_progress)))
+        .await
+        .map_err(|error| AppError::new("diamondWorkerError", error.to_string()))?
+}
+
+fn analyze_diamond_inner(
+    request: AnalyzeDiamondRequest, on_progress: Option<Channel<AnalysisProgress>>,
+) -> Result<DiamondResult, AppError> {
+    let table = importer::read_table(&request.import)?;
+    let rows = select_regimen_rows(
+        &table,
+        &request.regimen_drug_names,
+        request.organism.as_deref(),
+        request.organism_column,
+    )?;
+    validate_regimen_units(
+        &table.headers,
+        &rows,
+        &request.mapping,
+        &request.concentration_units,
+    )?;
+    let (assay, _, unmeasured_count) = diamond_assay_from_rows(&rows, &request.mapping)?;
+    let mut result = checkerboard_core::diamond::analyze(
+        &assay,
+        &request.dose_anchors,
+        request.policy,
+        |completed, total| {
+            if let Some(channel) = &on_progress {
+                let _ = channel.send(AnalysisProgress {
                     completed_iterations: completed,
                     total_iterations: total,
                 });
-            },
-        )?;
-        result.concentration_units = if request.concentration_units.len() == assay.drug_names.len() {
-            request.concentration_units
-        } else {
-            vec![String::new(); assay.drug_names.len()]
-        };
-        Ok(result)
-    })
-    .await
-    .map_err(|error| AppError::new("diamondWorkerError", error.to_string()))?
+            }
+        },
+    )?;
+    result.concentration_units = if request.concentration_units.len() == assay.drug_names.len() {
+        request.concentration_units
+    } else {
+        vec![String::new(); assay.drug_names.len()]
+    };
+    if unmeasured_count > 0 {
+        result.warnings.push(format!("Skipped {unmeasured_count} imported row(s) with blank response data. These unmeasured locations were not used in the analysis."));
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -773,7 +827,7 @@ pub fn suggest_diamond_anchors(
         request.organism.as_deref(),
         request.organism_column,
     )?;
-    let assay = assay_from_rows(&rows, &request.mapping)?;
+    let (assay, _, _) = diamond_assay_from_rows(&rows, &request.mapping)?;
     Ok(checkerboard_core::diamond::suggest_dose_anchors(
         &assay,
         request.policy,
@@ -1035,14 +1089,17 @@ fn describe_regimens(
         .into_iter()
         .enumerate()
         .map(|(index, (drug_names, organism))| {
-            let rows = table
+            let selected_rows = table
                 .rows
                 .iter()
-                .filter(|row| {
+                .enumerate()
+                .filter(|(_, row)| {
                     row_drug_names(row, &name_columns).is_some_and(|names| names == drug_names)
                         && row_organism(row, organism_column) == organism
                 })
                 .collect::<Vec<_>>();
+            let rows = selected_rows.iter().map(|(_, row)| *row).collect::<Vec<_>>();
+            let row_numbers = selected_rows.iter().map(|(index, _)| table.row_numbers[*index]).collect();
             let concentration_units = (0..drug_names.len())
                 .map(|drug_index| {
                     unit_columns[drug_index]
@@ -1083,7 +1140,8 @@ fn describe_regimens(
                 drug_names,
                 concentration_units,
                 suggested_response_type,
-                rows: rows.into_iter().take(100).cloned().collect(),
+                rows: rows.into_iter().cloned().collect(),
+                row_numbers,
                 total_rows,
             }
         })
@@ -1118,11 +1176,14 @@ fn generic_regimen_preview(
         })
         .collect();
     let organism = organism_entry.as_ref().map(|(_, value)| value.clone());
-    let row_refs = table
+    let selected_rows = table
         .rows
         .iter()
-        .filter(|row| row_organism(row, organism_column) == organism)
+        .enumerate()
+        .filter(|(_, row)| row_organism(row, organism_column) == organism)
         .collect::<Vec<_>>();
+    let row_refs = selected_rows.iter().map(|(_, row)| *row).collect::<Vec<_>>();
+    let row_numbers = selected_rows.iter().map(|(index, _)| table.row_numbers[*index]).collect();
     let id = organism_entry.as_ref().map_or(1, |(index, _)| *index).to_string();
     let regimen_label = drug_names.join(" + ");
     RegimenPreview {
@@ -1137,7 +1198,8 @@ fn generic_regimen_preview(
         concentration_units,
         suggested_response_type: infer_response_type(&row_refs, drug_columns, response_column),
         drug_names,
-        rows: row_refs.iter().take(100).map(|row| (*row).clone()).collect(),
+        rows: row_refs.iter().map(|row| (*row).clone()).collect(),
+        row_numbers,
         total_rows: row_refs.len(),
     }
 }
@@ -1663,6 +1725,7 @@ mod tests {
     #[test]
     fn organism_column_partitions_identical_regimens_and_filters_rows() {
         let table = importer::ImportedTable {
+            row_numbers: (2..6).collect(),
             headers: vec![
                 "Organism".into(),
                 "Drug A".into(),
@@ -1688,6 +1751,8 @@ mod tests {
         assert_eq!(regimens[0].regimen_key, regimens[1].regimen_key);
         assert_eq!(regimens[0].organism.as_deref(), Some("Org 1"));
         assert_eq!(regimens[1].organism.as_deref(), Some("Org 2"));
+        assert_eq!(regimens[0].row_numbers, vec![2, 3]);
+        assert_eq!(regimens[1].row_numbers, vec![4, 5]);
 
         let selected = select_regimen_rows(
             &table,
@@ -1703,6 +1768,7 @@ mod tests {
     #[test]
     fn drug_name_whitespace_is_removed_before_grouping_and_row_selection() {
         let table = importer::ImportedTable {
+            row_numbers: (2..4).collect(),
             headers: vec![
                 "Drug A".into(),
                 "Drug B".into(),
@@ -1746,6 +1812,7 @@ mod tests {
     #[test]
     fn concentration_headers_supply_drug_names_units_and_roles() {
         let table = importer::ImportedTable {
+            row_numbers: (2..3).collect(),
             headers: vec![
                 "Amikacin (mg/L)".into(),
                 "Clofazimine µM".into(),
@@ -1864,6 +1931,7 @@ mod tests {
     #[test]
     fn uncertain_headers_remain_ignored_and_still_receive_a_preview() {
         let table = importer::ImportedTable {
+            row_numbers: (2..3).collect(),
             headers: vec!["Sample".into(), "Measurement X".into(), "Comment".into()],
             rows: vec![vec!["one".into(), "0.5".into(), "review".into()]],
         };
@@ -1897,6 +1965,7 @@ mod tests {
                 row_limit: 0,
                 column_limit: 0,
                 organism_column: None,
+                excluded_rows: Vec::new(),
             };
             let preview = import_preview(import.clone()).expect("fixture should open");
             assert_eq!(
@@ -1977,6 +2046,7 @@ mod tests {
                 row_limit: 0,
                 column_limit: 0,
                 organism_column: None,
+                excluded_rows: Vec::new(),
             })
             .expect("Bliss-calibrated fixture should open");
             assert_eq!(
@@ -2019,6 +2089,7 @@ mod tests {
             row_limit: 0,
             column_limit: 0,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let result = analyze_table_inner(
             AnalyzeTableRequest {
@@ -2067,6 +2138,7 @@ mod tests {
             row_limit: 0,
             column_limit: 0,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let result = analyze_table_inner(
             AnalyzeTableRequest {
@@ -2130,6 +2202,7 @@ mod tests {
                 row_limit: 0,
                 column_limit: 0,
                 organism_column: None,
+                excluded_rows: Vec::new(),
             },
             mapping: ColumnMapping {
                 drugs: vec![
@@ -2189,6 +2262,7 @@ mod tests {
             row_limit: 0,
             column_limit: 0,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let preview = import_preview(import.clone()).unwrap();
         assert_eq!(
@@ -2271,6 +2345,175 @@ mod tests {
     }
 
     #[test]
+    fn excluded_fixture_rows_remain_visible_but_do_not_enter_analysis() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures/valid/multiple_regimens.csv")
+            .canonicalize()
+            .unwrap();
+        let import = ImportRequest {
+            path: fixture.to_string_lossy().into_owned(),
+            worksheet: None,
+            start_row: 1,
+            start_column: 1,
+            row_limit: 0,
+            column_limit: 0,
+            organism_column: None,
+            excluded_rows: vec![8],
+        };
+        let preview = import_preview(import.clone()).unwrap();
+        assert_eq!(preview.total_rows, 11);
+        assert_eq!(preview.row_numbers, (2..13).collect::<Vec<_>>());
+        assert_eq!(preview.regimens[0].row_numbers, (2..9).collect::<Vec<_>>());
+        assert_eq!(preview.regimens[1].row_numbers, (9..13).collect::<Vec<_>>());
+        assert_eq!(preview.regimens[0].rows[6][6], "90");
+
+        let result = analyze_table_inner(AnalyzeTableRequest {
+            import,
+            mapping: ColumnMapping {
+                drugs: vec![
+                    checkerboard_core::MappedDrug { column: 2, name: "Ampicillin".into() },
+                    checkerboard_core::MappedDrug { column: 3, name: "Meropenem".into() },
+                ],
+                response_column: 6,
+            },
+            policy: Some(AnalysisPolicy { response_type: ResponseType::Inhibition, ..AnalysisPolicy::default() }),
+            mic_values: vec![1.0, 1.0],
+            mic_zero_tolerance: 5.0,
+            regimen_drug_names: vec!["Ampicillin".into(), "Meropenem".into()],
+            organism: None,
+            organism_column: None,
+            concentration_units: vec!["mg/L".into(), "mg/L".into()],
+            clinically_relevant_concentrations: Vec::new(),
+            concentration_ranges: Vec::new(),
+        }, None).unwrap();
+        assert_eq!(result.summary.combination_count, 1);
+        assert_eq!(result.processed.len(), 6);
+        assert!(result.processed.iter().all(|point| point.concentrations != [8.0, 8.0]));
+        assert!((result.summary.mean_bliss - 16.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn diamond_blank_responses_are_unmeasured_and_never_imputed() {
+        let import = ImportRequest {
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/valid/diamond_missing_response.csv")
+                .canonicalize().unwrap().to_string_lossy().into_owned(),
+            worksheet: None, start_row: 1, start_column: 1, row_limit: 0,
+            column_limit: 0, organism_column: None, excluded_rows: Vec::new(),
+        };
+        let mapping = ColumnMapping {
+            drugs: vec![
+                checkerboard_core::MappedDrug { column: 0, name: "DrugA".into() },
+                checkerboard_core::MappedDrug { column: 1, name: "DrugB".into() },
+            ],
+            response_column: 2,
+        };
+        let policy = DiamondPolicy { response_type: ResponseType::Viability, bootstrap_iterations: 2, ..DiamondPolicy::default() };
+        let table = importer::read_table(&import).unwrap();
+        let (assay, available, skipped) = diamond_assay_from_rows(&table.rows, &mapping).unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(available.last(), Some(&vec![8.0, 8.0]));
+        assert!(assay.rows.iter().all(|row| row.concentrations != [8.0, 8.0]));
+        let expected = checkerboard_core::diamond::analyze(&assay, &[1.0, 1.0], policy, |_, _| {}).unwrap();
+        let actual = analyze_diamond_inner(AnalyzeDiamondRequest {
+            import: import.clone(), mapping: mapping.clone(), policy, dose_anchors: vec![1.0, 1.0],
+            regimen_drug_names: Vec::new(), organism: None, organism_column: None,
+            concentration_units: vec!["mg/L".into(), "ug/mL".into()],
+        }, None).unwrap();
+        assert_eq!(actual.curves, expected.curves);
+        assert_eq!(actual.total_scores, expected.total_scores);
+        assert!(actual.warnings.iter().any(|warning| warning.contains("Skipped 1") && warning.contains("blank response")));
+
+        let check = check_diamond_layout(CheckDiamondLayoutRequest {
+            import, mapping: mapping.clone(), dose_anchors: vec![1.0, 1.0],
+            diagonal_tolerance_log2: 0.5, policy,
+            regimen_drug_names: Vec::new(), organism: None, organism_column: None,
+        }).unwrap();
+        let missing = check.analysis_plate.unwrap().locations.into_iter()
+            .find(|location| location.concentrations == [8.0, 8.0]).unwrap();
+        assert_eq!(missing.replicate_count, 0);
+        assert!(missing.selected);
+
+        let mut invalid_rows = table.rows.clone();
+        invalid_rows.last_mut().unwrap()[2] = "not a number".into();
+        assert!(diamond_assay_from_rows(&invalid_rows, &mapping).is_err());
+    }
+
+    #[test]
+    fn pinned_diamond_import_matches_near_equal_doses_without_losing_measurements() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/diamond-anchor-layout-11-11-26.csv")
+            .canonicalize().unwrap().to_string_lossy().into_owned();
+        let mapping = ColumnMapping {
+            drugs: vec![
+                checkerboard_core::MappedDrug { column: 1, name: "DETA NONOate".into() },
+                checkerboard_core::MappedDrug { column: 2, name: "CFZ".into() },
+            ], response_column: 3,
+        };
+        let anchors = vec![31.25, 0.00390625];
+        let policy = DiamondPolicy { response_type: ResponseType::RawOd,
+            bootstrap_iterations: 2, random_seed: 123, ..DiamondPolicy::default() };
+        for (organism, measured_count, missing_count) in [("BB-MAB-4", 25, 0), ("BB-MAB-1", 22, 3)] {
+            let import = ImportRequest { path: path.clone(), worksheet: None,
+                start_row: 1, start_column: 1, row_limit: 0, column_limit: 0,
+                organism_column: Some(0), excluded_rows: Vec::new() };
+            let table = importer::read_table(&import).unwrap();
+            let rows = select_regimen_rows(&table, &[], Some(organism), Some(0)).unwrap();
+            let (assay, available, skipped) = diamond_assay_from_rows(&rows, &mapping).unwrap();
+            assert_eq!(skipped, 0);
+            assert_eq!(assay.rows.len(), measured_count);
+            for ((source, measured), doses) in rows.iter().zip(&assay.rows).zip(&available) {
+                assert_eq!(source[3].parse::<f64>().unwrap().to_bits(), measured.od.to_bits());
+                assert_eq!(&measured.concentrations, doses);
+            }
+            let check = check_diamond_layout(CheckDiamondLayoutRequest {
+                import: import.clone(), mapping: mapping.clone(), dose_anchors: anchors.clone(),
+                diagonal_tolerance_log2: 0.5, policy, regimen_drug_names: Vec::new(),
+                organism: Some(organism.into()), organism_column: Some(0),
+            }).unwrap();
+            assert_eq!((check.combination_locations, check.retained_locations), (7, 7));
+            let plate = check.analysis_plate.unwrap();
+            assert_eq!(plate.dilutions.iter().map(Vec::len).collect::<Vec<_>>(), [8, 11]);
+            assert_eq!(plate.locations.len(), 88);
+            assert_eq!(plate.locations.iter().filter(|cell| cell.selected && cell.replicate_count > 0).count(), measured_count);
+            assert_eq!(plate.locations.iter().filter(|cell| cell.selected && cell.replicate_count == 0).count(), missing_count);
+            if organism == "BB-MAB-4" {
+                assert_eq!(plate.dilutions[1], [0.0, 0.00390625, 0.0078125, 0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0, 2.0]);
+            }
+            let result = analyze_diamond_inner(AnalyzeDiamondRequest {
+                import, mapping: mapping.clone(), dose_anchors: anchors.clone(), policy,
+                regimen_drug_names: Vec::new(), organism: Some(organism.into()), organism_column: Some(0),
+                concentration_units: Vec::new(),
+            }, None).unwrap();
+            assert_eq!(result.dose_anchors, anchors);
+            assert_eq!(result.policy, policy);
+            assert_eq!(result.assay_locations.len(), measured_count);
+            assert!(result.curves.iter().flat_map(|curve| &curve.points).all(|point|
+                plate.locations.iter().any(|cell| cell.concentrations == point.concentrations
+                    && cell.selected && cell.replicate_count == point.replicate_count)));
+        }
+    }
+
+    #[test]
+    fn diamond_measured_and_blank_rows_use_one_original_concentration_pool() {
+        let mapping = ColumnMapping { drugs: vec![
+            checkerboard_core::MappedDrug { column: 0, name: "A".into() },
+            checkerboard_core::MappedDrug { column: 1, name: "B".into() },
+        ], response_column: 2 };
+        let rows = [
+            ["1", "1", "40.123456789"],
+            ["1.00009", "1", "30.123456789"],
+            ["1.00018", "1", ""],
+        ].map(|row| row.map(str::to_string).to_vec());
+        let (assay, available, skipped) = diamond_assay_from_rows(&rows, &mapping).unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(available, [vec![1.0, 1.0], vec![1.00018, 1.0], vec![1.00018, 1.0]]);
+        assert_eq!(assay.rows.iter().map(|row| row.concentrations.clone()).collect::<Vec<_>>(), available[..2]);
+        assert_eq!(assay.rows[0].od, 40.123456789);
+        assert_eq!(assay.rows[1].od, 30.123456789);
+    }
+
+    #[test]
     fn response_type_inference_distinguishes_scale_and_direction() {
         fn inferred(control: &str, treated: &str) -> ResponseType {
             let rows = [
@@ -2314,6 +2557,7 @@ mod tests {
             row_limit: 0,
             column_limit: 0,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let table = importer::read_table(&import).unwrap();
         let preview = import_preview(import).unwrap();
@@ -2381,6 +2625,7 @@ mod tests {
             row_limit: 0,
             column_limit: 0,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let preview = import_preview(import.clone()).unwrap();
         assert_eq!(preview.total_rows, 11_088);
@@ -2492,6 +2737,7 @@ mod tests {
             row_limit: 0,
             column_limit: 0,
             organism_column: None,
+            excluded_rows: Vec::new(),
         };
         let table = importer::read_table(&import).unwrap();
         let preview = import_preview(import).unwrap();

@@ -118,7 +118,7 @@ export function DiamondRepeatLayouts({ checks, results }: { checks: DiamondLayou
   const keyOf = (entry: DiamondLayoutRequest) => JSON.stringify([entry.request.organism, entry.request.regimenDrugNames]);
   const selectedIndex = Math.max(0, checks.findIndex((entry) => keyOf(entry) === selectedKey));
   return <section className="diamond-repeat-layout"><h2>Suggested layout for a repeat experiment</h2>
-    <p>This IC50-centered plan targets equal normalized doses and retention of every planned combination. It is a starting design, not a guarantee of the best biological precision. It replaces the dilution direction for a new experiment; it does not change the imported measurements.</p>
+    <p>Each 8 × 8 suggested grid contains a zero-dose control plus seven twofold-spaced concentrations per drug, with equal normalized doses for planned combinations. It is a starting design, not a guarantee of the best biological precision. It replaces the dilution direction for a new experiment; it does not change the imported measurements.</p>
     {!results && <p role="status">Waiting for fitted IC50 values and dose-layout checks…</p>}
     {checks.length > 1 && <div className="diamond-layout-selector"><RegimenNavigator
       regimens={checks.map((entry) => ({ id: keyOf(entry), label: entry.label }))}
@@ -126,12 +126,14 @@ export function DiamondRepeatLayouts({ checks, results }: { checks: DiamondLayou
       <span className="help-text">Layout {selectedIndex + 1} of {checks.length}</span></div>}
     {checks.slice(selectedIndex, selectedIndex + 1).map((entry) => {
       const result = results?.[selectedIndex];
-      const plan = result?.check?.repeatLayout;
+      const candidate = result?.check?.repeatLayout;
+      const plan = candidate?.dilutions.every((doses) => doses.length === 8 && doses[0] === 0
+        && doses.slice(2).every((dose, index) => Math.abs(dose / doses[index + 1] - 2) < 1e-10)) ? candidate : null;
       return <section className="diamond-repeat-regimen" key={keyOf(entry)}><h3>{entry.label}</h3>
-        {!plan ? <p className="help-text">{result?.error ?? (results ? "A complete layout needs a finite positive fitted IC50 for every drug and positive concentrations within the supported numeric range. Confirm the single-agent curves first." : "Preparing layout…")}</p>
+        {!plan ? <p className="help-text">{result?.error ?? (results ? "A complete layout needs a finite positive fitted IC50 for every drug and positive concentrations within the supported numeric range. Confirm the single-agent curves, then refresh or recalculate saved layouts to use the 8 × 8 twofold design." : "Preparing layout…")}</p>
           : <>
             <p><strong>Use these assigned anchors for the repeat:</strong> {entry.request.regimenDrugNames.map((name, index) => `${name}: ${plan.anchors[index].toLocaleString(undefined, { maximumSignificantDigits: 8 })} ${entry.units[index] ?? ""}`).join("; ")}. These follow the rounded dilution ratio and may differ from the fitted IC50 values.</p>
-            <p>Each drug’s highest concentration starts at 16 × fitted IC50. Values from 1 to below 10 round to the nearest integer; values of 10 or more round to the nearest multiple of 5. Values below 1 retain decimal precision with one significant digit. The eight lower concentrations are successive twofold dilutions. The grid axes show final well concentrations, including zero for the control and single-agent row and column.</p>
+            <p>Each drug’s highest concentration starts at 16 × fitted IC50. Values from 1 to below 10 round to the nearest integer; values of 10 or more round to the nearest multiple of 5. Values below 1 retain decimal precision with one significant digit. The six lower concentrations are successive twofold dilutions, giving seven positive levels and one zero-dose level on each axis. The grid axes show final well concentrations, including zero for the control and single-agent row and column.</p>
             <p><strong>{plan.retainedLocations}/{plan.combinationLocations} planned combination levels retained</strong> at tolerance {entry.request.diagonalToleranceLog2} log₂. Include an untreated control and replicate the controls and every dose level to estimate uncertainty. Verify stock availability and solubility before plate preparation.</p>
             {plan.warnings.map((warning) => <p className="side-warning" key={warning}>{warning}</p>)}
             <DiamondRepeatGrid plan={plan} drugNames={entry.request.regimenDrugNames} units={entry.units} />
@@ -505,10 +507,10 @@ function interactionColor(value: string) { return value === "synergistic" ? "#23
 function inhibitionColor(inhibition: number) { const amount = Math.max(0, Math.min(1, inhibition/100)); const low = [245,249,255], high = [8,29,88]; return `rgb(${low.map((value,index) => Math.round(value+(high[index]-value)*amount)).join(",")})`; }
 
 function DiamondCurves({ result }: { result: DiamondResult }) {
-  return <div className="diamond-curve-grid">{result.curves.map((curve) => <CurvePlot curve={curve} key={curve.drugNames.join("+")} />)}</div>;
+  return <div className="diamond-curve-grid">{result.curves.map((curve) => <CurvePlot curve={curve} concentrationUnits={result.concentrationUnits} key={curve.drugNames.join("+")} />)}</div>;
 }
 
-function CurvePlot({ curve }: { curve: DiamondCurve }) {
+function CurvePlot({ curve, concentrationUnits }: { curve: DiamondCurve; concentrationUnits: string[] }) {
   const width = 520, height = 300, left = 54, top = 22, right = 16, bottom = 45;
   const maxDose = Math.max(...curve.points.map((point) => point.normalizedTotalDose)) * 1.05;
   const x = (dose: number) => left + dose / maxDose * (width - left - right);
@@ -519,7 +521,10 @@ function CurvePlot({ curve }: { curve: DiamondCurve }) {
     {[0, 50, 90, 100].map((tick) => <g key={tick}><line className="chart-grid" x1={left} x2={width-right} y1={y(tick)} y2={y(tick)} /><text x={left-7} y={y(tick)+4} textAnchor="end">{tick}</text></g>)}
     <line className="chart-axis" x1={left} x2={width-right} y1={height-bottom} y2={height-bottom} /><line className="chart-axis" x1={left} x2={left} y1={top} y2={height-bottom} />
     <path d={path} fill="none" stroke="#235789" strokeWidth="2.5" />
-    {curve.points.map((point) => <circle key={point.normalizedTotalDose} cx={x(point.normalizedTotalDose)} cy={y(point.meanInhibition)} r="4" fill="#cc5a3d"><title>{fmt(point.normalizedTotalDose)} dose units · {fmt(point.meanInhibition)}% inhibition</title></circle>)}
+    {curve.points.map((point) => <circle key={point.normalizedTotalDose} cx={x(point.normalizedTotalDose)} cy={y(point.meanInhibition)} r="4" fill="#cc5a3d"><title>{[
+      `${fmt(point.normalizedTotalDose)} dose units · ${fmt(point.meanInhibition)}% inhibition`,
+      ...curve.drugIndices.map((drugIndex, index) => `${curve.drugNames[index]}: ${fmt(point.concentrations[drugIndex])}${concentrationUnits[drugIndex] ? ` ${concentrationUnits[drugIndex]}` : ""}`),
+    ].join("\n")}</title></circle>)}
     <text className="chart-axis-title" x={(left + width-right)/2} y={height-8} textAnchor="middle">Total normalized dose</text><text className="chart-axis-title" transform={`translate(15 ${(top+height-bottom)/2}) rotate(-90)`} textAnchor="middle">Inhibition (%)</text>
   </svg><figcaption><span><strong>{curve.drugNames.join(" + ")}</strong> · E∞ {fmt(curve.fit.maximumInhibition)}% · EC50 {fmt(curve.fit.ec50)} · h {fmt(curve.fit.hillSlope)} · R² {fmt(curve.fit.rSquared)}</span></figcaption></figure>;
 }

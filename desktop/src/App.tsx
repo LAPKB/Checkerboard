@@ -2,11 +2,13 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
-import { aggregateBliss, buildMapping, compareRegimens, concentrationRangeFor, exceedanceDomain, formatNumber, formatPValue, groupAnalysisUnits, hasConcentrationRanges, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, propagateSharedDrugConcentrations, regimenMicAssignmentKey, roleLabel, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
+import { aggregateBliss, buildMapping, compareRegimens, concentrationRangeFor, exceedanceDomain, formatNumber, formatPValue, groupAnalysisUnits, hasConcentrationRanges, inactiveDrugPairSummary, isClinicalWindowCell, micAssignmentKey, propagateSharedDrugConcentrations, regimenMicAssignmentKey, stratificationIndexFor, suggestMicsByOrganismDrug, validateRoles, withinClinicalWindow } from "./analysis";
 import { DrusanoComparisonWorkspace, DrusanoFitWorkspace, DrusanoRegimenWorkspace, DrusanoSamplingWorkspace, InputTypeControls, ProjectWorkspace } from "./DrusanoGreco";
 import { MusycComparisonWorkspace, MusycFitWorkspace } from "./Musyc";
 import { DiamondAnchorExplanation, DiamondAnchorGuidance, DiamondComparisonWorkspace, DiamondResultsWorkspace, DiamondRetentionCell, DiamondRepeatLayouts, DiamondSetupWorkspace, diamondRetentionAssignments, useDiamondLayoutChecks, type DiamondLayoutRequest, type DiamondLayoutResult } from "./Diamond";
 import { RegimenNavigator } from "./RegimenNavigator";
+import { ImportDataTable } from "./ImportDataTable";
+import { DiamondAnalysisPlate } from "./DiamondAnalysisPlate";
 import { appVersion, VersionHistoryButton } from "./VersionHistory";
 import logo from "./assets/logo.png";
 import {
@@ -48,6 +50,7 @@ import type {
   ResponseType,
 } from "./types";
 import "./App.css";
+import "./dose-anchors.css";
 
 type Page = "project" | "import" | "mic" | "sampling" | "analyze" | "regimen" | "results" | "compare";
 
@@ -142,6 +145,7 @@ const initialImport: ImportRequest = {
   rowLimit: 0,
   columnLimit: 0,
   organismColumn: null,
+  excludedRows: [],
 };
 
 const initialComparisonSettings: ComparisonSettings = {
@@ -345,13 +349,15 @@ function App() {
     const value = micRecordValue(drugMicValues, assignment.key, assignment.name, assignment.legacyKey);
     return value != null && Number.isFinite(value) && value > 0;
   }));
-  const diamondLayoutChecks: DiamondLayoutRequest[] = analysisType === "diamond" && micComplete && preview
+  const diamondLayoutChecks: DiamondLayoutRequest[] = analysisType === "diamond" && importReady && preview
     ? activeRegimens.flatMap((regimen) => {
       const mapping = buildMapping(preview, roles, regimen.drugNames);
       if (!mapping) return [];
+      const anchors = regimen.drugNames.map((name) => micRecordValue(drugMicValues, micAssignmentKey(regimen.organism, name), name));
+      if (anchors.some((value) => value == null || !Number.isFinite(value) || value <= 0)) return [];
       return [{ label: regimen.label, units: regimen.concentrationUnits, request: {
         import: importRequest, mapping,
-        doseAnchors: regimen.drugNames.map((name) => micRecordValue(drugMicValues, micAssignmentKey(regimen.organism, name), name)!),
+        doseAnchors: anchors as number[],
         diagonalToleranceLog2: diamondToleranceLog2,
         policy: {
           responseType: responseTypes[regimen.id] ?? regimen.suggestedResponseType,
@@ -855,11 +861,45 @@ function App() {
 
   function updateRange(field: keyof ImportRequest, value: number | string | null) {
     setRestoredSnapshot(false);
+    setPreview(null);
+    setAnalysis(null);
+    setAnalysisRegimens([]);
+    setDiamondRegimens([]);
+    setSelectedDiamondId(null);
+    setDrusanoFits([]);
+    setDrusanoSimulations({});
+    setDrusanoSamplingSummaries({});
+    setMusycFits([]);
     setImportRequest((current) => ({
       ...current,
       [field]: value,
+      excludedRows: field === "worksheet" ? [] : current.excludedRows ?? [],
       organismColumn: field === "rowLimit" ? current.organismColumn : null,
     }));
+  }
+
+  function updateRowExclusion(rowNumber: number, excluded: boolean) {
+    setRestoredSnapshot(false);
+    setImportRequest((current) => ({
+      ...current,
+      excludedRows: excluded
+        ? [...new Set([...(current.excludedRows ?? []), rowNumber])].sort((a, b) => a - b)
+        : (current.excludedRows ?? []).filter((number) => number !== rowNumber),
+    }));
+    setAnalysis(null);
+    setAnalysisRegimens([]);
+    setDiamondRegimens([]);
+    setSelectedDiamondId(null);
+    setDrusanoFits([]);
+    setDrusanoSimulations({});
+    setDrusanoSamplingSummaries({});
+    setMusycFits([]);
+    setDrugMicSuggestions({});
+    setMicEstimatesByRegimen({});
+    setDiamondAnchorEstimatesByRegimen({});
+    setDrusanoCensorSuggestion(null);
+    setError(null);
+    setBatchWarning(null);
   }
 
   function updateColumnRole(index: number, role: ColumnRole) {
@@ -1464,6 +1504,7 @@ function App() {
               <NumberField label="Columns to read" value={importRequest.columnLimit} min={0} zeroLabel="All" onChange={(value) => updateRange("columnLimit", value)} />
             </div>
             <p className="help-text">“All” reads every remaining row or column. The start row is the header row.</p>
+            <p className="help-text">Before analysis, positive concentrations within 0.01% are matched to the highest imported value in each group. Zero doses remain separate.</p>
             <InputTypeControls settings={inputSettings} setSettings={updateInputSettings} analysisType={analysisType} />
             {analysisType === "drusanoGreco" && <fieldset className="radio-field sampling-mode-field">
               <legend>Sampling analysis</legend>
@@ -1512,43 +1553,18 @@ function App() {
                     </fieldset>
                   </div>
                 </section>
-                <div className="mapping-table-wrap">
-                  <table className="mapping-table">
-                    <thead>
-                      <tr className="assignment-row">
-                        <th>Assign</th>
-                        {preview.headers.map((header, index) => (
-                          <th key={`${header}-${index}`}>
-                            <select
-                              aria-label={`Role for ${header}`}
-                              value={roles[index] ?? "ignore"}
-                              onChange={(event) => updateColumnRole(index, event.target.value as ColumnRole)}
-                            >
-                              {roleOptions.map((role) => <option value={role} key={role}>{roleLabel(role)}</option>)}
-                            </select>
-                          </th>
-                        ))}
-                      </tr>
-                      <tr>
-                        <th>Row</th>
-                        {preview.headers.map((header, index) => <th key={`${header}-${index}`}>{header}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(selectedImportRegimen?.rows ?? preview.rows).map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                          <td className="row-number">{rowIndex + 1}</td>
-                          {preview.headers.map((_, columnIndex) => {
-                            const value = row[columnIndex];
-                            return (
-                              <td title={value ?? ""} key={columnIndex}>{displayCell(value)}</td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <ImportDataTable
+                  key={`${importRequest.path}:${importRequest.worksheet ?? ""}:${selectedImportRegimen?.id ?? "all"}`}
+                  headers={preview.headers}
+                  rows={selectedImportRegimen?.rows ?? preview.rows}
+                  rowNumbers={selectedImportRegimen ? selectedImportRegimen.rowNumbers : preview.rowNumbers}
+                  roles={roles} roleOptions={roleOptions}
+                  excludedRows={importRequest.excludedRows ?? []}
+                  disabled={busy}
+                  setExcluded={updateRowExclusion}
+                  setRole={updateColumnRole}
+                  displayCell={displayCell}
+                />
                 <div className={mappingErrors.length || !inputSettings.inputType || activeRegimens.length === 0 ? "mapping-status warning" : "mapping-status ready"}>
                   {mappingErrors.length ? mappingErrors.join(" ") : !inputSettings.inputType ? "Choose the input response type to complete import." : activeRegimens.length === 0 ? "Select at least one regimen and one organism for analysis." : !micAnalysis ? "Import, selection, and mapping are complete. Continue to the Fit tab." : analysisType === "diamond" ? "Import and mapping are complete. Continue to Dose anchors." : "Import, selection, and mapping are complete. Continue to the MIC tab."}
                 </div>
@@ -1564,6 +1580,7 @@ function App() {
           anchorEstimates={diamondAnchorEstimates}
           diamondChecks={diamondLayoutChecks}
           diamondResults={diamondLayoutResults}
+          diamondRegimens={activeRegimens}
           setAnchorValues={(next) => {
             setRestoredSnapshot(false);
             setDrugMicValues((current) => ({ ...current, ...next }));
@@ -1780,6 +1797,7 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
                     <li>Select <strong>Choose data file…</strong>. For workbooks, choose the worksheet.</li>
                     <li>Adjust the starting row/column or limits if needed. <strong>All</strong> reads every remaining row or column.</li>
                     <li>Confirm Conc A/B/C and Response assignments. Drug names and units may be mapped from separate columns or inferred from concentration headers.</li>
+                    <li>Positive concentrations within a relative tolerance of 0.01% are matched per drug before analysis. Each group uses its highest imported concentration, and its full range must fit within the tolerance. Response values and assigned MICs or dose anchors retain their precision.</li>
                     <li>For multiple regimens, use the previous/next controls or regimen menu to inspect each preview.</li>
                     <li>Choose the input type. For absorbance or fluorescence, enter 0 when responses are already blank-adjusted or enter the assay blank on the imported response scale. For control-normalized viability, the all-zero drug controls automatically distinguish fractional values near 1 from percentages near 100.</li>
                   </ol>
@@ -1804,7 +1822,7 @@ function InstructionsModal({ analysisType, close }: { analysisType: AnalysisType
                   <li>Override an anchor when the combination plate was prepared using a different fixed-ratio reference. The assigned anchors determine which wells satisfy the diagonal tolerance.</li>
                   <li>Check retained combination dose levels on Dose anchors and Analyze. If fewer than three remain, the app shows a measured layout-compatible anchor set when one is available. Enter those values only after reviewing the plate preparation; this does not redefine the fitted IC50.</li>
                   <li>Multiplying all assigned anchors by the same factor preserves the diagonal. Changing their ratios can select different wells and change the result. Shared organism–drug assignments affect every selected regimen using that pair.</li>
-                  <li>The repeat-experiment grid below the table shows drug 1 across columns and drug 2 down rows, including zero-dose axes for single agents. Maxima near 16 × fitted IC50 are rounded, then diluted twofold through nine levels. Measure the marked control, single-agent, and combination wells; unused intersections are not part of the diagonal plan. Use its listed anchors for the rounded ratio, and review provisional plans when the fitted IC50 is outside the measured single-agent range.</li>
+                  <li>The repeat-experiment design uses an 8 × 8 grid: a zero-dose control plus seven positive concentrations per drug. Maxima near 16 × fitted IC50 are rounded, then diluted twofold through six lower levels. Use the listed anchors for the rounded ratio, measure the marked control, single-agent, and combination wells, and review provisional plans when fitted IC50 is outside the measured single-agent range.</li>
                   <li>At least three positive single-agent dose levels are required for an automatic IC50 suggestion. A missing suggestion can still be completed manually.</li>
                 </ul>
               </>}
@@ -1984,13 +2002,14 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-export function MicWorkspace({ assignments, values, suggestions, anchorEstimates, diamondChecks, diamondResults, setAnchorValues, countEstimates, setValue, zeroTolerance, setZeroTolerance, busy, error, complete, diamond, drusano, importedDrusanoMics, importedMicStrata }: {
+export function MicWorkspace({ assignments, values, suggestions, anchorEstimates, diamondChecks, diamondResults, diamondRegimens, setAnchorValues, countEstimates, setValue, zeroTolerance, setZeroTolerance, busy, error, complete, diamond, drusano, importedDrusanoMics, importedMicStrata }: {
   assignments: MicAssignment[];
   values: Record<string, number | null>;
   suggestions: Record<string, number | null>;
   anchorEstimates: Record<string, DiamondDoseAnchorSuggestion>;
   diamondChecks: DiamondLayoutRequest[];
   diamondResults: DiamondLayoutResult[] | null;
+  diamondRegimens?: RegimenPreview[];
   setAnchorValues: (values: Record<string, number>) => void;
   countEstimates: Record<string, MicEstimate>;
   setValue: (key: string, value: number | null) => void;
@@ -2004,37 +2023,65 @@ export function MicWorkspace({ assignments, values, suggestions, anchorEstimates
   importedDrusanoMics: boolean;
   importedMicStrata: ImportedMicStratum[];
 }) {
-  const closestValues = Object.fromEntries(assignments.flatMap((assignment) => {
+  const [selectedAnchorRegimenId, setSelectedAnchorRegimenId] = useState<string | null>(null);
+  const anchorGroups = diamondRegimens?.length ? diamondRegimens : diamondChecks.map((entry) => ({
+    id: JSON.stringify([entry.request.organism, entry.request.regimenDrugNames]),
+    label: entry.label,
+    organism: entry.request.organism,
+    drugNames: entry.request.regimenDrugNames,
+  }));
+  const selectedAnchorGroup = anchorGroups.find((entry) => entry.id === selectedAnchorRegimenId) ?? anchorGroups[0];
+  const visibleAssignments = diamond && selectedAnchorGroup
+    ? assignments.filter((assignment) => assignment.organism === (selectedAnchorGroup.organism ?? null)
+      && selectedAnchorGroup.drugNames.includes(assignment.name))
+    : assignments;
+  const checkIndices = diamondChecks.flatMap((entry, index) => !selectedAnchorGroup
+    || (entry.request.organism ?? null) === (selectedAnchorGroup.organism ?? null)
+      && entry.request.regimenDrugNames.length === selectedAnchorGroup.drugNames.length
+      && entry.request.regimenDrugNames.every((name, drug) => name === selectedAnchorGroup.drugNames[drug]) ? [index] : []);
+  const visibleChecks = checkIndices.map((index) => diamondChecks[index]);
+  const visibleResults = diamondResults ? checkIndices.map((index) => diamondResults[index] ?? {}) : null;
+  const closestValues = Object.fromEntries(visibleAssignments.flatMap((assignment) => {
     const value = micRecordValue(suggestions, assignment.key, assignment.name, assignment.legacyKey);
     return value != null && Number.isFinite(value) && value > 0 ? [[assignment.key, value]] : [];
   }));
-  const retention = diamondRetentionAssignments(assignments, diamondChecks, diamondResults);
+  const retention = diamondRetentionAssignments(visibleAssignments, visibleChecks, visibleResults);
   return <main className="single-workspace"><section className="content-card stage-card">
-    <div className="card-heading"><div><h1>{diamond ? "DiaMOND dose anchors" : drusano ? "Drusano MIC assignments" : "MIC assignments"}</h1><p>{diamond ? "Review the single-agent IC50 suggestions, then assign anchors that match the measured combination dilution ratio. The coverage check below uses your assigned values." : drusano ? importedDrusanoMics ? "Valid imported MIC pairs define replicate strata. The editable regimen-specific pair below is a fallback for a regimen with no imported pair; imported values always take precedence." : "Each regimen has its own editable MIC pair. Suggestions use only that regimen's wells and select the lowest tested single-agent concentration whose replicate mean count is strictly below 10% of its untreated-control growth." : "Each organism has its own MIC assignment for every drug to which it was exposed. Suggestions pool repeated estimates only within the same organism–drug pair; ties use the lower value."}</p></div><span className="count-badge">{`${assignments.length} assignments`}</span></div>
+    <div className="card-heading"><div><h1>{diamond ? "DiaMOND dose anchors" : drusano ? "Drusano MIC assignments" : "MIC assignments"}</h1><p>{diamond ? "Select a drug combination and organism, then review the single-agent IC50 suggestions and assign dose anchors. The plate preview shows how those assignments select measured concentrations." : drusano ? importedDrusanoMics ? "Valid imported MIC pairs define replicate strata. The editable regimen-specific pair below is a fallback for a regimen with no imported pair; imported values always take precedence." : "Each regimen has its own editable MIC pair. Suggestions use only that regimen's wells and select the lowest tested single-agent concentration whose replicate mean count is strictly below 10% of its untreated-control growth." : "Each organism has its own MIC assignment for every drug to which it was exposed. Suggestions pool repeated estimates only within the same organism–drug pair; ties use the lower value."}</p></div><span className="count-badge">{`${visibleAssignments.length} assignments`}</span></div>
     <div className="stage-content">
+      {diamond && selectedAnchorGroup && <div className="diamond-anchor-selector">
+        <strong>Drug combination and organism</strong>
+        <RegimenNavigator regimens={anchorGroups} selectedId={selectedAnchorGroup.id} onSelect={setSelectedAnchorRegimenId} label="Dose anchor combination and organism" />
+        <span className="help-text">{anchorGroups.findIndex((entry) => entry.id === selectedAnchorGroup.id) + 1} of {anchorGroups.length} analysis sets</span>
+      </div>}
       {importedDrusanoMics && <div className="mapping-status ready">Imported MIC A and MIC B values are used directly. Blank repeated-value cells inherit the applicable imported pair; a regimen with no imported pair uses its editable fallback below.</div>}
       {importedDrusanoMics && (importedMicStrata.length ? <div className="result-table-wrap"><table className="result-table shared-drug-table"><thead><tr><th>Regimen</th><th>Organism</th><th>Drug A MIC</th><th>Drug B MIC</th></tr></thead><tbody>{importedMicStrata.map((stratum) => <tr key={stratum.key}><td>{stratum.regimenLabel}</td><td>{stratum.organism ?? "Unspecified organism"}</td><td><strong>{stratum.drugNames[0]}</strong> {format(stratum.micValues[0])}{stratum.units[0] ? ` ${stratum.units[0]}` : ""}</td><td><strong>{stratum.drugNames[1]}</strong> {format(stratum.micValues[1])}{stratum.units[1] ? ` ${stratum.units[1]}` : ""}</td></tr>)}</tbody></table></div>
         : <p className="help-text">Validating the imported per-well MIC pairs…</p>)}
       {!diamond && !drusano && <label className="compact-setting">MIC zero tolerance (viability percentage points)<input type="number" min={0} step="any" value={zeroTolerance} onChange={(event) => setZeroTolerance(Math.max(0, Number(event.target.value) || 0))} /></label>}
-      <div className="result-table-wrap"><table className={`result-table shared-drug-table${diamond ? " diamond-anchor-table" : ""}`}><thead>
+      <div className={diamond ? "diamond-anchor-overview" : undefined}>
+      <div className="result-table-wrap"><table className={`result-table shared-drug-table${diamond ? " diamond-anchor-table" : ""}`}>
+        {diamond && <colgroup>{[11, 15, 8, 10, 15, 21, 20].map((width, index) => <col key={index} style={{ width: `${width}%` }} />)}</colgroup>}
+        <thead>
         {diamond && <tr className="diamond-anchor-actions"><td colSpan={4}></td>
           <td><button type="button" className="secondary-button" aria-label="Use Closest Anchor values" disabled={busy || Object.keys(closestValues).length === 0} onClick={() => setAnchorValues(closestValues)}>Use these values</button></td>
           <td><button type="button" className="secondary-button" aria-label="Use Maximum Dose Retention values" disabled={busy || !retention.complete} onClick={() => setAnchorValues(retention.values)}>Use these values</button>
             {retention.conflict && <small className="table-note">Shared drugs have different anchors across regimens. Assign values manually or select one regimen.</small>}
           </td><td></td></tr>}
         <tr>{drusano && <th>Regimen</th>}<th>Organism</th><th>Drug</th><th>Units</th>{diamond && <th>Fitted IC50</th>}{drusano && <><th>Untreated mean</th><th>10% threshold</th></>}<th>{diamond ? "Closest Anchor" : importedDrusanoMics ? "Suggested fallback MIC" : "Suggested MIC"}</th>{diamond && <th>Maximum Dose Retention</th>}<th>{diamond ? "Assigned Dose Anchor" : importedDrusanoMics ? "Assigned fallback MIC" : "Assigned MIC"}</th></tr></thead><tbody>
-        {assignments.map((assignment) => {
+        {visibleAssignments.map((assignment) => {
           const assigned = micRecordValue(values, assignment.key, assignment.name, assignment.legacyKey);
           const suggested = micRecordValue(suggestions, assignment.key, assignment.name, assignment.legacyKey);
           const anchorEstimate = anchorEstimates[assignment.key];
           const countEstimate = countEstimates[assignment.key];
           const organism = assignment.organism ?? "Unspecified organism";
-          return <tr key={assignment.key}>{drusano && <td>{assignment.regimenLabel}</td>}<td>{organism}</td><td><strong>{assignment.name}</strong></td><td>{assignment.unit || "—"}</td>{diamond && <td>{anchorEstimate?.fittedIc50 == null ? "—" : format(anchorEstimate.fittedIc50)}</td>}{drusano && <><td>{countEstimate?.controlMean == null ? "—" : format(countEstimate.controlMean)}</td><td>{countEstimate?.thresholdResponse == null ? "—" : format(countEstimate.thresholdResponse)}</td></>}<td>{suggested == null ? "—" : format(suggested)}{diamond && anchorEstimate?.meanInhibitionAtAnchor != null ? <small className="table-note">{format(anchorEstimate.meanInhibitionAtAnchor)}% inhibition</small> : null}{drusano && countEstimate?.meanResponseAtMic != null ? <small className="table-note">{format(countEstimate.meanResponseAtMic)}% of control{countEstimate.nonMonotonic ? " · warning: a higher dose crosses back above 10%" : ""}</small> : null}</td>{diamond && <td><DiamondRetentionCell organism={assignment.organism ?? null} drug={assignment.name} checks={diamondChecks} results={diamondResults} /></td>}<td><input aria-label={`${diamond ? "Dose anchor" : "MIC"} for ${assignment.name} against ${organism}${drusano ? ` in ${assignment.regimenLabel}` : ""}`} type="number" min="0" step="any" value={assigned ?? ""} onChange={(event) => { const value = Number(event.target.value); setValue(assignment.key, event.target.value === "" || !Number.isFinite(value) ? null : value); }} /></td></tr>;
+          return <tr key={assignment.key}>{drusano && <td>{assignment.regimenLabel}</td>}<td>{organism}</td><td><strong>{assignment.name}</strong></td><td>{assignment.unit || "—"}</td>{diamond && <td>{anchorEstimate?.fittedIc50 == null ? "—" : format(anchorEstimate.fittedIc50)}</td>}{drusano && <><td>{countEstimate?.controlMean == null ? "—" : format(countEstimate.controlMean)}</td><td>{countEstimate?.thresholdResponse == null ? "—" : format(countEstimate.thresholdResponse)}</td></>}<td>{suggested == null ? "—" : format(suggested)}{diamond && anchorEstimate?.meanInhibitionAtAnchor != null ? <small className="table-note">{format(anchorEstimate.meanInhibitionAtAnchor)}% inhibition</small> : null}{drusano && countEstimate?.meanResponseAtMic != null ? <small className="table-note">{format(countEstimate.meanResponseAtMic)}% of control{countEstimate.nonMonotonic ? " · warning: a higher dose crosses back above 10%" : ""}</small> : null}</td>{diamond && <td><DiamondRetentionCell organism={assignment.organism ?? null} drug={assignment.name} checks={visibleChecks} results={visibleResults} /></td>}<td><input aria-label={`${diamond ? "Dose anchor" : "MIC"} for ${assignment.name} against ${organism}${drusano ? ` in ${assignment.regimenLabel}` : ""}`} type="number" min="0" step="any" value={assigned ?? ""} onChange={(event) => { const value = Number(event.target.value); setValue(assignment.key, event.target.value === "" || !Number.isFinite(value) ? null : value); }} /></td></tr>;
         })}
       </tbody></table></div>
+      {diamond && <DiamondAnalysisPlate key={selectedAnchorGroup?.id} entry={visibleChecks[0]} result={visibleResults?.[0]} />}
+      </div>
       {diamond && <>
-        <p className="help-text">Closest Anchor uses the single-agent IC50 fit. Maximum Dose Retention gives a joint anchor set for the best measured combination direction at the current tolerance. Click “Use these values” above either column to fill Assigned Dose Anchor, then edit individual values if needed. All displayed concentrations use the Units column. Shared organism–drug assignments apply to every matching regimen; multiple regimens are listed separately in the retention cell.</p>
-        <DiamondRepeatLayouts checks={diamondChecks} results={diamondResults} />
+        <p className="help-text">Closest Anchor uses the single-agent IC50 fit. Maximum Dose Retention gives a joint anchor set for the best measured combination direction at the current tolerance. Click “Use these values” above either column to fill Assigned Dose Anchor, then edit individual values if needed. All displayed concentrations use the Units column. Shared organism–drug assignments apply to every matching regimen; recheck the other combinations after changing a shared drug.</p>
+        <DiamondRepeatLayouts checks={visibleChecks} results={visibleResults} />
         <details><summary>How to interpret the anchor columns</summary><DiamondAnchorExplanation /></details>
       </>}
       {busy && <p className="help-text">{diamond ? "Fitting organism-specific single-agent IC50 values…" : drusano ? "Finding the first single-agent count below 10% of untreated growth…" : "Inferring organism-specific MICs across all selected regimens…"}</p>}
@@ -2643,7 +2690,7 @@ function synergyFinderInterpretation(value: number) {
 }
 
 function displayCell(value?: string) {
-  if (value === undefined || value === "") return "";
+  if (value === undefined || value.trim() === "") return "";
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric.toFixed(3) : value;
 }
