@@ -152,6 +152,8 @@ mod broker_fixture {
         .parse()
         .expect("lease id");
         let issue = LeaseIssue {
+            entitlement_revision: 0,
+            machine_id: None,
             account_id: OpaqueId::new(state.account_id.clone()).expect("account id"),
             license_id: OpaqueId::new(format!("license-{}", state.account_id)).expect("license id"),
             lease_id,

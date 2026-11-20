@@ -2895,8 +2895,8 @@ dependencies = [
 
 [[package]]
 name = "lapkb-authorization-protocol"
-version = "0.2.10"
-source = "git+ssh://git@github.com/LAPKB/desktop-authorization.git?rev=7bfdaa456a9dfac900618d80d7cc374fc4c3e4d3#7bfdaa456a9dfac900618d80d7cc374fc4c3e4d3"
+version = "0.2.17"
+source = "git+ssh://git@github.com/LAPKB/desktop-authorization.git?rev=60f64614a366df2323d52dc617da0af600653661#60f64614a366df2323d52dc617da0af600653661"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2912,10 +2912,11 @@ dependencies = [
 [[package]]
 name = "lapkb-desktop-session"
 version = "0.1.0"
-source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=238b96237dd658d5ca16fa3261787ce64c1e8509#238b96237dd658d5ca16fa3261787ce64c1e8509"
+source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=c5d018f6ef8e5270913ecd59f4ed16e67110c9e8#c5d018f6ef8e5270913ecd59f4ed16e67110c9e8"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
+ "core-foundation",
  "ed25519-dalek",
  "keyring",
  "lapkb-authorization-protocol",
@@ -2926,6 +2927,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]
