@@ -46,7 +46,7 @@ rust_xlsxwriter = "0.96"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "c5d018f6ef8e5270913ecd59f4ed16e67110c9e8", features = ["client"] }
+lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "e8bcc74de8de447e7612b7628fcc211c51dac3f1", features = ["client"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

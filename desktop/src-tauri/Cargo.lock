@@ -2912,7 +2912,7 @@ dependencies = [
 [[package]]
 name = "lapkb-desktop-session"
 version = "0.1.0"
-source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=c5d018f6ef8e5270913ecd59f4ed16e67110c9e8#c5d018f6ef8e5270913ecd59f4ed16e67110c9e8"
+source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=e8bcc74de8de447e7612b7628fcc211c51dac3f1#e8bcc74de8de447e7612b7628fcc211c51dac3f1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
