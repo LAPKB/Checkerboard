@@ -13,7 +13,6 @@ use std::{
     path::{Component, Path, PathBuf, Prefix},
     process::{Command, Stdio},
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
 };
 use windows_sys::Win32::{
     Foundation::{
@@ -28,7 +27,6 @@ use windows_sys::Win32::{
     System::{Com::CoTaskMemFree, Registry::*, Threading::*},
     UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath},
 };
-static STARTUP_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 const PRODUCT: &str = "LAPKB Launcher";
 const BINARY: &str = "lapkb-launcher.exe";
 const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\LAPKB Launcher";
@@ -542,10 +540,7 @@ fn reject_other_registrations() -> Result<(), ()> {
     Ok(())
 }
 
-pub(super) fn open_launcher(startup: bool) -> Result<(), ()> {
-    if startup && STARTUP_ATTEMPTED.swap(true, Ordering::AcqRel) {
-        return Ok(());
-    }
+pub(super) fn open_launcher() -> Result<(), ()> {
     reject_other_registrations()?;
     for (hive, view) in [
         (HKEY_LOCAL_MACHINE, RRF_SUBKEY_WOW6464KEY),
@@ -623,9 +618,10 @@ pub(super) fn open_launcher(startup: bool) -> Result<(), ()> {
     let path = root.join(BINARY);
     let mut executable = open(&path, false, true, &user)?;
     pe_product(&path, &mut executable)?;
-    // Empty argument vector, fixed direct native spawn; no credentials/shell,
+    // Only the compiled product identifier is passed. No credentials, shell,
     // renderer path, UninstallString, hidden elevation or owner replacement.
     let child = Command::new(&path)
+        .arg("--licence-for=checkerboard")
         .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

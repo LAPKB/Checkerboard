@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LAPKB_STAGING_PROFILE=public-staging
 
 target="${1:?usage: build-macos-candidate.sh <aarch64-apple-darwin|x86_64-apple-darwin> [app|dmg]}"
 phase="${2:-app}"

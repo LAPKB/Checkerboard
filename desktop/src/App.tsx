@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { createElement, lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
@@ -155,7 +155,7 @@ function App() {
   async function openLauncher() {
     setLauncherError(null);
     try {
-      await invoke("auth_open_launcher", { startup: false });
+      await invoke("auth_open_launcher");
     } catch (reason) {
       setLauncherError(errorMessage(reason));
     }
@@ -1158,6 +1158,7 @@ function ProtectedWorkspace() {
           <button className="instructions-button" disabled={busy} onClick={saveProjectSnapshot}>Save</button>
           <button className="instructions-button" disabled={busy} onClick={loadProjectSnapshot}>Load</button>
           <button className="instructions-button" onClick={() => setShowInstructions(true)}>Instructions</button>
+          {createElement("lapkb-standalone-access", { product: "checkerboard", licensed: "" })}
           <button className="quit-button" onClick={quitApplication}>Quit</button>
         </div>
       </header>

@@ -1,13 +1,9 @@
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
-#[cfg(all(feature = "local-staging", any(unix, windows)))]
-use lapkb_desktop_session::VerificationKeySet;
 #[cfg(any(unix, windows))]
 use lapkb_desktop_session::{LeaseVerifier, ProtectedApp};
 use lapkb_desktop_session::{Permit, SeatReference, SeatStatus};
@@ -20,9 +16,9 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 const LAUNCHER_BUNDLE_ID: &str = "org.lapkb.launcher";
 const ACCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TRUST_CONFIGURATION_MESSAGE: &str = "Checkmate could not initialize shared access. Check this build's trusted configuration and OS secure storage, then reopen Checkmate.";
-const AUTH_REQUIRED_MESSAGE: &str = "Open LAPKB Launcher to sign in or manage the active account.";
+const AUTH_REQUIRED_MESSAGE: &str = "Sign in here or continue in LAPKB Launcher to use Checkmate.";
 const ACCESS_LOCKED_MESSAGE: &str =
-    "Checkmate access is locked. Open LAPKB Launcher to restore access.";
+    "Checkmate access is locked. Sign in or activate offline.";
 const ACCOUNT_SWITCHED_MESSAGE: &str =
     "The LAPKB account changed. Checkmate is locked until the new account is verified.";
 #[cfg(any(target_os = "macos", all(windows, target_arch = "x86_64")))]
@@ -31,12 +27,7 @@ const LAUNCHER_OPEN_ERROR: &str = "Could not open LAPKB Launcher.";
 const LAUNCHER_OPEN_UNSUPPORTED_MESSAGE: &str =
     "Opening LAPKB Launcher from Checkmate is not supported on this platform.";
 const SEAT_REQUEST_FAILED_MESSAGE: &str =
-    "Checkmate could not request access on this computer. Open LAPKB Launcher and try again.";
-
-#[cfg(all(feature = "local-staging", any(unix, windows)))]
-mod local_staging {
-    include!(concat!(env!("OUT_DIR"), "/local_staging_config.rs"));
-}
+    "Checkmate could not request access on this computer. Check your licence and try again.";
 
 #[cfg(any(unix, windows))]
 enum SessionRuntime {
@@ -112,8 +103,6 @@ pub struct AuthState {
     inner: Arc<Mutex<AuthInner>>,
     access_revoked: AccessRevokedHook,
     status_changed: Arc<dyn Fn() + Send + Sync>,
-    #[cfg(target_os = "macos")]
-    startup_launcher_attempted: Arc<AtomicBool>,
     #[cfg(test)]
     dispatch_pause: Arc<Mutex<Option<Arc<DispatchPause>>>>,
 }
@@ -219,8 +208,6 @@ impl AuthState {
             inner: Arc::new(Mutex::new(AuthInner::default())),
             access_revoked: Arc::new(|| {}),
             status_changed: Arc::new(|| {}),
-            #[cfg(target_os = "macos")]
-            startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
         }
     }
@@ -239,8 +226,6 @@ impl AuthState {
             })),
             access_revoked: Arc::new(|| {}),
             status_changed: Arc::new(|| {}),
-            #[cfg(target_os = "macos")]
-            startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
         })
     }
@@ -274,8 +259,6 @@ impl AuthState {
             status_changed: Arc::new(move || {
                 let _ = status_app.emit("auth-status-changed", ());
             }),
-            #[cfg(target_os = "macos")]
-            startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             dispatch_pause: Arc::new(Mutex::new(None)),
         };
@@ -550,19 +533,11 @@ impl AuthState {
         }
     }
 
-    pub(crate) fn open_launcher(&self, startup: bool) -> Result<(), String> {
+    pub(crate) fn open_launcher(&self) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            if startup && self.startup_launcher_attempted.swap(true, Ordering::AcqRel) {
-                return Ok(());
-            }
-            let mut command = Command::new("/usr/bin/open");
-            if startup {
-                command.arg("-g");
-            }
-            let status = command
-                .arg("-b")
-                .arg(LAUNCHER_BUNDLE_ID)
+            let status = Command::new("/usr/bin/open")
+                .args(["-n", "-b", LAUNCHER_BUNDLE_ID, "--args", "--licence-for=checkerboard"])
                 .status()
                 .map_err(|_| LAUNCHER_OPEN_ERROR.to_string())?;
             if status.success() {
@@ -573,11 +548,11 @@ impl AuthState {
         }
         #[cfg(all(windows, target_arch = "x86_64"))]
         {
-            windows_launcher::open_launcher(startup).map_err(|_| LAUNCHER_OPEN_ERROR.to_string())
+            windows_launcher::open_launcher().map_err(|_| LAUNCHER_OPEN_ERROR.to_string())
         }
         #[cfg(not(any(target_os = "macos", all(windows, target_arch = "x86_64"))))]
         {
-            let _ = (startup, LAUNCHER_BUNDLE_ID);
+            let _ = LAUNCHER_BUNDLE_ID;
             Err(LAUNCHER_OPEN_UNSUPPORTED_MESSAGE.into())
         }
     }
@@ -656,18 +631,7 @@ fn build_session_client<R: Runtime>(app: &AppHandle<R>) -> Result<LauncherSessio
 
 #[cfg(any(unix, windows))]
 fn pinned_verifier() -> Result<LeaseVerifier, ()> {
-    #[cfg(feature = "local-staging")]
-    {
-        let kid = local_staging::SIGNING_KID.ok_or(())?;
-        let public_key = local_staging::SIGNING_PUBLIC_KEY_B64.ok_or(())?;
-        let keys =
-            VerificationKeySet::from_base64([(kid.to_owned(), public_key)]).map_err(|_| ())?;
-        Ok(LeaseVerifier::new(keys))
-    }
-    #[cfg(not(feature = "local-staging"))]
-    {
-        Err(())
-    }
+    lapkb_desktop_session::runtime::configured_lease_verifier().map_err(|_| ())
 }
 
 #[tauri::command]
@@ -678,9 +642,8 @@ pub fn auth_status(state: State<'_, AuthState>) -> AuthView {
 #[tauri::command]
 pub fn auth_open_launcher(
     state: State<'_, AuthState>,
-    startup: Option<bool>,
 ) -> Result<(), String> {
-    state.open_launcher(startup.unwrap_or(false))
+    state.open_launcher()
 }
 
 #[tauri::command]
@@ -723,8 +686,6 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
             }),
             status_changed: Arc::new(|| {}),
-            #[cfg(target_os = "macos")]
-            startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
         };
         assert!(state.record_access(true, Some("account-a".into())));
@@ -746,8 +707,6 @@ mod tests {
             status_changed: Arc::new(move || {
                 calls.fetch_add(1, Ordering::SeqCst);
             }),
-            #[cfg(target_os = "macos")]
-            startup_launcher_attempted: Arc::new(AtomicBool::new(false)),
             dispatch_pause: Arc::new(Mutex::new(None)),
         };
 

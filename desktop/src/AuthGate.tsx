@@ -1,3 +1,4 @@
+import { createElement } from "react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -214,12 +215,13 @@ export function AuthGate({
                   ? `Could not check LAPKB access: ${authStatusError}`
                   : "Checking shared LAPKB access…"}
               </p>
+              {authStatusError && createElement("lapkb-standalone-access", { product: "checkerboard" })}
               {authStatusError && (
                 <button
                   className="primary-button"
                   onClick={() => void openLauncher()}
                 >
-                  Open Launcher
+                  Continue in Launcher
                 </button>
               )}
               {launcherError && (
@@ -243,9 +245,9 @@ export function AuthGate({
                     ? `Could not check LAPKB access: ${authStatusError}`
                     : "Checking shared LAPKB access…")}
               </p>
+              {createElement("lapkb-standalone-access", { product: "checkerboard" })}
               <p className="help-text">
-                Sign in or restore your Checkmate license in LAPKB Launcher.
-                Checkmate does not store sign-in credentials.
+                Sign in or activate offline here, or continue in Launcher.
               </p>
               {authView?.seat && (
                 <SeatPanel
@@ -259,7 +261,7 @@ export function AuthGate({
                 className="primary-button"
                 onClick={() => void openLauncher()}
               >
-                Open Launcher
+                Continue in Launcher
               </button>
               {launcherError && (
                 <p className="access-error" role="alert">
@@ -304,7 +306,7 @@ function SeatPanel({
   if (seat.state === "locked") {
     return (
       <p className="seat-status" role="status">
-        Access for this computer is locked. Open LAPKB Launcher to manage it.
+        Access is locked. Sign in or activate offline.
       </p>
     );
   }

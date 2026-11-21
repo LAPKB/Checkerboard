@@ -221,7 +221,8 @@ describe("Checkmate AuthGate rendered behavior", () => {
     expect(container?.textContent).not.toContain("Checkmate access is locked");
     const button = Array.from(
       container?.querySelectorAll<HTMLButtonElement>("button") ?? [],
-    ).find((candidate) => candidate.textContent === "Open Launcher");
+    ).find((candidate) => candidate.textContent === "Continue in Launcher");
+    expect(container?.querySelector('lapkb-standalone-access[product="checkerboard"]')).not.toBeNull();
     if (!button) throw new Error("Open Launcher button is not rendered");
     await act(async () => button.click());
     expect(launcherMock).toHaveBeenCalledOnce();
