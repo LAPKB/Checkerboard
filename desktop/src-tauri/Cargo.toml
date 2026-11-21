@@ -46,8 +46,8 @@ rust_xlsxwriter = "0.96"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "3893636957c7c82cb2de8e65d0f19d517be0e7c4", features = ["runtime"] }
-tauri-plugin-lapkb-access = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "3893636957c7c82cb2de8e65d0f19d517be0e7c4" }
+lapkb-desktop-session = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "d89da51e21b8706de8d4598f415c31b848904f44", features = ["runtime"] }
+tauri-plugin-lapkb-access = { git = "ssh://git@github.com/LAPKB/Launcher.git", rev = "d89da51e21b8706de8d4598f415c31b848904f44" }
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"

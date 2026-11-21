@@ -3040,7 +3040,7 @@ dependencies = [
 [[package]]
 name = "lapkb-desktop-session"
 version = "0.1.0"
-source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=3893636957c7c82cb2de8e65d0f19d517be0e7c4#3893636957c7c82cb2de8e65d0f19d517be0e7c4"
+source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=d89da51e21b8706de8d4598f415c31b848904f44#d89da51e21b8706de8d4598f415c31b848904f44"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -5749,7 +5749,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-lapkb-access"
 version = "0.1.0"
-source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=3893636957c7c82cb2de8e65d0f19d517be0e7c4#3893636957c7c82cb2de8e65d0f19d517be0e7c4"
+source = "git+ssh://git@github.com/LAPKB/Launcher.git?rev=d89da51e21b8706de8d4598f415c31b848904f44#d89da51e21b8706de8d4598f415c31b848904f44"
 dependencies = [
  "dirs-next",
  "lapkb-desktop-session",
